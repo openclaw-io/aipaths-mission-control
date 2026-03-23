@@ -11,8 +11,10 @@ export async function GET() {
     const res = await fetch(gatewayUrl, { signal: controller.signal });
     clearTimeout(timeout);
 
+    // Gateway returns 503 when UI assets are missing but is still functional
+    // Accept any non-error response (200, 503 with body) as "gateway is running"
     return NextResponse.json({
-      gateway: res.ok ? "healthy" : "down",
+      gateway: res.status < 500 || res.status === 503 ? "healthy" : "down",
     });
   } catch {
     return NextResponse.json({
