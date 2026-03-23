@@ -22,9 +22,13 @@ async function checkGateway(): Promise<"healthy" | "down"> {
 async function checkDispatch(): Promise<"healthy" | "down"> {
   try {
     const { stdout } = await execAsync("launchctl list ai.openclaw.dispatch 2>&1", { timeout: 3000 });
-    // If it has a PID, it's running
-    const pidMatch = stdout.match(/"PID"\s*=\s*(\d+)/);
-    return pidMatch ? "healthy" : "down";
+    // Dispatch runs every 10 min (not always-on). Check last exit status = 0
+    const exitMatch = stdout.match(/"LastExitStatus"\s*=\s*(\d+)/);
+    if (exitMatch) {
+      return exitMatch[1] === "0" ? "healthy" : "down";
+    }
+    // If loaded in launchctl at all, it's configured
+    return stdout.includes('"Label"') ? "healthy" : "down";
   } catch {
     return "down";
   }
