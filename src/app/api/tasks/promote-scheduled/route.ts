@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 
 export const dynamic = "force-dynamic";
@@ -9,7 +9,7 @@ export const dynamic = "force-dynamic";
  * - If not blocked by dependency → status = "new" (Ready)
  * - If blocked by dependency → stays blocked (cascade will handle it)
  */
-export async function POST() {
+export async function POST(request: NextRequest) {
   const supabase = await createClient();
 
   const { data: { user } } = await supabase.auth.getUser();
@@ -30,7 +30,6 @@ export async function POST() {
   if (!tasks || tasks.length === 0) return NextResponse.json({ promoted: 0 });
 
   let promoted = 0;
-  const webhookUrl = process.env.DISCORD_TASK_ROUTER_WEBHOOK;
 
   for (const task of tasks) {
     // If has dependency, check if it's done
@@ -51,13 +50,21 @@ export async function POST() {
     await supabase.from("agent_tasks").update(updates).eq("id", task.id);
     promoted++;
 
-    // Notify the assigned agent
-    if (task.agent && task.agent !== "gonza" && webhookUrl) {
-      fetch(webhookUrl, {
+    // Notify the assigned agent (Discord + gateway wake)
+    if (task.agent && task.agent !== "gonza") {
+      // Call internal notify API which handles both Discord webhook + agent wake
+      fetch(`http://localhost:3001/api/tasks/notify`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          // Forward auth cookies from the current request
+          "Cookie": request.headers.get("cookie") || "",
+        },
         body: JSON.stringify({
-          content: `📅 Scheduled task now ready → @${task.agent}: "${task.title}"`,
+          taskId: task.id,
+          agent: task.agent,
+          title: task.title,
+          action: "promoted",
         }),
       }).catch(() => {});
     }

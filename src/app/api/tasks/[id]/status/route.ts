@@ -50,23 +50,26 @@ export async function PATCH(
       .eq("depends_on", id)
       .in("status", ["new", "pending_approval"]);
 
-    // Notify unblocked agents via Discord webhook
+    // Notify unblocked agents (Discord + gateway wake)
     if (unblocked && unblocked.length > 0) {
-      const webhookUrl = process.env.DISCORD_TASK_ROUTER_WEBHOOK;
-      if (webhookUrl) {
-        for (const task of unblocked) {
-          const action = task.status === "pending_approval" ? "needs approval" : "unblocked";
-          try {
-            await fetch(webhookUrl, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                content: `🔓 Task ${action}: "${task.title}" → @${task.agent}`,
-              }),
-            });
-          } catch (err) {
-            console.error("[status] Failed to notify:", err);
-          }
+      for (const task of unblocked) {
+        const action = task.status === "pending_approval" ? "approved" : "unblocked";
+        try {
+          await fetch("http://localhost:3001/api/tasks/notify", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Cookie": request.headers.get("cookie") || "",
+            },
+            body: JSON.stringify({
+              taskId: task.id,
+              agent: task.agent,
+              title: task.title,
+              action,
+            }),
+          });
+        } catch (err) {
+          console.error("[status] Failed to notify:", err);
         }
       }
     }
