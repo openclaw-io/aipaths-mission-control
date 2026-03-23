@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { createServiceClient } from "@/lib/supabase/admin";
 
 export const dynamic = "force-dynamic";
 
@@ -82,14 +83,32 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: `Unknown agent: ${agent}` }, { status: 400 });
   }
 
-  // Build notification message
-  const messages: Record<string, string> = {
-    created: `📋 New task assigned to you in Mission Control: "${title}"\n\nCheck the task board for details and instructions.`,
-    unblocked: `🔓 Task unblocked and ready in Mission Control: "${title}"\n\nCheck the task board for details and instructions.`,
-    approved: `✅ Task approved by Gonza in Mission Control: "${title}"\n\nCheck the task board for details and instructions.`,
-    promoted: `📅 Scheduled task now ready in Mission Control: "${title}"\n\nCheck the task board for details and instructions.`,
+  // Fetch full task details for the wake message
+  let instruction = "";
+  if (taskId) {
+    const adminDb = createServiceClient();
+    const { data: task } = await adminDb
+      .from("agent_tasks")
+      .select("instruction")
+      .eq("id", taskId)
+      .single();
+    if (task?.instruction) instruction = task.instruction;
+  }
+
+  // Build notification message with full context
+  const actionLabels: Record<string, string> = {
+    created: "📋 New task assigned to you",
+    unblocked: "🔓 Task unblocked and ready",
+    approved: "✅ Task approved by Gonza",
+    promoted: "📅 Scheduled task now ready",
   };
-  const message = messages[action] || `📋 Task update in Mission Control: "${title}"`;
+  const label = actionLabels[action] || "📋 Task update";
+
+  let message = `${label}: "${title}" (task ID: ${taskId})\n`;
+  if (instruction) {
+    message += `\n## Instructions\n${instruction}\n`;
+  }
+  message += `\nWhen done, update the task status using the mission-control skill.`;
 
   // 1. Discord webhook (for Gonza's visibility)
   const webhookUrl = process.env.DISCORD_TASK_ROUTER_WEBHOOK;
