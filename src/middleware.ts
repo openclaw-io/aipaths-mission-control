@@ -32,9 +32,10 @@ export async function middleware(request: NextRequest) {
     return supabaseResponse;
   }
 
-  // Allow agent API and internal server-to-server calls without cookie auth
+  // Allow agent API, memory search, and internal server-to-server calls without cookie auth
   if (
     request.nextUrl.pathname.startsWith("/api/agent/") ||
+    request.nextUrl.pathname.startsWith("/api/memory/") ||
     request.nextUrl.pathname === "/api/tasks/notify" ||
     request.nextUrl.pathname === "/api/tasks/promote-scheduled"
   ) {
