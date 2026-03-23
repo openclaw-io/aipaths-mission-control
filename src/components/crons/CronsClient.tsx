@@ -43,7 +43,6 @@ const TABS = [
   { id: "all", label: "All", emoji: "📋" },
   { id: "scheduled", label: "Scheduled", emoji: "⏰" },
   { id: "heartbeats", label: "Heartbeats", emoji: "💓" },
-  { id: "services", label: "Services", emoji: "🔄" },
 ];
 
 function formatDuration(ms: number | null): string {
@@ -105,7 +104,6 @@ export default function CronsClient({ crons, logs }: CronsClientProps) {
 
   const tabCounts: Record<string, number> = {
     all: crons.length,
-    services: crons.filter((c) => c.category === "services").length,
     scheduled: crons.filter((c) => c.category === "scheduled").length,
     heartbeats: crons.filter((c) => c.category === "heartbeats").length,
   };
