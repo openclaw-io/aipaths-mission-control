@@ -28,9 +28,9 @@ const STATUS_DOT: Record<string, string> = {
 
 const TABS = [
   { id: "all", label: "All", emoji: "📋" },
-  { id: "services", label: "Services", emoji: "🔄" },
   { id: "scheduled", label: "Scheduled", emoji: "⏰" },
   { id: "heartbeats", label: "Heartbeats", emoji: "💓" },
+  { id: "services", label: "Services", emoji: "🔄" },
 ];
 
 function formatDuration(ms: number | null): string {
