@@ -66,13 +66,26 @@ export default function CronsClient({ crons, logs }: CronsClientProps) {
     ? crons
     : crons.filter((c) => c.category === activeTab);
 
-  // Sort crons: errors first, then by last_run_at DESC
+  // Parse schedule to frequency rank (lower = more frequent = higher in list)
+  function scheduleRank(schedule: string): number {
+    const s = schedule.toLowerCase();
+    if (s.includes("always")) return 0;
+    if (s.includes("1 min")) return 1;
+    if (s.includes("5 min")) return 5;
+    if (s.includes("15 min")) return 15;
+    if (s.includes("30 min")) return 30;
+    if (s.includes("1 hour") || s.includes("hourly")) return 60;
+    if (s.includes("daily") || s.includes("1 day")) return 1440;
+    if (s.includes("weekly")) return 10080;
+    if (s.includes("disabled")) return 99999;
+    return 1000; // unknown
+  }
+
+  // Sort crons: errors first, then by frequency (most frequent first)
   const sortedCrons = [...filteredCrons].sort((a, b) => {
     if (a.last_status === "error" && b.last_status !== "error") return -1;
     if (a.last_status !== "error" && b.last_status === "error") return 1;
-    const aTime = a.last_run_at ? new Date(a.last_run_at).getTime() : 0;
-    const bTime = b.last_run_at ? new Date(b.last_run_at).getTime() : 0;
-    return bTime - aTime;
+    return scheduleRank(a.schedule) - scheduleRank(b.schedule);
   });
 
   // Filter logs: by tab category AND selected crons
