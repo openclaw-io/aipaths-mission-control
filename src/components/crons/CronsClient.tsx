@@ -238,6 +238,7 @@ export default function CronsClient({ crons, logs }: CronsClientProps) {
                 : "No logs match the current filter."}
             </p>
           ) : (
+            <>
             <div className="space-y-1.5">
               {filteredLogs.slice(0, visibleLogs).map((log) => (
                 <div
@@ -293,6 +294,7 @@ export default function CronsClient({ crons, logs }: CronsClientProps) {
                 Load more ({filteredLogs.length - visibleLogs} remaining)
               </button>
             )}
+            </>
           )}
         </div>
       </div>
