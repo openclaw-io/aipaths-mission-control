@@ -107,13 +107,29 @@ export async function POST(request: NextRequest) {
     unblocked: "🔓 Task unblocked and ready",
     approved: "✅ Task approved by Gonza",
     promoted: "📅 Scheduled task now ready",
+    completed: "✅ Task you requested was completed",
+    failed: "❌ Task you requested has failed",
   };
   const label = actionLabels[action] || "📋 Task update";
+  const isCompletion = action === "completed" || action === "failed";
 
   let message = `${label}: "${title}" (task ID: ${taskId})\n`;
-  if (instruction) {
+  if (isCompletion) {
+    // For completion notifications, include result/error from the task
+    const adminDb = createServiceClient();
+    const { data: fullTask } = await adminDb
+      .from("agent_tasks")
+      .select("result, error, agent")
+      .eq("id", taskId)
+      .single();
+    if (fullTask?.result) message += `\n**Result:** ${fullTask.result}\n`;
+    if (fullTask?.error) message += `\n**Error:** ${fullTask.error}\n`;
+    if (fullTask?.agent) message += `\n_Completed by: ${fullTask.agent}_\n`;
+  } else if (instruction) {
     message += `\n## Instructions\n${instruction}\n`;
   }
+
+  if (!isCompletion) {
   message += `\n## REQUIRED: Update task status via Mission Control API
 **Before you start working**, claim the task:
 \`\`\`bash
@@ -129,6 +145,7 @@ If you fail, mark it failed:
 \`\`\`bash
 curl -s -X PATCH -H "Authorization: Bearer $MISSION_CONTROL_API_KEY" -H "Content-Type: application/json" "http://localhost:3001/api/agent/tasks/${taskId}" -d '{"status": "failed", "error": "What went wrong"}'
 \`\`\``;
+  }
 
   // 1. Discord webhook (for Gonza's visibility)
   const webhookUrl = process.env.DISCORD_TASK_ROUTER_WEBHOOK;
