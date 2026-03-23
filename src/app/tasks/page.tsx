@@ -15,6 +15,11 @@ export interface Task {
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
+  assignee: string | null;
+  task_type: string;
+  scheduled_for: string | null;
+  error: string | null;
+  created_by: string | null;
 }
 
 export default async function TasksPage() {
