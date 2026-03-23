@@ -1,10 +1,35 @@
-export default function TasksPage() {
-  return (
-    <div>
-      <h1 className="text-3xl font-bold text-white">📋 Tasks</h1>
-      <p className="mt-2 text-gray-400">
-        Track and assign tasks to agents.
-      </p>
-    </div>
-  );
+import { createClient } from "@/lib/supabase/server";
+import { TasksClient } from "@/components/tasks/TasksClient";
+
+export interface Task {
+  id: string;
+  title: string;
+  agent: string;
+  status: string;
+  priority: string | null;
+  instruction: string | null;
+  result: string | null;
+  tags: string[] | null;
+  depends_on: string | null;
+  due_date: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export default async function TasksPage() {
+  const supabase = await createClient();
+
+  const { data, error } = await supabase
+    .from("agent_tasks")
+    .select("*")
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    console.error("[TasksPage] Failed to fetch tasks:", error);
+  }
+
+  const tasks: Task[] = data ?? [];
+
+  return <TasksClient initialTasks={tasks} />;
 }
