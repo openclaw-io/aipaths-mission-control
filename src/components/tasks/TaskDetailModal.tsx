@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import type { Task } from "@/app/tasks/page";
 import { timeAgo } from "@/lib/utils";
+import { EditTaskModal } from "./EditTaskModal";
 
 const AGENT_EMOJI: Record<string, string> = {
   strategist: "🧠",
@@ -16,18 +17,6 @@ const AGENT_EMOJI: Record<string, string> = {
   gonza: "👤",
 };
 
-const AGENTS = [
-  { id: "strategist", name: "Strategist" },
-  { id: "youtube", name: "YouTube Director" },
-  { id: "content", name: "Content Director" },
-  { id: "marketing", name: "Marketing Director" },
-  { id: "dev", name: "Dev Director" },
-  { id: "community", name: "Community Director" },
-  { id: "editor", name: "Editor" },
-  { id: "legal", name: "Legal" },
-  { id: "gonza", name: "👤 Gonza" },
-];
-
 const STATUS_BADGE: Record<string, { label: string; color: string }> = {
   new: { label: "Ready", color: "bg-blue-500/20 text-blue-400" },
   in_progress: { label: "In Progress", color: "bg-green-500/20 text-green-400" },
@@ -36,9 +25,6 @@ const STATUS_BADGE: Record<string, { label: string; color: string }> = {
   failed: { label: "Failed", color: "bg-red-500/20 text-red-400" },
   pending_approval: { label: "Needs Approval", color: "bg-yellow-500/20 text-yellow-400" },
 };
-
-const inputClass =
-  "w-full rounded-lg border border-gray-700 bg-[#1a1a24] px-3 py-2 text-sm text-white placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-500";
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -64,23 +50,16 @@ export function TaskDetailModal({
   onTaskUpdated?: (task: Task) => void;
   onTaskDeleted?: (taskId: string) => void;
 }) {
-  const [editing, setEditing] = useState(false);
-  const [editTitle, setEditTitle] = useState(task.title);
-  const [editInstruction, setEditInstruction] = useState(task.instruction || "");
-  const [editAgent, setEditAgent] = useState(task.agent);
-  const [saving, setSaving] = useState(false);
+  const [showEdit, setShowEdit] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     function handleKey(e: KeyboardEvent) {
-      if (e.key === "Escape") {
-        if (editing) setEditing(false);
-        else onClose();
-      }
+      if (e.key === "Escape" && !showEdit) onClose();
     }
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [onClose, editing]);
+  }, [onClose, showEdit]);
 
   const dependency = task.depends_on
     ? allTasks.find((t) => t.id === task.depends_on)
@@ -97,28 +76,6 @@ export function TaskDetailModal({
     if (res.ok) {
       onStatusChange?.(task.id, newStatus);
       onClose();
-    }
-  }
-
-  async function handleSave() {
-    setSaving(true);
-    try {
-      const res = await fetch(`/api/tasks/${task.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title: editTitle.trim(),
-          instruction: editInstruction.trim() || null,
-          agent: editAgent,
-        }),
-      });
-      if (res.ok) {
-        const updated = await res.json();
-        onTaskUpdated?.(updated);
-        setEditing(false);
-      }
-    } finally {
-      setSaving(false);
     }
   }
 
@@ -142,36 +99,14 @@ export function TaskDetailModal({
         {/* Header */}
         <div className="flex items-start justify-between border-b border-gray-800 px-6 py-4">
           <div className="flex-1 min-w-0 pr-4">
-            {editing ? (
-              <input
-                type="text"
-                value={editTitle}
-                onChange={(e) => setEditTitle(e.target.value)}
-                className="w-full border-0 bg-transparent text-lg font-semibold text-white focus:outline-none"
-                autoFocus
-              />
-            ) : (
-              <h2 className="text-lg font-semibold text-white leading-snug">{task.title}</h2>
-            )}
+            <h2 className="text-lg font-semibold text-white leading-snug">{task.title}</h2>
             <div className="mt-2 flex items-center gap-2">
               <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${badge.color}`}>
                 {badge.label}
               </span>
-              {editing ? (
-                <select
-                  value={editAgent}
-                  onChange={(e) => setEditAgent(e.target.value)}
-                  className="rounded border border-gray-700 bg-[#1a1a24] px-2 py-0.5 text-xs text-white focus:outline-none"
-                >
-                  {AGENTS.map((a) => (
-                    <option key={a.id} value={a.id}>{a.name}</option>
-                  ))}
-                </select>
-              ) : (
-                <span className="text-sm text-gray-400">
-                  {AGENT_EMOJI[task.agent] ?? "🤖"} {task.agent}
-                </span>
-              )}
+              <span className="text-sm text-gray-400">
+                {AGENT_EMOJI[task.agent] ?? "🤖"} {task.agent}
+              </span>
             </div>
           </div>
           <button
@@ -185,42 +120,28 @@ export function TaskDetailModal({
         {/* Body */}
         <div className="px-6 py-4 space-y-4">
           {/* Instruction */}
-          {editing ? (
-            <div>
-              <span className="text-xs font-medium uppercase tracking-wider text-gray-600">Instructions</span>
-              <textarea
-                value={editInstruction}
-                onChange={(e) => setEditInstruction(e.target.value)}
-                rows={4}
-                placeholder="Task instructions..."
-                className={`mt-1 ${inputClass}`}
-              />
-            </div>
-          ) : (
-            task.instruction && (
-              <Field label="Instructions">
-                <p className="text-sm text-gray-300 whitespace-pre-wrap">{task.instruction}</p>
-              </Field>
-            )
+          {task.instruction && (
+            <Field label="Instructions">
+              <p className="text-sm text-gray-300 whitespace-pre-wrap">{task.instruction}</p>
+            </Field>
           )}
 
           {/* Result */}
-          {!editing && task.result && (
+          {task.result && (
             <Field label="Result">
               <p className="text-sm text-gray-300 whitespace-pre-wrap">{task.result}</p>
             </Field>
           )}
 
           {/* Error */}
-          {!editing && task.error && (
+          {task.error && (
             <Field label="Error">
               <p className="text-sm text-red-400 whitespace-pre-wrap">{task.error}</p>
             </Field>
           )}
 
           {/* Metadata grid */}
-          {!editing && (
-            <div className="grid grid-cols-2 gap-3 pt-2 border-t border-gray-800">
+          <div className="grid grid-cols-2 gap-3 pt-2 border-t border-gray-800">
               <Field label="Created">
                 <p className="text-sm text-gray-300">{timeAgo(task.created_at)}</p>
               </Field>
@@ -258,10 +179,9 @@ export function TaskDetailModal({
                 </Field>
               )}
             </div>
-          )}
 
           {/* Dependencies */}
-          {!editing && (dependency || dependents.length > 0) && (
+          {(dependency || dependents.length > 0) && (
             <div className="pt-2 border-t border-gray-800 space-y-2">
               {dependency && (
                 <Field label="Depends on">
@@ -289,70 +209,61 @@ export function TaskDetailModal({
 
         {/* Footer */}
         <div className="border-t border-gray-800 px-6 py-4 flex items-center">
-          {editing ? (
-            <>
-              <div className="flex-1" />
+          <div className="flex-1" />
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowEdit(true)}
+              className="rounded-lg px-3 py-1.5 text-sm text-gray-400 hover:text-white hover:bg-[#1a1a24] transition"
+            >
+              ✏️ Edit
+            </button>
+            <button
+              onClick={handleDelete}
+              disabled={deleting}
+              className="rounded-lg px-3 py-1.5 text-sm text-gray-400 hover:text-red-400 hover:bg-red-500/10 transition disabled:opacity-50"
+            >
+              🗑️ Delete
+            </button>
+            {(task.status === "pending_approval" || task.assignee === "gonza") && (
               <button
-                onClick={() => setEditing(false)}
-                className="rounded-lg px-4 py-2 text-sm text-gray-400 hover:text-white transition"
+                onClick={() => handleAction("done")}
+                className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-500 transition"
               >
-                Cancel
+                ✅ Approve
               </button>
-              <button
-                onClick={handleSave}
-                disabled={saving || !editTitle.trim()}
-                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 transition disabled:opacity-50"
-              >
-                {saving ? "Saving..." : "Save"}
-              </button>
-            </>
-          ) : (
-            <>
-              {/* Edit / Delete on the right */}
-              <div className="flex-1" />
-              <div className="flex items-center gap-2">
+            )}
+            {task.status === "failed" && (
+              <>
                 <button
-                  onClick={() => setEditing(true)}
-                  className="rounded-lg px-3 py-1.5 text-sm text-gray-400 hover:text-white hover:bg-[#1a1a24] transition"
+                  onClick={() => handleAction("new")}
+                  className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 transition"
                 >
-                  ✏️ Edit
+                  🔄 Retry
                 </button>
                 <button
-                  onClick={handleDelete}
-                  disabled={deleting}
-                  className="rounded-lg px-3 py-1.5 text-sm text-gray-400 hover:text-red-400 hover:bg-red-500/10 transition disabled:opacity-50"
+                  onClick={() => handleAction("done")}
+                  className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-500 transition"
                 >
-                  🗑️ Delete
+                  ✅ Resolve
                 </button>
-                {(task.status === "pending_approval" || task.assignee === "gonza") && (
-                  <button
-                    onClick={() => handleAction("done")}
-                    className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-500 transition"
-                  >
-                    ✅ Approve
-                  </button>
-                )}
-                {task.status === "failed" && (
-                  <>
-                    <button
-                      onClick={() => handleAction("new")}
-                      className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 transition"
-                    >
-                      🔄 Retry
-                    </button>
-                    <button
-                      onClick={() => handleAction("done")}
-                      className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-500 transition"
-                    >
-                      ✅ Resolve
-                    </button>
-                  </>
-                )}
-              </div>
-            </>
-          )}
+              </>
+            )}
+          </div>
         </div>
       </div>
+
+      {/* Edit Modal */}
+      {showEdit && (
+        <EditTaskModal
+          task={task}
+          existingTasks={allTasks}
+          onSaved={(updated) => {
+            onTaskUpdated?.(updated);
+            onClose();
+          }}
+          onClose={() => setShowEdit(false)}
+        />
+      )}
     </div>
   );
 }
