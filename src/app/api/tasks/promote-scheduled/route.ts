@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
 
 export const dynamic = "force-dynamic";
 
@@ -10,10 +9,9 @@ export const dynamic = "force-dynamic";
  * - If blocked by dependency → stays blocked (cascade will handle it)
  */
 export async function POST() {
-  const supabase = await createClient();
-
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  // Use service client — this is called on page load, cookies may not be available
+  const { createServiceClient } = await import("@/lib/supabase/admin");
+  const supabase = createServiceClient();
 
   const now = new Date().toISOString();
 
@@ -52,20 +50,24 @@ export async function POST() {
 
     // Notify the assigned agent (Discord + gateway wake)
     if (task.agent && task.agent !== "gonza") {
-      // Call internal notify API which handles both Discord webhook + agent wake
-      fetch(`http://localhost:3001/api/tasks/notify`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${process.env.AGENT_API_KEY}`,
-        },
-        body: JSON.stringify({
-          taskId: task.id,
-          agent: task.agent,
-          title: task.title,
-          action: "promoted",
-        }),
-      }).catch(() => {});
+      try {
+        const notifyRes = await fetch(`http://localhost:3001/api/tasks/notify`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${process.env.AGENT_API_KEY}`,
+          },
+          body: JSON.stringify({
+            taskId: task.id,
+            agent: task.agent,
+            title: task.title,
+            action: "promoted",
+          }),
+        });
+        console.log(`[promote] notify ${task.agent}: HTTP ${notifyRes.status}`);
+      } catch (err: any) {
+        console.error(`[promote] notify ${task.agent} failed:`, err.message);
+      }
     }
   }
 

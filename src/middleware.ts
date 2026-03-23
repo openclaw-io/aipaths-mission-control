@@ -32,8 +32,12 @@ export async function middleware(request: NextRequest) {
     return supabaseResponse;
   }
 
-  // Allow agent API without cookie auth (uses Bearer token)
-  if (request.nextUrl.pathname.startsWith("/api/agent/")) {
+  // Allow agent API and internal server-to-server calls without cookie auth
+  if (
+    request.nextUrl.pathname.startsWith("/api/agent/") ||
+    request.nextUrl.pathname === "/api/tasks/notify" ||
+    request.nextUrl.pathname === "/api/tasks/promote-scheduled"
+  ) {
     return supabaseResponse;
   }
 
