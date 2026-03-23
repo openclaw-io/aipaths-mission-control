@@ -295,7 +295,8 @@ export function TaskBoard({
                       {dayTasks.map((task) => (
                         <div
                           key={task.id}
-                          className="rounded border border-blue-500/20 bg-[#0d0d14] px-2 py-1.5"
+                          onClick={() => setSelectedTask(task)}
+                          className="cursor-pointer rounded border border-blue-500/20 bg-[#0d0d14] px-2 py-1.5 hover:border-blue-500/40 transition"
                         >
                           <p className="text-xs text-white leading-snug line-clamp-2">
                             {task.title}
@@ -330,7 +331,8 @@ export function TaskBoard({
             {laterTasks.map((task) => (
               <div
                 key={task.id}
-                className="flex items-center gap-3 rounded-lg border border-gray-800 bg-[#111118] px-4 py-2.5"
+                onClick={() => setSelectedTask(task)}
+                className="cursor-pointer flex items-center gap-3 rounded-lg border border-gray-800 bg-[#111118] px-4 py-2.5 hover:border-gray-600 transition"
               >
                 <span className="text-xs text-gray-500 w-20 shrink-0">
                   {new Date(task.scheduled_for!).toLocaleDateString("en-US", {
