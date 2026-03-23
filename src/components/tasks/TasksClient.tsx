@@ -138,6 +138,7 @@ export function TasksClient({ initialTasks }: { initialTasks: Task[] }) {
       {showCreateForm && (
         <CreateTaskForm
           agents={AGENTS}
+          existingTasks={tasks}
           onCreated={handleTaskCreated}
           onCancel={() => setShowCreateForm(false)}
         />

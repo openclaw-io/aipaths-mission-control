@@ -42,5 +42,35 @@ export async function PATCH(
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
+  // After marking done, check if any dependent tasks were unblocked by the trigger
+  if (status === "done") {
+    const { data: unblocked } = await supabase
+      .from("agent_tasks")
+      .select("id, title, agent, status")
+      .eq("depends_on", id)
+      .in("status", ["new", "pending_approval"]);
+
+    // Notify unblocked agents via Discord webhook
+    if (unblocked && unblocked.length > 0) {
+      const webhookUrl = process.env.DISCORD_TASK_ROUTER_WEBHOOK;
+      if (webhookUrl) {
+        for (const task of unblocked) {
+          const action = task.status === "pending_approval" ? "needs approval" : "unblocked";
+          try {
+            await fetch(webhookUrl, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                content: `🔓 Task ${action}: "${task.title}" → @${task.agent}`,
+              }),
+            });
+          } catch (err) {
+            console.error("[status] Failed to notify:", err);
+          }
+        }
+      }
+    }
+  }
+
   return NextResponse.json(data);
 }
