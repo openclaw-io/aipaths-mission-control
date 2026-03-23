@@ -59,6 +59,7 @@ function formatTime(iso: string): string {
 export default function CronsClient({ crons, logs }: CronsClientProps) {
   const [activeTab, setActiveTab] = useState("all");
   const [selectedCrons, setSelectedCrons] = useState<Set<string>>(new Set());
+  const [visibleLogs, setVisibleLogs] = useState(30);
 
   // Filter crons by tab
   const filteredCrons = activeTab === "all"
@@ -111,7 +112,8 @@ export default function CronsClient({ crons, logs }: CronsClientProps) {
 
   function handleTabChange(tabId: string) {
     setActiveTab(tabId);
-    setSelectedCrons(new Set()); // Reset selection on tab change
+    setSelectedCrons(new Set());
+    setVisibleLogs(30);
   }
 
   function toggleCron(cronName: string) {
@@ -236,8 +238,8 @@ export default function CronsClient({ crons, logs }: CronsClientProps) {
                 : "No logs match the current filter."}
             </p>
           ) : (
-            <div className="space-y-1.5 max-h-[600px] overflow-y-auto pr-2">
-              {filteredLogs.map((log) => (
+            <div className="space-y-1.5">
+              {filteredLogs.slice(0, visibleLogs).map((log) => (
                 <div
                   key={log.id}
                   className={`rounded-lg border bg-[#111118] px-4 py-2.5 ${
@@ -283,6 +285,14 @@ export default function CronsClient({ crons, logs }: CronsClientProps) {
                 </div>
               ))}
             </div>
+            {filteredLogs.length > visibleLogs && (
+              <button
+                onClick={() => setVisibleLogs((v) => v + 30)}
+                className="mt-3 w-full rounded-lg border border-gray-800 bg-[#111118] py-2 text-sm text-gray-400 hover:text-white hover:border-gray-600 transition"
+              >
+                Load more ({filteredLogs.length - visibleLogs} remaining)
+              </button>
+            )}
           )}
         </div>
       </div>

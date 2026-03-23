@@ -28,7 +28,8 @@ export default async function TasksPage() {
   const { data, error } = await supabase
     .from("agent_tasks")
     .select("*")
-    .order("created_at", { ascending: false });
+    .order("created_at", { ascending: false })
+    .limit(100);
 
   if (error) {
     console.error("[TasksPage] Failed to fetch tasks:", error);

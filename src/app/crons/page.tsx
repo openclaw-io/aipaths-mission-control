@@ -10,7 +10,7 @@ export default async function CronsPage() {
       .from("cron_logs")
       .select("*")
       .order("started_at", { ascending: false })
-      .limit(200),
+      .limit(100),
   ]);
 
   if (cronsResult.error) {
