@@ -69,15 +69,16 @@ export default function CronsClient({ crons, logs }: CronsClientProps) {
   function scheduleRank(schedule: string): number {
     const s = schedule.toLowerCase();
     if (s.includes("always")) return 0;
-    if (s.includes("1 min")) return 1;
-    if (s.includes("5 min")) return 5;
-    if (s.includes("15 min")) return 15;
-    if (s.includes("30 min")) return 30;
-    if (s.includes("1 hour") || s.includes("hourly")) return 60;
-    if (s.includes("daily") || s.includes("1 day")) return 1440;
-    if (s.includes("weekly")) return 10080;
     if (s.includes("disabled")) return 99999;
-    return 1000; // unknown
+    // Extract number from "every N min/hour/etc"
+    const minMatch = s.match(/(\d+)\s*min/);
+    if (minMatch) return parseInt(minMatch[1]);
+    const hourMatch = s.match(/(\d+)\s*hour/);
+    if (hourMatch) return parseInt(hourMatch[1]) * 60;
+    if (s.includes("hourly")) return 60;
+    if (s.includes("daily")) return 1440;
+    if (s.includes("weekly")) return 10080;
+    return 1000;
   }
 
   // Sort crons: errors first, then by frequency (most frequent first)
