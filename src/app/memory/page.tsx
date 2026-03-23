@@ -4,18 +4,23 @@ import { MemoryClient } from "@/components/memory/MemoryClient";
 export interface MemoryEntry {
   id: string;
   agent: string;
-  date: string;
+  type: string;
+  title: string | null;
   content: string;
+  tags: string[];
+  date: string;
   created_at: string;
+  updated_at: string;
+  similarity?: number | null;
 }
 
 export default async function MemoryPage() {
   const supabase = await createClient();
 
   const { data, error } = await supabase
-    .from("agent_memory")
+    .from("memories")
     .select("*")
-    .order("created_at", { ascending: false })
+    .order("date", { ascending: false })
     .limit(100);
 
   if (error) {
