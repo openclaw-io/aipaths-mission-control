@@ -3,6 +3,7 @@
 import { useState } from "react";
 import type { Task } from "@/app/tasks/page";
 import { timeAgo } from "@/lib/utils";
+import { TaskDetailModal } from "./TaskDetailModal";
 
 const AGENT_EMOJI: Record<string, string> = {
   strategist: "🧠",
@@ -83,10 +84,12 @@ function TaskCard({
   task,
   allTasks,
   onStatusChange,
+  onSelect,
 }: {
   task: Task;
   allTasks: Task[];
   onStatusChange: (taskId: string, status: string) => void;
+  onSelect: (task: Task) => void;
 }) {
   const [loading, setLoading] = useState(false);
 
@@ -112,7 +115,10 @@ function TaskCard({
   }
 
   return (
-    <div className="rounded-lg border border-gray-800 bg-[#0d0d14] p-3 hover:border-gray-600 transition">
+    <div
+      onClick={() => onSelect(task)}
+      className="cursor-pointer rounded-lg border border-gray-800 bg-[#0d0d14] p-3 hover:border-gray-600 transition"
+    >
       <div className="flex items-start gap-2">
         <div className="min-w-0 flex-1">
           <p className="text-sm font-medium text-white leading-snug">{task.title}</p>
@@ -142,7 +148,7 @@ function TaskCard({
 
           {/* Actions — only for Needs You and Failed */}
           {(task.status === "pending_approval" || task.assignee === "gonza" || task.status === "failed") && (
-            <div className="mt-2 flex gap-1.5">
+            <div className="mt-2 flex gap-1.5" onClick={(e) => e.stopPropagation()}>
               {(task.status === "pending_approval" || task.assignee === "gonza") && (
                 <button
                   onClick={() => handleStatusChange("done")}
@@ -185,6 +191,8 @@ export function TaskBoard({
   tasks: Task[];
   onTaskUpdate?: (taskId: string, newStatus: string) => void;
 }) {
+  const [selectedTask, setSelectedTask] = useState<Task | null>(null);
+
   // Exclude done and scheduled tasks from columns
   const boardTasks = tasks.filter(
     (t) => t.status !== "done" && !t.scheduled_for
@@ -245,6 +253,7 @@ export function TaskBoard({
                       task={task}
                       allTasks={tasks}
                       onStatusChange={handleStatusChange}
+                      onSelect={setSelectedTask}
                     />
                   ))
                 )}
@@ -337,6 +346,19 @@ export function TaskBoard({
             ))}
           </div>
         </div>
+      )}
+
+      {/* Task Detail Modal */}
+      {selectedTask && (
+        <TaskDetailModal
+          task={selectedTask}
+          allTasks={tasks}
+          onClose={() => setSelectedTask(null)}
+          onStatusChange={(taskId, newStatus) => {
+            handleStatusChange(taskId, newStatus);
+            setSelectedTask(null);
+          }}
+        />
       )}
     </div>
   );
