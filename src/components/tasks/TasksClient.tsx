@@ -144,7 +144,20 @@ export function TasksClient({ initialTasks }: { initialTasks: Task[] }) {
       )}
 
       {/* Views */}
-      {view === "board" && <TaskBoard tasks={tasks} />}
+      {view === "board" && (
+        <TaskBoard
+          tasks={tasks}
+          onTaskUpdate={(taskId, newStatus) => {
+            setTasks((prev) =>
+              prev.map((t) =>
+                t.id === taskId
+                  ? { ...t, status: newStatus, completed_at: newStatus === "done" ? new Date().toISOString() : t.completed_at }
+                  : t
+              )
+            );
+          }}
+        />
+      )}
       {view === "calendar" && <TaskCalendar tasks={tasks} />}
       {view === "list" && (
         <>
