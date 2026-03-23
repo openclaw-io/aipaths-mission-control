@@ -193,9 +193,9 @@ export function TaskBoard({
 }) {
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
 
-  // Exclude done and scheduled tasks from columns
+  // Exclude done, scheduled, and backlog tasks from columns
   const boardTasks = tasks.filter(
-    (t) => t.status !== "done" && !t.scheduled_for
+    (t) => t.status !== "done" && !t.scheduled_for && !t.tags?.includes("backlog")
   );
 
   // Scheduled tasks for calendar
@@ -347,6 +347,38 @@ export function TaskBoard({
           </div>
         </div>
       )}
+
+      {/* Backlog */}
+      {(() => {
+        const backlogTasks = tasks.filter(
+          (t) => t.tags?.includes("backlog") && t.status !== "done"
+        );
+        if (backlogTasks.length === 0) return null;
+        return (
+          <div className="mt-6">
+            <h2 className="text-sm font-semibold uppercase tracking-wider text-gray-500 mb-3">
+              📦 Backlog ({backlogTasks.length})
+            </h2>
+            <div className="space-y-1.5">
+              {backlogTasks.map((task) => (
+                <div
+                  key={task.id}
+                  onClick={() => setSelectedTask(task)}
+                  className="cursor-pointer flex items-center gap-3 rounded-lg border border-gray-800 bg-[#111118] px-4 py-2.5 hover:border-gray-600 transition"
+                >
+                  <span className="text-sm text-white flex-1">{task.title}</span>
+                  <span className="text-xs text-gray-500">
+                    {AGENT_EMOJI[task.agent] ?? "🤖"} {task.agent}
+                  </span>
+                  <span className="text-xs text-gray-600">
+                    {timeAgo(task.created_at)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Task Detail Modal */}
       {selectedTask && (
