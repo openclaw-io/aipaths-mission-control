@@ -3,7 +3,7 @@
 import { useState } from "react";
 import type { Task } from "@/app/tasks/page";
 import { TaskRow } from "./TaskRow";
-import { CreateTaskForm } from "./CreateTaskForm";
+import { CreateTaskModal } from "./CreateTaskModal";
 import { TaskBoard } from "./TaskBoard";
 
 const AGENTS = [
@@ -133,13 +133,13 @@ export function TasksClient({ initialTasks }: { initialTasks: Task[] }) {
         </button>
       </div>
 
-      {/* Create Form */}
+      {/* Create Modal */}
       {showCreateForm && (
-        <CreateTaskForm
+        <CreateTaskModal
           agents={AGENTS}
           existingTasks={tasks}
           onCreated={handleTaskCreated}
-          onCancel={() => setShowCreateForm(false)}
+          onClose={() => setShowCreateForm(false)}
         />
       )}
 
