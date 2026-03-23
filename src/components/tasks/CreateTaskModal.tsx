@@ -224,6 +224,20 @@ export function CreateTaskModal({
       return;
     }
 
+    // Notify agent if task is immediately ready
+    if (status === "new" && agent !== "gonza") {
+      fetch("/api/tasks/notify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          taskId: data.id,
+          agent,
+          title: title.trim(),
+          action: "created",
+        }),
+      }).catch(() => {});
+    }
+
     onCreated(data as Task);
   }
 

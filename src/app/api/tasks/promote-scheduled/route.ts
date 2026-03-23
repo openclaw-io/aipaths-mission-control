@@ -20,7 +20,7 @@ export async function POST() {
   // Find scheduled tasks that are past due and still in initial states
   const { data: tasks, error } = await supabase
     .from("agent_tasks")
-    .select("id, depends_on, status")
+    .select("id, depends_on, status, agent, title")
     .not("scheduled_for", "is", null)
     .lte("scheduled_for", now)
     .in("status", ["blocked", "new"])
@@ -47,6 +47,20 @@ export async function POST() {
     if (task.status !== "new") {
       await supabase.from("agent_tasks").update({ status: "new" }).eq("id", task.id);
       promoted++;
+
+      // Notify the assigned agent
+      if (task.agent && task.agent !== "gonza") {
+        const webhookUrl = process.env.DISCORD_TASK_ROUTER_WEBHOOK;
+        if (webhookUrl) {
+          fetch(webhookUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              content: `📅 Scheduled task now ready → @${task.agent}: "${task.title}"`,
+            }),
+          }).catch(() => {});
+        }
+      }
     }
   }
 
