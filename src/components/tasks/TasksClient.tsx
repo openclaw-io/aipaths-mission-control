@@ -5,26 +5,12 @@ import type { Task } from "@/app/tasks/page";
 import { CreateTaskModal } from "./CreateTaskModal";
 import { TaskBoard } from "./TaskBoard";
 import { TaskLogs } from "./TaskLogs";
-
-const AGENTS = [
-  { id: "strategist", name: "Strategist" },
-  { id: "youtube", name: "YouTube Director" },
-  { id: "content", name: "Content Director" },
-  { id: "marketing", name: "Marketing Director" },
-  { id: "dev", name: "Dev Director" },
-  { id: "community", name: "Community Director" },
-  { id: "editor", name: "Editor" },
-  { id: "legal", name: "Legal" },
-  { id: "gonza", name: "👤 Gonza" },
-];
+import { AGENTS } from "@/lib/agents";
 
 const VIEWS = [
   { id: "board", label: "Board", emoji: "📊" },
   { id: "logs", label: "Logs", emoji: "📜" },
 ];
-
-
-
 export function TasksClient({ initialTasks }: { initialTasks: Task[] }) {
   const [tasks, setTasks] = useState<Task[]>(initialTasks);
   const [view, setView] = useState<string>("board");

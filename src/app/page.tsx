@@ -1,5 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
 import { timeAgo } from "@/lib/utils";
+import { AGENTS } from "@/lib/agents";
 
 const STATUS_COLORS: Record<string, string> = {
   done: "bg-green-500",
@@ -45,7 +46,7 @@ export default async function OverviewPage() {
   const recentMemory = recentMemoryRes.data ?? [];
 
   const stats = [
-    { label: "Total Agents", value: "8", emoji: "🤖" },
+    { label: "Total Agents", value: String(AGENTS.length), emoji: "🤖" },
     { label: "Active Tasks", value: String(activeTasks), emoji: "🔥" },
     {
       label: "Cron Health",

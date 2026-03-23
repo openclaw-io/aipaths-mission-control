@@ -3,17 +3,11 @@
 import { useState } from "react";
 import type { MemoryEntry } from "@/app/memory/page";
 import { MemoryEntryCard } from "./MemoryEntry";
+import { AGENTS as AGENT_LIST } from "@/lib/agents";
 
 const AGENTS = [
   { id: "all", name: "All Agents" },
-  { id: "strategist", name: "Strategist" },
-  { id: "youtube", name: "YouTube" },
-  { id: "content", name: "Content" },
-  { id: "marketing", name: "Marketing" },
-  { id: "dev", name: "Dev" },
-  { id: "community", name: "Community" },
-  { id: "editor", name: "Editor" },
-  { id: "legal", name: "Legal" },
+  ...AGENT_LIST.map((a) => ({ id: a.id, name: a.name })),
 ];
 
 const TYPES = [
