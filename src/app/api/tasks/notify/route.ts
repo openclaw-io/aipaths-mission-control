@@ -114,7 +114,21 @@ export async function POST(request: NextRequest) {
   if (instruction) {
     message += `\n## Instructions\n${instruction}\n`;
   }
-  message += `\nWhen done, update the task status using the mission-control skill.`;
+  message += `\n## REQUIRED: Update task status via Mission Control API
+**Before you start working**, claim the task:
+\`\`\`bash
+curl -s -X PATCH -H "Authorization: Bearer $MISSION_CONTROL_API_KEY" -H "Content-Type: application/json" "http://localhost:3001/api/agent/tasks/${taskId}" -d '{"status": "in_progress"}'
+\`\`\`
+
+**When finished**, mark it done with a result summary:
+\`\`\`bash
+curl -s -X PATCH -H "Authorization: Bearer $MISSION_CONTROL_API_KEY" -H "Content-Type: application/json" "http://localhost:3001/api/agent/tasks/${taskId}" -d '{"status": "done", "result": "Brief summary of what was done"}'
+\`\`\`
+
+If you fail, mark it failed:
+\`\`\`bash
+curl -s -X PATCH -H "Authorization: Bearer $MISSION_CONTROL_API_KEY" -H "Content-Type: application/json" "http://localhost:3001/api/agent/tasks/${taskId}" -d '{"status": "failed", "error": "What went wrong"}'
+\`\`\``;
 
   // 1. Discord webhook (for Gonza's visibility)
   const webhookUrl = process.env.DISCORD_TASK_ROUTER_WEBHOOK;
