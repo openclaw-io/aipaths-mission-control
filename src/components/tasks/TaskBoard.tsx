@@ -13,12 +13,7 @@ const AGENT_EMOJI: Record<string, string> = {
   community: "🌐",
   editor: "📝",
   legal: "⚖️",
-};
-
-const PRIORITY_DOT: Record<string, string> = {
-  high: "bg-red-500",
-  medium: "bg-yellow-500",
-  low: "bg-gray-500",
+  gonza: "👤",
 };
 
 interface BoardColumn {
@@ -119,9 +114,6 @@ function TaskCard({
   return (
     <div className="rounded-lg border border-gray-800 bg-[#0d0d14] p-3 hover:border-gray-600 transition">
       <div className="flex items-start gap-2">
-        <span
-          className={`mt-1 h-2 w-2 shrink-0 rounded-full ${PRIORITY_DOT[task.priority ?? "medium"]}`}
-        />
         <div className="min-w-0 flex-1">
           <p className="text-sm font-medium text-white leading-snug">{task.title}</p>
           <div className="mt-1.5 flex items-center gap-2 text-xs text-gray-500">

@@ -15,6 +15,7 @@ const AGENTS = [
   { id: "community", name: "Community Director" },
   { id: "editor", name: "Editor" },
   { id: "legal", name: "Legal" },
+  { id: "gonza", name: "👤 Gonza" },
 ];
 
 const VIEWS = [
