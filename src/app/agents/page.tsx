@@ -1,16 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
 import { timeAgo } from "@/lib/utils";
-
-const AGENTS = [
-  { id: "strategist", name: "Strategist", emoji: "🎯", role: "Strategy, research, weekly reports" },
-  { id: "youtube", name: "YouTube Director", emoji: "🎬", role: "Video strategy, thumbnails, SEO" },
-  { id: "content", name: "Content Director", emoji: "✍️", role: "Blog posts, docs, guides" },
-  { id: "marketing", name: "Marketing Director", emoji: "📣", role: "Email campaigns, growth" },
-  { id: "dev", name: "Dev Director", emoji: "💻", role: "Website, deployments, infrastructure" },
-  { id: "community", name: "Community Director", emoji: "🏘️", role: "Discord community management" },
-  { id: "editor", name: "Editor", emoji: "🎨", role: "Content editing, quality" },
-  { id: "legal", name: "Legal", emoji: "⚖️", role: "Legal compliance, terms" },
-];
+import { AGENTS } from "@/lib/agents";
 
 const STATUS_COLORS: Record<string, string> = {
   done: "text-green-400",

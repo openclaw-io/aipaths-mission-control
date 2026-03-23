@@ -3,17 +3,7 @@
 import { useState } from "react";
 import type { MemoryEntry } from "@/app/memory/page";
 import { timeAgo } from "@/lib/utils";
-
-const AGENT_COLORS: Record<string, string> = {
-  strategist: "bg-purple-500/20 text-purple-400",
-  youtube: "bg-red-500/20 text-red-400",
-  content: "bg-green-500/20 text-green-400",
-  marketing: "bg-orange-500/20 text-orange-400",
-  dev: "bg-blue-500/20 text-blue-400",
-  community: "bg-teal-500/20 text-teal-400",
-  editor: "bg-pink-500/20 text-pink-400",
-  legal: "bg-gray-500/20 text-gray-400",
-};
+import { getAgentBadgeClass } from "@/lib/agents";
 
 const TYPE_COLORS: Record<string, string> = {
   journal: "bg-sky-500/20 text-sky-400",
@@ -62,7 +52,7 @@ function renderMarkdown(text: string): string {
 export function MemoryEntryCard({ entry }: { entry: MemoryEntry }) {
   const [expanded, setExpanded] = useState(false);
 
-  const agentBadge = AGENT_COLORS[entry.agent] ?? "bg-gray-500/20 text-gray-400";
+  const agentBadge = getAgentBadgeClass(entry.agent);
   const typeBadge = TYPE_COLORS[entry.type] ?? "bg-gray-500/20 text-gray-400";
 
   const plainPreview =

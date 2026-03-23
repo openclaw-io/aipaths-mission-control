@@ -1,0 +1,113 @@
+"use client";
+
+import { useState, useEffect, useMemo, useRef } from "react";
+import { createClient } from "@/lib/supabase/client";
+import { buildSpriteAgents } from "@/lib/office-status";
+import type { SpriteAgent } from "@/lib/types/office";
+
+interface TaskRow {
+  id: string;
+  title: string;
+  agent: string;
+  status: string;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+interface MemoryRow {
+  agent: string;
+  date: string;
+  content: string;
+}
+
+const POLL_INTERVAL = 10_000;
+const REALTIME_TIMEOUT = 5_000;
+
+export function useOfficeAgents(
+  initialTasks: TaskRow[],
+  initialMemory: MemoryRow[],
+): SpriteAgent[] {
+  const [tasks, setTasks] = useState<TaskRow[]>(initialTasks);
+  const [memory, setMemory] = useState<MemoryRow[]>(initialMemory);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    const supabase = createClient();
+    let realtimeConnected = false;
+
+    const channel = supabase
+      .channel("office-agents")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "agent_tasks" },
+        (payload) => {
+          if (payload.eventType === "DELETE") {
+            setTasks((prev) => prev.filter((t) => t.id !== (payload.old as TaskRow).id));
+          } else {
+            const row = payload.new as TaskRow;
+            setTasks((prev) => {
+              const idx = prev.findIndex((t) => t.id === row.id);
+              if (idx >= 0) {
+                const next = [...prev];
+                next[idx] = row;
+                return next;
+              }
+              return [row, ...prev];
+            });
+          }
+        },
+      )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "agent_memory" },
+        (payload) => {
+          if (payload.eventType !== "DELETE") {
+            const row = payload.new as MemoryRow;
+            setMemory((prev) => {
+              const idx = prev.findIndex(
+                (m) => m.agent === row.agent && m.date === row.date,
+              );
+              if (idx >= 0) {
+                const next = [...prev];
+                next[idx] = row;
+                return next;
+              }
+              return [row, ...prev];
+            });
+          }
+        },
+      )
+      .subscribe((status) => {
+        if (status === "SUBSCRIBED") {
+          realtimeConnected = true;
+          if (pollRef.current) {
+            clearInterval(pollRef.current);
+            pollRef.current = null;
+          }
+        }
+      });
+
+    // Fallback: if Realtime doesn't connect in 5s, start polling
+    const fallbackTimer = setTimeout(() => {
+      if (!realtimeConnected && !pollRef.current) {
+        pollRef.current = setInterval(async () => {
+          const [tasksRes, memRes] = await Promise.all([
+            supabase.from("agent_tasks").select("*").order("created_at", { ascending: false }),
+            supabase.from("agent_memory").select("agent, date, content").order("created_at", { ascending: false }).limit(50),
+          ]);
+          if (tasksRes.data) setTasks(tasksRes.data);
+          if (memRes.data) setMemory(memRes.data);
+        }, POLL_INTERVAL);
+      }
+    }, REALTIME_TIMEOUT);
+
+    return () => {
+      clearTimeout(fallbackTimer);
+      if (pollRef.current) clearInterval(pollRef.current);
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
+  return useMemo(() => buildSpriteAgents(tasks, memory), [tasks, memory]);
+}
