@@ -5,7 +5,9 @@ export const dynamic = "force-dynamic";
 
 function checkAuth(req: NextRequest): boolean {
   const token = req.headers.get("authorization")?.replace("Bearer ", "");
-  return !!token && token === process.env.AGENT_API_KEY;
+  const key = process.env.AGENT_API_KEY;
+  if (!key) return false;
+  return !!token && token === key;
 }
 
 /**
