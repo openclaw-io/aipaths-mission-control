@@ -48,7 +48,7 @@ export function TasksClient({ initialTasks }: { initialTasks: Task[] }) {
 
   // Count tasks needing Gonza's attention
   const needsYouCount = tasks.filter(
-    (t) => t.assignee === "gonza" || t.status === "pending_approval"
+    (t) => (t.assignee === "gonza" || t.status === "pending_approval") && t.status !== "done" && t.status !== "failed"
   ).length;
 
   return (
