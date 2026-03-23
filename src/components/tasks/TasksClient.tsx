@@ -5,7 +5,6 @@ import type { Task } from "@/app/tasks/page";
 import { TaskRow } from "./TaskRow";
 import { CreateTaskForm } from "./CreateTaskForm";
 import { TaskBoard } from "./TaskBoard";
-import { TaskCalendar } from "./TaskCalendar";
 
 const AGENTS = [
   { id: "strategist", name: "Strategist" },
@@ -20,7 +19,6 @@ const AGENTS = [
 
 const VIEWS = [
   { id: "board", label: "Board", emoji: "📊" },
-  { id: "calendar", label: "Calendar", emoji: "📅" },
   { id: "list", label: "List", emoji: "📋" },
 ];
 
@@ -159,7 +157,6 @@ export function TasksClient({ initialTasks }: { initialTasks: Task[] }) {
           }}
         />
       )}
-      {view === "calendar" && <TaskCalendar tasks={tasks} />}
       {view === "list" && (
         <>
           <p className="mt-4 text-sm text-gray-500">
