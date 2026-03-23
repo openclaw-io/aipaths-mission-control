@@ -2,9 +2,9 @@
 
 import { useState } from "react";
 import type { Task } from "@/app/tasks/page";
-import { TaskRow } from "./TaskRow";
 import { CreateTaskModal } from "./CreateTaskModal";
 import { TaskBoard } from "./TaskBoard";
+import { TaskLogs } from "./TaskLogs";
 
 const AGENTS = [
   { id: "strategist", name: "Strategist" },
@@ -20,32 +20,16 @@ const AGENTS = [
 
 const VIEWS = [
   { id: "board", label: "Board", emoji: "📊" },
-  { id: "list", label: "List", emoji: "📋" },
+  { id: "logs", label: "Logs", emoji: "📜" },
 ];
 
-const STATUSES = ["all", "new", "in_progress", "done", "blocked", "failed", "pending_approval"] as const;
-const STATUS_LABELS: Record<string, string> = {
-  all: "All",
-  new: "New",
-  in_progress: "In Progress",
-  done: "Done",
-  blocked: "Blocked",
-  failed: "Failed",
-  pending_approval: "Needs Approval",
-};
+
 
 export function TasksClient({ initialTasks }: { initialTasks: Task[] }) {
   const [tasks, setTasks] = useState<Task[]>(initialTasks);
   const [view, setView] = useState<string>("board");
-  const [statusFilter, setStatusFilter] = useState<string>("all");
   const [agentFilter, setAgentFilter] = useState<string>("all");
   const [showCreateForm, setShowCreateForm] = useState(false);
-
-  const filteredTasks = tasks.filter((task) => {
-    if (statusFilter !== "all" && task.status !== statusFilter) return false;
-    if (agentFilter !== "all" && task.agent !== agentFilter) return false;
-    return true;
-  });
 
   function handleTaskCreated(task: Task) {
     setTasks((prev) => [task, ...prev]);
@@ -91,38 +75,20 @@ export function TasksClient({ initialTasks }: { initialTasks: Task[] }) {
           ))}
         </div>
 
-        {/* Filters (only for list view) */}
-        {view === "list" && (
-          <>
-            <div className="flex flex-wrap gap-2">
-              {STATUSES.map((status) => (
-                <button
-                  key={status}
-                  onClick={() => setStatusFilter(status)}
-                  className={`rounded-lg px-3 py-1.5 text-sm font-medium transition ${
-                    statusFilter === status
-                      ? "bg-blue-500/20 text-blue-400"
-                      : "bg-[#111118] text-gray-400 hover:bg-white/5 hover:text-white"
-                  }`}
-                >
-                  {STATUS_LABELS[status]}
-                </button>
-              ))}
-            </div>
-
-            <select
-              value={agentFilter}
-              onChange={(e) => setAgentFilter(e.target.value)}
-              className="rounded-lg border border-gray-700 bg-[#1a1a24] px-3 py-1.5 text-sm text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
-            >
-              <option value="all">All Agents</option>
-              {AGENTS.map((agent) => (
-                <option key={agent.id} value={agent.id}>
-                  {agent.name}
-                </option>
-              ))}
-            </select>
-          </>
+        {/* Agent filter for logs view */}
+        {view === "logs" && (
+          <select
+            value={agentFilter}
+            onChange={(e) => setAgentFilter(e.target.value)}
+            className="rounded-lg border border-gray-700 bg-[#1a1a24] px-3 py-1.5 text-sm text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+          >
+            <option value="all">All Agents</option>
+            {AGENTS.map((agent) => (
+              <option key={agent.id} value={agent.id}>
+                {agent.name}
+              </option>
+            ))}
+          </select>
         )}
 
         <button
@@ -158,21 +124,11 @@ export function TasksClient({ initialTasks }: { initialTasks: Task[] }) {
           }}
         />
       )}
-      {view === "list" && (
-        <>
-          <p className="mt-4 text-sm text-gray-500">
-            {filteredTasks.length} task{filteredTasks.length !== 1 ? "s" : ""}
-          </p>
-          {filteredTasks.length === 0 ? (
-            <p className="mt-6 text-gray-500">No tasks found</p>
-          ) : (
-            <div className="mt-4 space-y-2">
-              {filteredTasks.map((task) => (
-                <TaskRow key={task.id} task={task} />
-              ))}
-            </div>
-          )}
-        </>
+      {view === "logs" && (
+        <TaskLogs
+          tasks={tasks.filter((t) => t.status === "done")}
+          agentFilter={agentFilter}
+        />
       )}
     </div>
   );
