@@ -30,6 +30,7 @@ export async function POST() {
   if (!tasks || tasks.length === 0) return NextResponse.json({ promoted: 0 });
 
   let promoted = 0;
+  const webhookUrl = process.env.DISCORD_TASK_ROUTER_WEBHOOK;
 
   for (const task of tasks) {
     // If has dependency, check if it's done
@@ -43,24 +44,22 @@ export async function POST() {
       if (dep && dep.status !== "done") continue; // Still blocked
     }
 
-    // Promote to ready
-    if (task.status !== "new") {
-      await supabase.from("agent_tasks").update({ status: "new" }).eq("id", task.id);
-      promoted++;
+    // Update status to "new" if blocked, and clear scheduled_for to mark as activated
+    const updates: Record<string, unknown> = { scheduled_for: null };
+    if (task.status === "blocked") updates.status = "new";
 
-      // Notify the assigned agent
-      if (task.agent && task.agent !== "gonza") {
-        const webhookUrl = process.env.DISCORD_TASK_ROUTER_WEBHOOK;
-        if (webhookUrl) {
-          fetch(webhookUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              content: `📅 Scheduled task now ready → @${task.agent}: "${task.title}"`,
-            }),
-          }).catch(() => {});
-        }
-      }
+    await supabase.from("agent_tasks").update(updates).eq("id", task.id);
+    promoted++;
+
+    // Notify the assigned agent
+    if (task.agent && task.agent !== "gonza" && webhookUrl) {
+      fetch(webhookUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          content: `📅 Scheduled task now ready → @${task.agent}: "${task.title}"`,
+        }),
+      }).catch(() => {});
     }
   }
 
