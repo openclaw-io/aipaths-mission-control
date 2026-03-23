@@ -174,33 +174,12 @@ export function TaskDetailModal({
               )}
             </div>
           </div>
-          <div className="flex items-center gap-1 shrink-0">
-            {!editing && (
-              <>
-                <button
-                  onClick={() => setEditing(true)}
-                  className="rounded p-1.5 text-gray-500 hover:text-white hover:bg-[#1a1a24] transition"
-                  title="Edit"
-                >
-                  ✏️
-                </button>
-                <button
-                  onClick={handleDelete}
-                  disabled={deleting}
-                  className="rounded p-1.5 text-gray-500 hover:text-red-400 hover:bg-red-500/10 transition disabled:opacity-50"
-                  title="Delete"
-                >
-                  🗑️
-                </button>
-              </>
-            )}
-            <button
-              onClick={onClose}
-              className="rounded p-1 text-gray-500 hover:text-white transition"
-            >
-              ✕
-            </button>
-          </div>
+          <button
+            onClick={onClose}
+            className="rounded p-1 text-gray-500 hover:text-white transition shrink-0"
+          >
+            ✕
+          </button>
         </div>
 
         {/* Body */}
@@ -309,9 +288,10 @@ export function TaskDetailModal({
         </div>
 
         {/* Footer */}
-        <div className="border-t border-gray-800 px-6 py-4 flex gap-2 justify-end">
+        <div className="border-t border-gray-800 px-6 py-4 flex items-center">
           {editing ? (
             <>
+              <div className="flex-1" />
               <button
                 onClick={() => setEditing(false)}
                 className="rounded-lg px-4 py-2 text-sm text-gray-400 hover:text-white transition"
@@ -328,30 +308,47 @@ export function TaskDetailModal({
             </>
           ) : (
             <>
-              {(task.status === "pending_approval" || task.assignee === "gonza") && (
+              {/* Edit / Delete on the right */}
+              <div className="flex-1" />
+              <div className="flex items-center gap-2">
                 <button
-                  onClick={() => handleAction("done")}
-                  className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-500 transition"
+                  onClick={() => setEditing(true)}
+                  className="rounded-lg px-3 py-1.5 text-sm text-gray-400 hover:text-white hover:bg-[#1a1a24] transition"
                 >
-                  ✅ Approve
+                  ✏️ Edit
                 </button>
-              )}
-              {task.status === "failed" && (
-                <>
-                  <button
-                    onClick={() => handleAction("new")}
-                    className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 transition"
-                  >
-                    🔄 Retry
-                  </button>
+                <button
+                  onClick={handleDelete}
+                  disabled={deleting}
+                  className="rounded-lg px-3 py-1.5 text-sm text-gray-400 hover:text-red-400 hover:bg-red-500/10 transition disabled:opacity-50"
+                >
+                  🗑️ Delete
+                </button>
+                {(task.status === "pending_approval" || task.assignee === "gonza") && (
                   <button
                     onClick={() => handleAction("done")}
                     className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-500 transition"
                   >
-                    ✅ Resolve
+                    ✅ Approve
                   </button>
-                </>
-              )}
+                )}
+                {task.status === "failed" && (
+                  <>
+                    <button
+                      onClick={() => handleAction("new")}
+                      className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 transition"
+                    >
+                      🔄 Retry
+                    </button>
+                    <button
+                      onClick={() => handleAction("done")}
+                      className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-500 transition"
+                    >
+                      ✅ Resolve
+                    </button>
+                  </>
+                )}
+              </div>
             </>
           )}
         </div>
