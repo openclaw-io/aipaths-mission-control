@@ -16,8 +16,21 @@ interface CronRow {
   category: string;
 }
 
+interface CronLog {
+  id: string;
+  cron_name: string;
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+  duration_ms: number | null;
+  error: string | null;
+  rows_affected: number | null;
+  message: string | null;
+}
+
 interface CronsClientProps {
   crons: CronRow[];
+  logs: CronLog[];
 }
 
 const STATUS_DOT: Record<string, string> = {
@@ -39,16 +52,22 @@ function formatDuration(ms: number | null): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
-export default function CronsClient({ crons }: CronsClientProps) {
-  const [activeTab, setActiveTab] = useState("all");
-  const [expandedError, setExpandedError] = useState<string | null>(null);
+function formatTime(iso: string): string {
+  const d = new Date(iso);
+  return d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
 
-  const filtered = activeTab === "all"
+export default function CronsClient({ crons, logs }: CronsClientProps) {
+  const [activeTab, setActiveTab] = useState("all");
+  const [selectedCrons, setSelectedCrons] = useState<Set<string>>(new Set());
+
+  // Filter crons by tab
+  const filteredCrons = activeTab === "all"
     ? crons
     : crons.filter((c) => c.category === activeTab);
 
-  // Sort: errors first, then by last_run_at DESC
-  const sorted = [...filtered].sort((a, b) => {
+  // Sort crons: errors first, then by last_run_at DESC
+  const sortedCrons = [...filteredCrons].sort((a, b) => {
     if (a.last_status === "error" && b.last_status !== "error") return -1;
     if (a.last_status !== "error" && b.last_status === "error") return 1;
     const aTime = a.last_run_at ? new Date(a.last_run_at).getTime() : 0;
@@ -56,24 +75,51 @@ export default function CronsClient({ crons }: CronsClientProps) {
     return bTime - aTime;
   });
 
-  const healthy = filtered.filter((c) => c.last_status === "ok").length;
-  const errors = filtered.filter((c) => c.last_status === "error").length;
-  const unknown = filtered.filter((c) => c.last_status === "unknown").length;
+  // Filter logs: by tab category AND selected crons
+  const tabCronNames = new Set(filteredCrons.map((c) => c.cron_name));
+  const filteredLogs = logs.filter((log) => {
+    // Must be in current tab's crons
+    if (!tabCronNames.has(log.cron_name)) return false;
+    // If specific crons selected, filter by those
+    if (selectedCrons.size > 0 && !selectedCrons.has(log.cron_name)) return false;
+    return true;
+  });
 
-  const summaryItems = [
-    { label: "Total", value: String(filtered.length), color: "text-white" },
-    { label: "Healthy", value: String(healthy), color: "text-green-400", dot: "bg-green-500" },
-    { label: "Errors", value: String(errors), color: "text-red-400", dot: "bg-red-500" },
-    { label: "Unknown", value: String(unknown), color: "text-gray-400", dot: "bg-gray-500" },
-  ];
+  // Summary stats
+  const healthy = filteredCrons.filter((c) => c.last_status === "ok").length;
+  const errors = filteredCrons.filter((c) => c.last_status === "error").length;
+  const unknown = filteredCrons.filter((c) => c.last_status === "unknown").length;
 
-  // Count per tab for badges
   const tabCounts: Record<string, number> = {
     all: crons.length,
     services: crons.filter((c) => c.category === "services").length,
     scheduled: crons.filter((c) => c.category === "scheduled").length,
     heartbeats: crons.filter((c) => c.category === "heartbeats").length,
   };
+
+  function handleTabChange(tabId: string) {
+    setActiveTab(tabId);
+    setSelectedCrons(new Set()); // Reset selection on tab change
+  }
+
+  function toggleCron(cronName: string) {
+    setSelectedCrons((prev) => {
+      const next = new Set(prev);
+      if (next.has(cronName)) {
+        next.delete(cronName);
+      } else {
+        next.add(cronName);
+      }
+      return next;
+    });
+  }
+
+  const summaryItems = [
+    { label: "Total", value: String(filteredCrons.length), color: "text-white" },
+    { label: "Healthy", value: String(healthy), color: "text-green-400", dot: "bg-green-500" },
+    { label: "Errors", value: String(errors), color: "text-red-400", dot: "bg-red-500" },
+    { label: "Unknown", value: String(unknown), color: "text-gray-400", dot: "bg-gray-500" },
+  ];
 
   return (
     <>
@@ -82,7 +128,7 @@ export default function CronsClient({ crons }: CronsClientProps) {
         {TABS.map((tab) => (
           <button
             key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
+            onClick={() => handleTabChange(tab.id)}
             className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
               activeTab === tab.id
                 ? "bg-blue-600 text-white"
@@ -115,81 +161,119 @@ export default function CronsClient({ crons }: CronsClientProps) {
         ))}
       </div>
 
-      {/* Cron List */}
-      {sorted.length === 0 ? (
-        <p className="mt-8 text-gray-500">
-          No crons in this category.
-        </p>
-      ) : (
-        <div className="mt-6 space-y-2">
-          {sorted.map((cron) => (
-            <div
-              key={cron.id}
-              className="rounded-lg border border-gray-800 bg-[#111118]"
-            >
-              <div
-                className={`flex flex-wrap items-center gap-3 px-4 py-3 ${
-                  cron.last_status === "error" && cron.last_error ? "cursor-pointer" : ""
-                }`}
-                onClick={() => {
-                  if (cron.last_status === "error" && cron.last_error) {
-                    setExpandedError(expandedError === cron.id ? null : cron.id);
-                  }
-                }}
-              >
-                {/* Status dot */}
-                <span
-                  className={`h-3 w-3 shrink-0 rounded-full ${STATUS_DOT[cron.last_status] ?? "bg-gray-500"}`}
-                />
+      {/* Two Column Layout: Crons + Logs */}
+      <div className="mt-6 grid gap-6 lg:grid-cols-2">
+        {/* Left: Cron List */}
+        <div>
+          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-gray-500">
+            Crons {selectedCrons.size > 0 && `(${selectedCrons.size} selected)`}
+          </h2>
+          {sortedCrons.length === 0 ? (
+            <p className="text-gray-500">No crons in this category.</p>
+          ) : (
+            <div className="space-y-2">
+              {sortedCrons.map((cron) => {
+                const isSelected = selectedCrons.has(cron.cron_name);
+                return (
+                  <div
+                    key={cron.id}
+                    onClick={() => toggleCron(cron.cron_name)}
+                    className={`cursor-pointer rounded-lg border bg-[#111118] transition ${
+                      isSelected
+                        ? "border-blue-500 ring-1 ring-blue-500/50"
+                        : "border-gray-800 hover:border-gray-600"
+                    }`}
+                  >
+                    <div className="flex flex-wrap items-center gap-3 px-4 py-3">
+                      <span
+                        className={`h-3 w-3 shrink-0 rounded-full ${STATUS_DOT[cron.last_status] ?? "bg-gray-500"}`}
+                      />
+                      <div className="min-w-0 flex-1">
+                        <span className="font-semibold text-white">
+                          {cron.cron_name}
+                        </span>
+                        <span className="ml-2 text-sm text-gray-500">
+                          {cron.schedule}
+                        </span>
+                        {cron.description && (
+                          <p className="mt-0.5 text-xs text-gray-500">
+                            {cron.description}
+                          </p>
+                        )}
+                      </div>
+                      <div className="text-xs text-gray-400">
+                        {cron.last_run_at ? timeAgo(cron.last_run_at) : "Never"}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
 
-                {/* Name + schedule */}
-                <div className="min-w-0 flex-1">
-                  <span className="font-semibold text-white">
-                    {cron.cron_name}
-                  </span>
-                  <span className="ml-2 text-sm text-gray-500">
-                    {cron.schedule}
-                  </span>
-                  {cron.description && (
-                    <p className="mt-0.5 text-xs text-gray-500">
-                      {cron.description}
+        {/* Right: Logs */}
+        <div>
+          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-gray-500">
+            Logs ({filteredLogs.length})
+          </h2>
+          {filteredLogs.length === 0 ? (
+            <p className="text-gray-500">
+              {logs.length === 0
+                ? "No logs yet. Logs will appear once crons start reporting."
+                : "No logs match the current filter."}
+            </p>
+          ) : (
+            <div className="space-y-1.5 max-h-[600px] overflow-y-auto pr-2">
+              {filteredLogs.map((log) => (
+                <div
+                  key={log.id}
+                  className={`rounded-lg border bg-[#111118] px-4 py-2.5 ${
+                    log.status === "error"
+                      ? "border-red-500/30"
+                      : "border-gray-800"
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <span
+                      className={`h-2 w-2 shrink-0 rounded-full ${
+                        log.status === "ok" ? "bg-green-500" : "bg-red-500"
+                      }`}
+                    />
+                    <span className="font-medium text-white text-sm">
+                      {log.cron_name}
+                    </span>
+                    <span className="text-xs text-gray-500">
+                      {formatTime(log.started_at)}
+                    </span>
+                    <span className="text-xs text-gray-500">
+                      {formatDuration(log.duration_ms)}
+                    </span>
+                    {log.rows_affected ? (
+                      <span className="text-xs text-gray-500">
+                        {log.rows_affected} rows
+                      </span>
+                    ) : null}
+                    <span className="ml-auto text-xs text-gray-500">
+                      {timeAgo(log.started_at)}
+                    </span>
+                  </div>
+                  {log.message && (
+                    <p className="mt-1 text-xs text-gray-400 pl-5">
+                      {log.message}
+                    </p>
+                  )}
+                  {log.status === "error" && log.error && (
+                    <p className="mt-1 text-xs text-red-400 pl-5">
+                      {log.error}
                     </p>
                   )}
                 </div>
-
-                {/* Metadata */}
-                <div className="flex items-center gap-4 text-xs text-gray-400">
-                  <div>
-                    <span className="text-gray-500">Last run: </span>
-                    <span className="text-gray-300">
-                      {cron.last_run_at ? timeAgo(cron.last_run_at) : "Never"}
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-gray-500">Duration: </span>
-                    <span className="text-gray-300">
-                      {formatDuration(cron.last_duration_ms)}
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-gray-500">Rows: </span>
-                    <span className="text-gray-300">
-                      {cron.rows_affected ?? "—"}
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Error details (expandable) */}
-              {cron.last_status === "error" && cron.last_error && expandedError === cron.id && (
-                <div className="border-t border-red-500/20 bg-red-500/5 px-4 py-3">
-                  <p className="text-sm text-red-400">{cron.last_error}</p>
-                </div>
-              )}
+              ))}
             </div>
-          ))}
+          )}
         </div>
-      )}
+      </div>
     </>
   );
 }
