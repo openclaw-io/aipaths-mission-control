@@ -51,7 +51,7 @@ export function MemoryClient({ initialEntries }: { initialEntries: MemoryEntry[]
 
     setSearching(true);
     try {
-      const res = await fetch("/api/agent/memory/search", {
+      const res = await fetch("/api/memory/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
