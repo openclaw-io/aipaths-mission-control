@@ -59,7 +59,7 @@ export async function PATCH(
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              "Cookie": request.headers.get("cookie") || "",
+              "Authorization": `Bearer ${process.env.AGENT_API_KEY}`,
             },
             body: JSON.stringify({
               taskId: task.id,

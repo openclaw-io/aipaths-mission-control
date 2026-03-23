@@ -70,10 +70,16 @@ async function wakeAgent(agentId: string, channelId: string, message: string): P
  * 2. Wakes the assigned agent via OpenClaw gateway
  */
 export async function POST(request: NextRequest) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  // Accept either Supabase cookie auth OR internal API key
+  const bearerToken = request.headers.get("authorization")?.replace("Bearer ", "");
+  const isInternalCall = !!bearerToken && bearerToken === process.env.AGENT_API_KEY;
+
+  if (!isInternalCall) {
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
   }
 
   const { taskId, agent, title, action } = await request.json();
