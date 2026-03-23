@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import type { Task } from "@/app/tasks/page";
 import { CreateTaskModal } from "./CreateTaskModal";
 import { TaskBoard } from "./TaskBoard";
@@ -30,6 +30,16 @@ export function TasksClient({ initialTasks }: { initialTasks: Task[] }) {
   const [view, setView] = useState<string>("board");
   const [agentFilter, setAgentFilter] = useState<string>("all");
   const [showCreateForm, setShowCreateForm] = useState(false);
+
+  // Auto-promote past-due scheduled tasks on load
+  useEffect(() => {
+    fetch("/api/tasks/promote-scheduled", { method: "POST" }).then(async (res) => {
+      if (res.ok) {
+        const { promoted } = await res.json();
+        if (promoted > 0) window.location.reload();
+      }
+    }).catch(() => {}); // Silently fail
+  }, []);
 
   function handleTaskCreated(task: Task) {
     setTasks((prev) => [task, ...prev]);

@@ -193,13 +193,17 @@ export function TaskBoard({
 }) {
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
 
-  // Exclude done, scheduled, and backlog tasks from columns
+  // Exclude done, future-scheduled, and backlog tasks from columns
+  // Past-scheduled tasks (time has arrived) show in board columns
+  const now = new Date();
   const boardTasks = tasks.filter(
-    (t) => t.status !== "done" && !t.scheduled_for && !t.tags?.includes("backlog")
+    (t) =>
+      t.status !== "done" &&
+      !t.tags?.includes("backlog") &&
+      (!t.scheduled_for || new Date(t.scheduled_for) <= now)
   );
 
   // Scheduled tasks for calendar
-  const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const days = Array.from({ length: 7 }, (_, i) => {
     const d = new Date(today);
@@ -210,7 +214,7 @@ export function TaskBoard({
   sevenDaysOut.setDate(sevenDaysOut.getDate() + 7);
 
   const scheduledTasks = tasks.filter(
-    (t) => t.scheduled_for && t.status !== "done"
+    (t) => t.scheduled_for && t.status !== "done" && new Date(t.scheduled_for) > now
   );
 
   function getTasksForDay(day: Date): Task[] {
