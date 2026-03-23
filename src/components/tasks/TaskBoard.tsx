@@ -140,53 +140,38 @@ function TaskCard({
             <p className="mt-1.5 text-xs text-yellow-400 line-clamp-2">{task.result}</p>
           )}
 
-          <div className="mt-2 flex gap-1.5">
-            {(task.status === "pending_approval" || task.assignee === "gonza") && (
-              <button
-                onClick={() => handleStatusChange("done")}
-                disabled={loading}
-                className="rounded bg-green-600/20 px-2 py-0.5 text-xs text-green-400 hover:bg-green-600/30 transition disabled:opacity-50"
-              >
-                ✅ Approve
-              </button>
-            )}
-            {task.status === "new" && (
-              <button
-                onClick={() => handleStatusChange("done")}
-                disabled={loading}
-                className="rounded bg-green-600/20 px-2 py-0.5 text-xs text-green-400 hover:bg-green-600/30 transition disabled:opacity-50"
-              >
-                ✅ Done
-              </button>
-            )}
-            {task.status === "in_progress" && (
-              <button
-                onClick={() => handleStatusChange("done")}
-                disabled={loading}
-                className="rounded bg-green-600/20 px-2 py-0.5 text-xs text-green-400 hover:bg-green-600/30 transition disabled:opacity-50"
-              >
-                ✅ Done
-              </button>
-            )}
-            {task.status === "failed" && (
-              <>
-                <button
-                  onClick={() => handleStatusChange("new")}
-                  disabled={loading}
-                  className="rounded bg-blue-600/20 px-2 py-0.5 text-xs text-blue-400 hover:bg-blue-600/30 transition disabled:opacity-50"
-                >
-                  🔄 Retry
-                </button>
+          {/* Actions — only for Needs You and Failed */}
+          {(task.status === "pending_approval" || task.assignee === "gonza" || task.status === "failed") && (
+            <div className="mt-2 flex gap-1.5">
+              {(task.status === "pending_approval" || task.assignee === "gonza") && (
                 <button
                   onClick={() => handleStatusChange("done")}
                   disabled={loading}
                   className="rounded bg-green-600/20 px-2 py-0.5 text-xs text-green-400 hover:bg-green-600/30 transition disabled:opacity-50"
                 >
-                  ✅ Resolve
+                  ✅ Approve
                 </button>
-              </>
-            )}
-          </div>
+              )}
+              {task.status === "failed" && (
+                <>
+                  <button
+                    onClick={() => handleStatusChange("new")}
+                    disabled={loading}
+                    className="rounded bg-blue-600/20 px-2 py-0.5 text-xs text-blue-400 hover:bg-blue-600/30 transition disabled:opacity-50"
+                  >
+                    🔄 Retry
+                  </button>
+                  <button
+                    onClick={() => handleStatusChange("done")}
+                    disabled={loading}
+                    className="rounded bg-green-600/20 px-2 py-0.5 text-xs text-green-400 hover:bg-green-600/30 transition disabled:opacity-50"
+                  >
+                    ✅ Resolve
+                  </button>
+                </>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>
