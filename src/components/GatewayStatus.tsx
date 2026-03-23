@@ -2,17 +2,10 @@
 
 import { useState, useEffect, useCallback } from "react";
 
-interface ServiceHealth {
-  gateway: "healthy" | "down";
-  dispatch: "healthy" | "down";
-  overall: "healthy" | "degraded";
-}
-
-type OverallStatus = "checking" | "healthy" | "degraded";
+type Status = "checking" | "healthy" | "down";
 
 export default function GatewayStatus() {
-  const [health, setHealth] = useState<ServiceHealth | null>(null);
-  const [status, setStatus] = useState<OverallStatus>("checking");
+  const [status, setStatus] = useState<Status>("checking");
   const [showMenu, setShowMenu] = useState(false);
   const [restarting, setRestarting] = useState(false);
   const [lastCheck, setLastCheck] = useState<Date | null>(null);
@@ -20,13 +13,11 @@ export default function GatewayStatus() {
   const checkHealth = useCallback(async () => {
     try {
       const res = await fetch("/api/health/gateway");
-      const data: ServiceHealth = await res.json();
-      setHealth(data);
-      setStatus(data.overall === "healthy" ? "healthy" : "degraded");
+      const data = await res.json();
+      setStatus(data.gateway === "healthy" ? "healthy" : "down");
       setLastCheck(new Date());
     } catch {
-      setHealth({ gateway: "down", dispatch: "down", overall: "degraded" });
-      setStatus("degraded");
+      setStatus("down");
       setLastCheck(new Date());
     }
   }, []);
@@ -60,26 +51,14 @@ export default function GatewayStatus() {
   }
 
   const dotColor = status === "healthy" ? "bg-green-500"
-    : status === "degraded" ? "bg-red-500"
+    : status === "down" ? "bg-red-500"
     : "bg-gray-500";
 
-  const label = status === "healthy" ? "Services Online"
-    : status === "degraded" ? "Services Degraded"
+  const label = status === "healthy" ? "Gateway Online"
+    : status === "down" ? "Gateway Down"
     : "Checking...";
 
-  const shouldPulse = status === "degraded";
-
-  function ServiceDot({ name, ok }: { name: string; ok: boolean }) {
-    return (
-      <div className="flex items-center gap-2">
-        <span className={`h-2.5 w-2.5 rounded-full ${ok ? "bg-green-500" : "bg-red-500"}`} />
-        <span className="text-sm text-gray-300">{name}</span>
-        <span className={`ml-auto text-xs ${ok ? "text-green-400" : "text-red-400"}`}>
-          {ok ? "Online" : "Down"}
-        </span>
-      </div>
-    );
-  }
+  const shouldPulse = status === "down";
 
   return (
     <div className="relative">
@@ -100,26 +79,18 @@ export default function GatewayStatus() {
       {showMenu && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setShowMenu(false)} />
-          <div className="absolute right-0 top-full z-50 mt-1 w-64 rounded-lg border border-gray-700 bg-[#111118] shadow-xl">
-            {/* Service list */}
-            <div className="px-4 py-3 space-y-2 border-b border-gray-800">
-              <p className="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-2">Core Services</p>
-              {health ? (
-                <>
-                  <ServiceDot name="Gateway" ok={health.gateway === "healthy"} />
-                  <ServiceDot name="Dispatch" ok={health.dispatch === "healthy"} />
-                </>
-              ) : (
-                <p className="text-xs text-gray-500">Checking...</p>
-              )}
+          <div className="absolute right-0 top-full z-50 mt-1 w-56 rounded-lg border border-gray-700 bg-[#111118] shadow-xl">
+            <div className="px-4 py-3 border-b border-gray-800">
+              <div className="flex items-center gap-2">
+                <span className={`h-2.5 w-2.5 rounded-full ${dotColor}`} />
+                <span className="text-sm font-medium text-white">{label}</span>
+              </div>
               {lastCheck && (
-                <p className="mt-2 text-xs text-gray-600">
+                <p className="mt-1 text-xs text-gray-500">
                   Last check: {lastCheck.toLocaleTimeString()}
                 </p>
               )}
             </div>
-
-            {/* Actions */}
             <div className="p-2">
               <button
                 onClick={() => checkHealth()}
