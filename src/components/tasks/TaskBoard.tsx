@@ -392,6 +392,14 @@ export function TaskBoard({
             handleStatusChange(taskId, newStatus);
             setSelectedTask(null);
           }}
+          onTaskUpdated={(updated) => {
+            onTaskUpdate?.("__refresh__", "");
+            setSelectedTask(null);
+          }}
+          onTaskDeleted={(taskId) => {
+            onTaskUpdate?.("__delete__", taskId);
+            setSelectedTask(null);
+          }}
         />
       )}
     </div>

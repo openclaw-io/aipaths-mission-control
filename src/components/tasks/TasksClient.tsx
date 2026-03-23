@@ -114,13 +114,20 @@ export function TasksClient({ initialTasks }: { initialTasks: Task[] }) {
         <TaskBoard
           tasks={tasks}
           onTaskUpdate={(taskId, newStatus) => {
-            setTasks((prev) =>
-              prev.map((t) =>
-                t.id === taskId
-                  ? { ...t, status: newStatus, completed_at: newStatus === "done" ? new Date().toISOString() : t.completed_at }
-                  : t
-              )
-            );
+            if (taskId === "__delete__") {
+              setTasks((prev) => prev.filter((t) => t.id !== newStatus));
+            } else if (taskId === "__refresh__") {
+              // Reload page to get fresh data
+              window.location.reload();
+            } else {
+              setTasks((prev) =>
+                prev.map((t) =>
+                  t.id === taskId
+                    ? { ...t, status: newStatus, completed_at: newStatus === "done" ? new Date().toISOString() : t.completed_at }
+                    : t
+                )
+              );
+            }
           }}
         />
       )}
