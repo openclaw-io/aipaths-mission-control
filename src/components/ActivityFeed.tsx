@@ -41,11 +41,13 @@ export function ActivityFeed({ initialEvents }: { initialEvents: ActivityEvent[]
   }
 
   return (
-    <div className="space-y-1">
-      {events.slice(0, 50).map((event) => (
+    <div className="space-y-0">
+      {events.slice(0, 20).map((event, i) => (
         <div
           key={event.id}
-          className="flex items-start gap-2.5 rounded-lg px-3 py-2 hover:bg-white/5 transition"
+          className={`flex items-start gap-2.5 rounded-lg px-3 py-2.5 transition ${
+            i % 2 === 0 ? "bg-white/[0.02]" : ""
+          } hover:bg-white/5`}
         >
           <span className="text-sm shrink-0 mt-0.5">
             {EVENT_EMOJI[event.event_type] || "📌"}
