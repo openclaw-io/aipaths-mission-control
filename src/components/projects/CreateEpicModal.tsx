@@ -35,7 +35,7 @@ export function CreateEpicModal({ onClose }: { onClose: () => void }) {
         agent,
         status: "draft",
         priority: "medium",
-        tags: ["epic"],
+        tags: ["project", "epic"],
         depends_on: [],
       });
 

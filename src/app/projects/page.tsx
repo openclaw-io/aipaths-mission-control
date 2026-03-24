@@ -16,13 +16,13 @@ export default async function ProjectsPage() {
 
   const tasks = allTasks ?? [];
 
-  // Identify epics: tasks tagged "epic" OR referenced as parent_id by other tasks
+  // Identify epics/projects: tasks tagged "epic" or "project", OR referenced as parent_id
   const parentIds = new Set(tasks.filter((t) => t.parent_id).map((t) => t.parent_id));
   const epics = tasks.filter((t) => {
     const tags = t.tags ?? [];
-    const isTaggedEpic = Array.isArray(tags) && tags.includes("epic");
+    const isTagged = Array.isArray(tags) && (tags.includes("epic") || tags.includes("project"));
     const isParent = parentIds.has(t.id);
-    return isTaggedEpic || isParent;
+    return isTagged || isParent;
   });
   const subTasksByParent: Record<string, typeof tasks> = {};
 
