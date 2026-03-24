@@ -25,9 +25,12 @@ export function AIActionButton({
 }) {
   const [sending, setSending] = useState(false);
   const [sent, setSent] = useState(false);
+  const [clickCount, setClickCount] = useState(0);
 
   async function handleClick() {
-    if (sent) return;
+    if (sent || sending) return;
+    setClickCount((c) => c + 1);
+    if (clickCount > 0) return; // Prevent double-click
     setSending(true);
 
     try {
