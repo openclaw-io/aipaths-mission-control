@@ -14,6 +14,8 @@ interface CronRow {
   last_error: string | null;
   rows_affected: number | null;
   category: string;
+  enabled: boolean;
+  config: Record<string, unknown> | null;
 }
 
 interface CronLog {
@@ -56,10 +58,25 @@ function formatTime(iso: string): string {
   return d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
-export default function CronsClient({ crons, logs }: CronsClientProps) {
+export default function CronsClient({ crons: initialCrons, logs }: CronsClientProps) {
+  const [crons, setCrons] = useState(initialCrons);
   const [activeTab, setActiveTab] = useState("all");
   const [selectedCrons, setSelectedCrons] = useState<Set<string>>(new Set());
   const [visibleLogs, setVisibleLogs] = useState(30);
+
+  async function handleToggleCron(cronName: string, currentEnabled: boolean) {
+    // Optimistic update
+    setCrons((prev) =>
+      prev.map((c) => c.cron_name === cronName ? { ...c, enabled: !currentEnabled } : c)
+    );
+    const res = await fetch(`/api/crons/${encodeURIComponent(cronName)}/toggle`, { method: "POST" });
+    if (!res.ok) {
+      // Revert on failure
+      setCrons((prev) =>
+        prev.map((c) => c.cron_name === cronName ? { ...c, enabled: currentEnabled } : c)
+      );
+    }
+  }
 
   // Filter crons by tab
   const filteredCrons = activeTab === "all"
@@ -218,6 +235,20 @@ export default function CronsClient({ crons, logs }: CronsClientProps) {
                       <div className="text-xs text-gray-400">
                         {cron.last_run_at ? timeAgo(cron.last_run_at) : "Never"}
                       </div>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleToggleCron(cron.cron_name, cron.enabled);
+                        }}
+                        className={`rounded-md px-2 py-1 text-xs font-medium transition ${
+                          cron.enabled
+                            ? "bg-green-500/20 text-green-400 hover:bg-green-500/30"
+                            : "bg-gray-700/50 text-gray-500 hover:bg-gray-700"
+                        }`}
+                        title={cron.enabled ? "Click to pause" : "Click to resume"}
+                      >
+                        {cron.enabled ? "● Active" : "○ Paused"}
+                      </button>
                     </div>
                   </div>
                 );

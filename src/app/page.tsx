@@ -2,7 +2,7 @@ import { createClient } from "@/lib/supabase/server";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { timeAgo } from "@/lib/utils";
 import { AGENTS } from "@/lib/agents";
-import { SchedulerToggle } from "@/components/SchedulerToggle";
+// SchedulerToggle moved to Crons page
 import { ActivityFeed } from "@/components/ActivityFeed";
 
 const STATUS_COLORS: Record<string, string> = {
@@ -72,11 +72,6 @@ export default async function OverviewPage() {
       <p className="mt-2 text-gray-400">
         Welcome to Mission Control. Your agent dashboard at a glance.
       </p>
-
-      {/* Scheduler Toggle */}
-      <div className="mt-6">
-        <SchedulerToggle />
-      </div>
 
       {/* Stat Cards */}
       <div className="mt-6 grid grid-cols-2 gap-4 lg:grid-cols-4">
