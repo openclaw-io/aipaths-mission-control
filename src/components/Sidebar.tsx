@@ -11,6 +11,7 @@ const NAV_ITEMS = [
   { href: "/agents", label: "Agents", emoji: "🤖" },
   { href: "/tasks", label: "Tasks", emoji: "📋" },
   { href: "/projects", label: "Projects", emoji: "📐" },
+  { href: "/costs", label: "Costs", emoji: "💰" },
   { href: "/crons", label: "Crons", emoji: "🕐" },
   { href: "/memory", label: "Memory", emoji: "🧠" },
 ];
