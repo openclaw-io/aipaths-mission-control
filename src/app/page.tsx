@@ -1,160 +1,124 @@
-import { createClient } from "@/lib/supabase/server";
 import { supabaseAdmin } from "@/lib/supabase/admin";
-import { timeAgo } from "@/lib/utils";
-import { AGENTS } from "@/lib/agents";
-// SchedulerToggle moved to Crons page
-import { ActivityFeed } from "@/components/ActivityFeed";
+import { OverviewClient } from "@/components/overview/OverviewClient";
 
-const STATUS_COLORS: Record<string, string> = {
-  done: "bg-green-500",
-  in_progress: "bg-yellow-500",
-  new: "bg-blue-500",
-  blocked: "bg-red-500",
-};
+export const dynamic = "force-dynamic";
 
 export default async function OverviewPage() {
-  const supabase = await createClient();
+  const today = new Date().toISOString().split("T")[0];
+  const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
-  // Fetch activity log
-  const { data: activityData } = await supabaseAdmin
-    .from("activity_log")
-    .select("*")
-    .order("created_at", { ascending: false })
-    .limit(50);
+  // Parallel queries
+  const [
+    todayCostRes,
+    tasksDoneTodayRes,
+    activeAgentsRes,
+    activeProjectsRes,
+    allProjectTasksRes,
+    failedTasksRes,
+    cronHealthRes,
+    activityRes,
+    schedulerConfigRes,
+  ] = await Promise.all([
+    // 1. Today cost
+    supabaseAdmin
+      .from("usage_logs")
+      .select("cost_usd")
+      .eq("date", today),
+    // 2. Tasks completed today
+    supabaseAdmin
+      .from("agent_tasks")
+      .select("*", { count: "exact", head: true })
+      .eq("status", "done")
+      .gte("completed_at", `${today}T00:00:00`),
+    // 3. Active agents (distinct agents with in_progress tasks)
+    supabaseAdmin
+      .from("agent_tasks")
+      .select("agent")
+      .eq("status", "in_progress")
+      .not("tags", "cs", '{"epic"}'),
+    // 4. Active projects
+    supabaseAdmin
+      .from("agent_tasks")
+      .select("id, title, status, tags")
+      .contains("tags", ["project"])
+      .neq("status", "done"),
+    // 5. All tasks for project progress
+    supabaseAdmin
+      .from("agent_tasks")
+      .select("id, status, parent_id, tags, title")
+      .not("tags", "cs", '{"epic"}')
+      .not("tags", "cs", '{"project"}'),
+    // 6. Failed tasks (last 24h)
+    supabaseAdmin
+      .from("agent_tasks")
+      .select("id, title, agent, completed_at, error")
+      .eq("status", "failed")
+      .gte("completed_at", yesterday)
+      .order("completed_at", { ascending: false })
+      .limit(5),
+    // 7. Cron health
+    supabaseAdmin
+      .from("cron_health")
+      .select("cron_name, last_status, last_error, last_run_at, enabled"),
+    // 8. Activity feed
+    supabaseAdmin
+      .from("activity_log")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(30),
+    // 9. Scheduler config (for budget)
+    supabaseAdmin
+      .from("cron_health")
+      .select("config")
+      .eq("cron_name", "task-scheduler")
+      .single(),
+  ]);
 
-  // Fetch all stats in parallel
-  const [activeTasksRes, cronHealthRes, memoryCountRes, recentTasksRes, recentMemoryRes] =
-    await Promise.all([
-      supabase
-        .from("agent_tasks")
-        .select("*", { count: "exact", head: true })
-        .eq("status", "in_progress"),
-      supabase.from("cron_health").select("last_status"),
-      supabase
-        .from("agent_memory")
-        .select("*", { count: "exact", head: true }),
-      supabase
-        .from("agent_tasks")
-        .select("id, title, agent, status, created_at")
-        .order("created_at", { ascending: false })
-        .limit(10),
-      supabase
-        .from("agent_memory")
-        .select("id, agent, content, created_at")
-        .order("created_at", { ascending: false })
-        .limit(5),
-    ]);
+  // Process data
+  const todayCost = (todayCostRes.data || []).reduce((s, r) => s + Number(r.cost_usd), 0);
+  const tasksDoneToday = tasksDoneTodayRes.count || 0;
+  const activeAgents = [...new Set((activeAgentsRes.data || []).map((r) => r.agent))];
 
-  const activeTasks = activeTasksRes.count ?? 0;
+  // Project progress
+  const allLeafTasks = allProjectTasksRes.data || [];
+  const projectProgress = (activeProjectsRes.data || []).map((project) => {
+    // Find epics under this project
+    const epicIds = allLeafTasks
+      .filter((t) => t.parent_id === project.id && t.tags?.includes("epic"))
+      .map((t) => t.id);
+    // Find leaf tasks under those epics
+    const leafTasks = allLeafTasks.filter((t) => t.parent_id && epicIds.includes(t.parent_id) && !t.title.startsWith("AI: Plan"));
+    const done = leafTasks.filter((t) => t.status === "done").length;
+    const total = leafTasks.length || epicIds.length; // fallback to epic count
+    return { id: project.id, title: project.title, done, total };
+  });
 
-  const cronRows = cronHealthRes.data ?? [];
-  const cronOk = cronRows.filter((r) => r.last_status === "ok").length;
-  const cronTotal = cronRows.length;
+  // Cron summary
+  const crons = cronHealthRes.data || [];
+  const cronOk = crons.filter((c) => c.last_status === "ok" && c.enabled).length;
+  const cronError = crons.filter((c) => c.last_status === "error" && c.enabled).length;
+  const cronTotal = crons.filter((c) => c.enabled).length;
+  const errorCrons = crons.filter((c) => c.last_status === "error" && c.enabled);
 
-  const memoryCount = memoryCountRes.count ?? 0;
-  const recentTasks = recentTasksRes.data ?? [];
-  const recentMemory = recentMemoryRes.data ?? [];
-
-  const stats = [
-    { label: "Total Agents", value: String(AGENTS.length), emoji: "🤖" },
-    { label: "Active Tasks", value: String(activeTasks), emoji: "🔥" },
-    {
-      label: "Cron Health",
-      value: `${cronOk}/${cronTotal} OK`,
-      emoji: "🟢",
-    },
-    { label: "Memory Entries", value: String(memoryCount), emoji: "🧠" },
-  ];
+  // Budget
+  const schedulerConfig = (schedulerConfigRes.data?.config as Record<string, unknown>) || {};
+  const dailyBudget = Number(schedulerConfig.daily_budget_usd || 50);
+  const budgetPct = dailyBudget > 0 ? (todayCost / dailyBudget) * 100 : 0;
 
   return (
-    <div>
-      <h1 className="text-3xl font-bold text-white">📊 Overview</h1>
-      <p className="mt-2 text-gray-400">
-        Welcome to Mission Control. Your agent dashboard at a glance.
-      </p>
-
-      {/* Stat Cards */}
-      <div className="mt-6 grid grid-cols-2 gap-4 lg:grid-cols-4">
-        {stats.map((stat) => (
-          <div
-            key={stat.label}
-            className="rounded-lg border border-gray-800 bg-[#111118] p-5"
-          >
-            <div className="text-3xl font-bold text-white">
-              <span className="mr-2">{stat.emoji}</span>
-              {stat.value}
-            </div>
-            <div className="mt-1 text-sm text-gray-400">{stat.label}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* Activity Feed */}
-      <div className="mt-8">
-        <h2 className="text-xl font-semibold text-white mb-3">⚡ Live Activity</h2>
-        <div className="rounded-xl border border-gray-800 bg-[#111118] p-3">
-          <ActivityFeed initialEvents={activityData ?? []} />
-        </div>
-      </div>
-
-      {/* Recent Tasks */}
-      <div className="mt-10">
-        <h2 className="text-xl font-semibold text-white">Recent Tasks</h2>
-        {recentTasks.length === 0 ? (
-          <p className="mt-4 text-gray-500">No tasks yet</p>
-        ) : (
-          <div className="mt-4 space-y-2">
-            {recentTasks.map((task) => (
-              <div
-                key={task.id}
-                className="flex items-center gap-3 rounded-lg border border-gray-800 bg-[#111118] px-4 py-3"
-              >
-                <span
-                  className={`h-2.5 w-2.5 shrink-0 rounded-full ${STATUS_COLORS[task.status] ?? "bg-gray-500"}`}
-                />
-                <span className="flex-1 truncate text-sm text-white">
-                  {task.title}
-                </span>
-                <span className="text-xs text-gray-500">{task.agent}</span>
-                <span className="text-xs text-gray-600">
-                  {timeAgo(task.created_at)}
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* Recent Activity */}
-      <div className="mt-10">
-        <h2 className="text-xl font-semibold text-white">Recent Activity</h2>
-        {recentMemory.length === 0 ? (
-          <p className="mt-4 text-gray-500">No memory entries yet</p>
-        ) : (
-          <div className="mt-4 space-y-2">
-            {recentMemory.map((entry) => (
-              <div
-                key={entry.id}
-                className="rounded-lg border border-gray-800 bg-[#111118] px-4 py-3"
-              >
-                <div className="flex items-center gap-3">
-                  <span className="rounded bg-blue-500/20 px-2 py-0.5 text-xs font-medium text-blue-400">
-                    {entry.agent}
-                  </span>
-                  <span className="text-xs text-gray-500">
-                    {timeAgo(entry.created_at)}
-                  </span>
-                </div>
-                <p className="mt-1.5 text-sm text-gray-300">
-                  {entry.content?.length > 100
-                    ? entry.content.slice(0, 100) + "..."
-                    : entry.content}
-                </p>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
+    <OverviewClient
+      todayCost={todayCost}
+      dailyBudget={dailyBudget}
+      budgetPct={budgetPct}
+      tasksDoneToday={tasksDoneToday}
+      activeAgents={activeAgents}
+      cronOk={cronOk}
+      cronError={cronError}
+      cronTotal={cronTotal}
+      projectProgress={projectProgress}
+      failedTasks={(failedTasksRes.data || []) as Array<{ id: string; title: string; agent: string; completed_at: string; error: string | null }>}
+      errorCrons={errorCrons.map((c) => ({ name: c.cron_name, error: c.last_error, lastRun: c.last_run_at }))}
+      initialActivity={activityRes.data || []}
+    />
   );
 }
