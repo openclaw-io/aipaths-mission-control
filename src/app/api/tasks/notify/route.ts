@@ -92,14 +92,16 @@ export async function POST(request: NextRequest) {
 
   // Fetch full task details for the wake message
   let instruction = "";
+  let taskModel = "";
   if (taskId) {
     const adminDb = createServiceClient();
     const { data: task } = await adminDb
       .from("agent_tasks")
-      .select("instruction")
+      .select("instruction, model")
       .eq("id", taskId)
       .single();
     if (task?.instruction) instruction = task.instruction;
+    if (task?.model) taskModel = task.model;
   }
 
   // Build notification message with full context
@@ -131,6 +133,13 @@ export async function POST(request: NextRequest) {
   }
 
   if (!isCompletion) {
+  // Add model routing info for code tasks
+  if (taskModel) {
+    const fullModel = taskModel === "opus" ? "anthropic/claude-opus-4-6" : "anthropic/claude-sonnet-4-20250514";
+    message += `\n**Model:** ${taskModel} (${fullModel})`;
+    message += `\nIf this is a code task (file edits, builds), consider spawning a code worker via sessions_spawn with runtime "acp" and model "${fullModel}". See the mission-control skill for details.\n`;
+  }
+
   message += `\n## REQUIRED: Update task status via Mission Control API
 **Before you start working**, claim the task:
 \`\`\`bash
