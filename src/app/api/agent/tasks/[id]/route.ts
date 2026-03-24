@@ -21,9 +21,9 @@ export async function PATCH(
 
   const { id } = await params;
   const body = await req.json();
-  const { status, result, error: taskError } = body;
+  const { status, result, error: taskError, description } = body;
 
-  const validStatuses = ["new", "in_progress", "done", "blocked", "failed", "pending_approval"];
+  const validStatuses = ["new", "in_progress", "done", "blocked", "failed", "pending_approval", "draft"];
   if (status && !validStatuses.includes(status)) {
     return NextResponse.json({ error: "Invalid status" }, { status: 400 });
   }
@@ -34,6 +34,7 @@ export async function PATCH(
   if (status) updates.status = status;
   if (result !== undefined) updates.result = result;
   if (taskError !== undefined) updates.error = taskError;
+  if (description !== undefined) updates.description = description;
   if (status === "in_progress") updates.started_at = new Date().toISOString();
   if (status === "done") updates.completed_at = new Date().toISOString();
   if (status === "failed") updates.completed_at = new Date().toISOString();
