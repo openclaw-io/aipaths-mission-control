@@ -18,6 +18,14 @@ import {
   drawRug,
   drawWindow,
   drawLamp,
+  drawSofa,
+  drawArmchair,
+  drawSideTable,
+  drawFridge,
+  drawMicrowave,
+  drawCounter,
+  drawStool,
+  drawSnackTable,
 } from "@/components/office/pixel-sprites";
 import type { FurnitureType, TileType, OfficeLayout, FurniturePlacement, OfficeTemplate } from "@/lib/types/office";
 import { generateThumbnail } from "@/hooks/use-office-templates";
@@ -40,6 +48,14 @@ const FURNITURE_TYPES: { type: FurnitureType; label: string }[] = [
   { type: "rug", label: "Rug" },
   { type: "window", label: "Window" },
   { type: "lamp", label: "Lamp" },
+  { type: "sofa", label: "Sofa" },
+  { type: "armchair", label: "Armchair" },
+  { type: "sidetable", label: "Side Table" },
+  { type: "fridge", label: "Fridge" },
+  { type: "microwave", label: "Microwave" },
+  { type: "counter", label: "Counter" },
+  { type: "stool", label: "Stool" },
+  { type: "snack_table", label: "Snack Table" },
 ];
 
 const TILE_LABELS: { type: TileType; label: string; color: string }[] = [
@@ -52,6 +68,8 @@ const SPRITE_DRAWERS: Record<FurnitureType, () => OffscreenCanvas | HTMLCanvasEl
   desk: drawDesk, monitor: drawMonitor, chair: drawChair, plant: drawPlant,
   bookshelf: drawBookshelf, watercooler: drawWaterCooler, whiteboard: drawWhiteboard,
   server: drawServerRack, coffee: drawCoffeeMachine, rug: drawRug, window: drawWindow, lamp: drawLamp,
+  sofa: drawSofa, armchair: drawArmchair, sidetable: drawSideTable, fridge: drawFridge,
+  microwave: drawMicrowave, counter: drawCounter, stool: drawStool, snack_table: drawSnackTable,
 };
 
 type EditorMode = "select" | "place" | "paint";

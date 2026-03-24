@@ -20,6 +20,14 @@ import {
   drawRug,
   drawWindow,
   drawLamp,
+  drawSofa,
+  drawArmchair,
+  drawSideTable,
+  drawFridge,
+  drawMicrowave,
+  drawCounter,
+  drawStool,
+  drawSnackTable,
 } from "./pixel-sprites";
 import {
   drawAgentCharacter,
@@ -86,6 +94,14 @@ const SPRITE_DRAWERS: Record<FurnitureDrawType, () => OffscreenCanvas | HTMLCanv
   rug: drawRug,
   window: drawWindow,
   lamp: drawLamp,
+  sofa: drawSofa,
+  armchair: drawArmchair,
+  sidetable: drawSideTable,
+  fridge: drawFridge,
+  microwave: drawMicrowave,
+  counter: drawCounter,
+  stool: drawStool,
+  snack_table: drawSnackTable,
 };
 
 // ── Workstation definitions ─────────────────────────────────

@@ -14,7 +14,9 @@ export type TileType = 0 | 1 | 2;
 export type FurnitureType =
   | "desk" | "monitor" | "chair" | "plant" | "bookshelf"
   | "watercooler" | "whiteboard" | "server" | "coffee"
-  | "rug" | "window" | "lamp";
+  | "rug" | "window" | "lamp"
+  | "sofa" | "armchair" | "sidetable" | "fridge" | "microwave"
+  | "snack_table" | "counter" | "stool";
 
 export interface FurniturePlacement {
   id: string;

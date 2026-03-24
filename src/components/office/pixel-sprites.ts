@@ -86,6 +86,35 @@ const PALETTE = {
   lampPole: '#888888',
   lampShade: '#ddcc88',
   lampLight: '#ffeeaa',
+  // Sofa
+  sofaBody: '#5a4a6a',
+  sofaCushion: '#6b5a7a',
+  sofaArm: '#4a3a5a',
+  // Armchair
+  armchairBody: '#6a5040',
+  armchairCushion: '#7a6050',
+  armchairArm: '#5a4030',
+  // Side table
+  sideTableTop: '#8a7040',
+  sideTableLeg: '#6b5030',
+  // Fridge
+  fridgeBody: '#ccccdd',
+  fridgeDoor: '#bbbbcc',
+  fridgeHandle: '#888899',
+  // Microwave
+  microwaveBody: '#3a3a3e',
+  microwaveGlass: '#1a2a3a',
+  microwaveBtn: '#33cc33',
+  // Counter
+  counterTop: '#aaaaaa',
+  counterBody: '#666677',
+  counterDoor: '#555566',
+  // Stool
+  stoolSeat: '#8a6a3a',
+  stoolLeg: '#6b5030',
+  // Snack table
+  snackTable: '#8a7040',
+  snackBowl: '#cc8833',
 };
 
 function createCanvas(w: number, h: number): OffscreenCanvas | HTMLCanvasElement {
@@ -488,6 +517,160 @@ export function drawLamp(): OffscreenCanvas | HTMLCanvasElement {
   // Base
   rect(ctx, 2, 28, 8, 2, PALETTE.lampPole);
   rect(ctx, 3, 30, 6, 2, PALETTE.lampPole);
+  return c;
+}
+
+/** Sofa (48x24) - wide couch */
+export function drawSofa(): OffscreenCanvas | HTMLCanvasElement {
+  const c = createCanvas(48, 24);
+  const ctx = getCtx(c);
+  // Back
+  rect(ctx, 0, 0, 48, 8, PALETTE.sofaBody);
+  rect(ctx, 2, 2, 44, 4, PALETTE.sofaCushion);
+  // Seat
+  rect(ctx, 0, 8, 48, 12, PALETTE.sofaBody);
+  rect(ctx, 4, 9, 18, 9, PALETTE.sofaCushion);
+  rect(ctx, 26, 9, 18, 9, PALETTE.sofaCushion);
+  // Arms
+  rect(ctx, 0, 4, 4, 16, PALETTE.sofaArm);
+  rect(ctx, 44, 4, 4, 16, PALETTE.sofaArm);
+  // Legs
+  rect(ctx, 2, 20, 3, 4, PALETTE.sofaArm);
+  rect(ctx, 43, 20, 3, 4, PALETTE.sofaArm);
+  return c;
+}
+
+/** Armchair (24x24) */
+export function drawArmchair(): OffscreenCanvas | HTMLCanvasElement {
+  const c = createCanvas(24, 24);
+  const ctx = getCtx(c);
+  // Back
+  rect(ctx, 2, 0, 20, 8, PALETTE.armchairBody);
+  rect(ctx, 4, 2, 16, 4, PALETTE.armchairCushion);
+  // Seat
+  rect(ctx, 2, 8, 20, 10, PALETTE.armchairBody);
+  rect(ctx, 5, 9, 14, 7, PALETTE.armchairCushion);
+  // Arms
+  rect(ctx, 0, 4, 4, 14, PALETTE.armchairArm);
+  rect(ctx, 20, 4, 4, 14, PALETTE.armchairArm);
+  // Legs
+  rect(ctx, 2, 18, 3, 6, PALETTE.armchairArm);
+  rect(ctx, 19, 18, 3, 6, PALETTE.armchairArm);
+  return c;
+}
+
+/** Side table (16x20) */
+export function drawSideTable(): OffscreenCanvas | HTMLCanvasElement {
+  const c = createCanvas(16, 20);
+  const ctx = getCtx(c);
+  // Top
+  rect(ctx, 1, 0, 14, 3, PALETTE.sideTableTop);
+  rect(ctx, 2, 1, 12, 1, '#9a8050'); // highlight
+  // Legs
+  rect(ctx, 2, 3, 2, 15, PALETTE.sideTableLeg);
+  rect(ctx, 12, 3, 2, 15, PALETTE.sideTableLeg);
+  // Shelf
+  rect(ctx, 3, 10, 10, 2, PALETTE.sideTableLeg);
+  // Base
+  rect(ctx, 1, 18, 14, 2, PALETTE.sideTableLeg);
+  return c;
+}
+
+/** Fridge (16x32) */
+export function drawFridge(): OffscreenCanvas | HTMLCanvasElement {
+  const c = createCanvas(16, 32);
+  const ctx = getCtx(c);
+  // Body
+  rect(ctx, 0, 0, 16, 32, PALETTE.fridgeBody);
+  // Upper door (freezer)
+  rect(ctx, 1, 1, 14, 10, PALETTE.fridgeDoor);
+  rect(ctx, 12, 3, 2, 6, PALETTE.fridgeHandle);
+  // Lower door (fridge)
+  rect(ctx, 1, 13, 14, 17, PALETTE.fridgeDoor);
+  rect(ctx, 12, 15, 2, 10, PALETTE.fridgeHandle);
+  // Gap between doors
+  rect(ctx, 1, 11, 14, 2, '#aaaabb');
+  // Base
+  rect(ctx, 0, 30, 16, 2, '#999999');
+  return c;
+}
+
+/** Microwave (16x12) */
+export function drawMicrowave(): OffscreenCanvas | HTMLCanvasElement {
+  const c = createCanvas(16, 12);
+  const ctx = getCtx(c);
+  // Body
+  rect(ctx, 0, 0, 16, 12, PALETTE.microwaveBody);
+  // Glass window
+  rect(ctx, 1, 1, 10, 9, PALETTE.microwaveGlass);
+  rect(ctx, 2, 2, 8, 7, '#2a3a4a');
+  // Control panel
+  rect(ctx, 12, 2, 3, 4, '#4a4a50');
+  px(ctx, 13, 3, PALETTE.microwaveBtn);
+  px(ctx, 13, 5, '#cc3333');
+  // Handle
+  rect(ctx, 11, 2, 1, 8, '#555566');
+  return c;
+}
+
+/** Counter (48x20) - kitchen counter */
+export function drawCounter(): OffscreenCanvas | HTMLCanvasElement {
+  const c = createCanvas(48, 20);
+  const ctx = getCtx(c);
+  // Countertop
+  rect(ctx, 0, 0, 48, 4, PALETTE.counterTop);
+  rect(ctx, 1, 1, 46, 2, '#bbbbbb'); // highlight
+  // Body
+  rect(ctx, 0, 4, 48, 14, PALETTE.counterBody);
+  // Doors
+  rect(ctx, 2, 6, 12, 10, PALETTE.counterDoor);
+  rect(ctx, 16, 6, 12, 10, PALETTE.counterDoor);
+  rect(ctx, 30, 6, 12, 10, PALETTE.counterDoor);
+  // Handles
+  rect(ctx, 7, 10, 2, 2, PALETTE.counterTop);
+  rect(ctx, 21, 10, 2, 2, PALETTE.counterTop);
+  rect(ctx, 35, 10, 2, 2, PALETTE.counterTop);
+  // Base
+  rect(ctx, 0, 18, 48, 2, '#555566');
+  return c;
+}
+
+/** Stool (12x20) - bar stool */
+export function drawStool(): OffscreenCanvas | HTMLCanvasElement {
+  const c = createCanvas(12, 20);
+  const ctx = getCtx(c);
+  // Seat (round-ish)
+  rect(ctx, 1, 0, 10, 4, PALETTE.stoolSeat);
+  rect(ctx, 2, 1, 8, 2, '#9a7a4a'); // highlight
+  // Center pole
+  rect(ctx, 5, 4, 2, 10, PALETTE.stoolLeg);
+  // Foot ring
+  rect(ctx, 2, 11, 8, 1, PALETTE.stoolLeg);
+  // Legs (4 angled)
+  rect(ctx, 1, 14, 2, 6, PALETTE.stoolLeg);
+  rect(ctx, 9, 14, 2, 6, PALETTE.stoolLeg);
+  rect(ctx, 3, 16, 2, 4, PALETTE.stoolLeg);
+  rect(ctx, 7, 16, 2, 4, PALETTE.stoolLeg);
+  return c;
+}
+
+/** Snack table (24x16) - small table with snacks */
+export function drawSnackTable(): OffscreenCanvas | HTMLCanvasElement {
+  const c = createCanvas(24, 16);
+  const ctx = getCtx(c);
+  // Table top
+  rect(ctx, 0, 0, 24, 4, PALETTE.snackTable);
+  rect(ctx, 1, 1, 22, 2, '#9a8050'); // highlight
+  // Legs
+  rect(ctx, 1, 4, 2, 10, PALETTE.sideTableLeg);
+  rect(ctx, 21, 4, 2, 10, PALETTE.sideTableLeg);
+  // Base bar
+  rect(ctx, 2, 12, 20, 2, PALETTE.sideTableLeg);
+  // Snack bowl
+  rect(ctx, 4, 0, 6, 2, PALETTE.snackBowl);
+  // Fruit bowl
+  rect(ctx, 14, 0, 6, 2, '#44aa44');
+  px(ctx, 16, 0, '#cc3333'); // apple
   return c;
 }
 
