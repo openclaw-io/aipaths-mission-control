@@ -247,6 +247,7 @@ interface CanvasAgentSprite {
   appearance: AgentAppearance;
   workstationIdx: number;
   zone: "work" | "kitchen" | "lounge";
+  lastWanderTime: number;
   x: number;
   y: number;
   targetX: number;
@@ -435,7 +436,7 @@ export function PixelOffice({ layout, agents = [], agentZones = {}, className = 
           canvasSprites.set(agent.id, {
             id: agent.id, name: agent.name, status: agent.agentStatus, prevStatus: agent.agentStatus,
             animation: agent.animation, phaseAge: agent.phaseAge,
-            appearance: getAppearanceForAgent(agent.id), workstationIdx: slot, zone,
+            appearance: getAppearanceForAgent(agent.id), workstationIdx: slot, zone, lastWanderTime: Date.now(),
             x: finalTargetX, y: finalTargetY + 40, targetX: finalTargetX, targetY: finalTargetY,
             animFrame: 0, spawnTime: agent.spawnedAt, despawning: agent.lifecycle === "despawning",
             despawnAlpha: 1, currentTask: agent.currentTask, isSubAgent: agent.isSubAgent, parentId: agent.parentId,
@@ -556,6 +557,23 @@ export function PixelOffice({ layout, agents = [], agentZones = {}, className = 
             if (sprite.zone === "work") sprite.animation = "working";
             else if (sprite.zone === "lounge") sprite.animation = "sleeping";
             else sprite.animation = "idle";
+            sprite.lastWanderTime = Date.now();
+          }
+
+          // Kitchen wandering: pick new spot every 5-10s
+          if (sprite.zone === "kitchen" && (sprite.animation as string) !== "walking") {
+            const wanderInterval = 5000 + Math.random() * 5000; // 5-10s per agent
+            if (Date.now() - sprite.lastWanderTime > wanderInterval) {
+              const zp = getZonePositions(layout);
+              const spots = zp.kitchen.spots;
+              if (spots.length > 0) {
+                const spot = spots[Math.floor(Math.random() * spots.length)];
+                sprite.targetX = spot.x * TILE_SIZE * SCALE;
+                sprite.targetY = spot.y * TILE_SIZE * SCALE;
+                sprite.animation = "walking";
+                sprite.lastWanderTime = Date.now();
+              }
+            }
           }
         }
 
