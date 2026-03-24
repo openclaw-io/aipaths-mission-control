@@ -1,6 +1,7 @@
 import { createClient } from "@/lib/supabase/server";
 import { timeAgo } from "@/lib/utils";
 import { AGENTS } from "@/lib/agents";
+import { SchedulerToggle } from "@/components/SchedulerToggle";
 
 const STATUS_COLORS: Record<string, string> = {
   done: "bg-green-500",
@@ -63,8 +64,13 @@ export default async function OverviewPage() {
         Welcome to Mission Control. Your agent dashboard at a glance.
       </p>
 
+      {/* Scheduler Toggle */}
+      <div className="mt-6">
+        <SchedulerToggle />
+      </div>
+
       {/* Stat Cards */}
-      <div className="mt-8 grid grid-cols-2 gap-4 lg:grid-cols-4">
+      <div className="mt-6 grid grid-cols-2 gap-4 lg:grid-cols-4">
         {stats.map((stat) => (
           <div
             key={stat.label}
