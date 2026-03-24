@@ -83,15 +83,22 @@ export function ProjectsClient({
                 (t) => !t.tags?.includes("epic")
               );
 
+              // Use leaf tasks for progress if they exist, otherwise use epics
+              const epicsOnly = projectEpics.filter((t) => t.tags?.includes("epic"));
+              const leafTasks = [...allProjectTasks, ...directTasks];
+              const hasLeafTasks = leafTasks.length > 0;
+              const totalForProgress = hasLeafTasks ? leafTasks.length : epicsOnly.length;
+              const doneForProgress = hasLeafTasks
+                ? leafTasks.filter((t) => t.status === "done").length
+                : epicsOnly.filter((t) => t.status === "done").length;
+
               return (
                 <ProjectCard
                   key={project.id}
                   project={project}
-                  epics={projectEpics.filter((t) => t.tags?.includes("epic"))}
-                  totalTasks={allProjectTasks.length + directTasks.length}
-                  doneTasks={
-                    [...allProjectTasks, ...directTasks].filter((t) => t.status === "done").length
-                  }
+                  epics={epicsOnly}
+                  totalTasks={totalForProgress}
+                  doneTasks={doneForProgress}
                   isExpanded={expandedProject === project.id}
                   onToggle={() =>
                     setExpandedProject(expandedProject === project.id ? null : project.id)
