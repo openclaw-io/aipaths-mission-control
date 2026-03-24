@@ -1,6 +1,7 @@
 import { createClient } from "@/lib/supabase/server";
 import { timeAgo } from "@/lib/utils";
 import { AGENTS } from "@/lib/agents";
+import { AgentSessionBadge } from "@/components/agents/AgentSessionBadge";
 
 const STATUS_COLORS: Record<string, string> = {
   done: "text-green-400",
@@ -75,10 +76,15 @@ export default async function AgentsPage() {
               {/* Header */}
               <div className="flex items-center gap-3">
                 <span className="text-3xl">{agent.emoji}</span>
-                <h3 className="text-lg font-semibold text-white">
-                  {agent.name}
-                </h3>
+                <div className="flex-1">
+                  <h3 className="text-lg font-semibold text-white">
+                    {agent.name}
+                  </h3>
+                </div>
               </div>
+
+              {/* Session status */}
+              <AgentSessionBadge agentId={agent.id} />
 
               {/* Role */}
               <p className="mt-2 text-sm text-gray-400">{agent.role}</p>
