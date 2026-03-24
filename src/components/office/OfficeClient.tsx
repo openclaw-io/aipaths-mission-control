@@ -6,6 +6,7 @@ import { OfficeEditor } from "@/components/editor/office-editor";
 import { useOfficeState } from "@/hooks/use-office-state";
 import { useOfficeAgents } from "@/hooks/use-office-agents";
 import { useOfficeTemplates } from "@/hooks/use-office-templates";
+import { useAgentZones } from "@/hooks/useAgentZones";
 
 interface TaskRow {
   id: string;
@@ -40,6 +41,7 @@ export function OfficeClient({
   const officeState = useOfficeState();
   const agents = useOfficeAgents(initialTasks, initialMemory);
   const templateManager = useOfficeTemplates();
+  const agentZones = useAgentZones();
 
   return (
     <div className="flex flex-col" style={{ height: "calc(100vh - 0px)" }}>
@@ -94,7 +96,7 @@ export function OfficeClient({
       {/* Content */}
       <div className="flex-1 overflow-hidden">
         {tab === "view" ? (
-          <PixelOffice layout={officeState.layout} agents={agents} />
+          <PixelOffice layout={officeState.layout} agents={agents} agentZones={agentZones} />
         ) : (
           <OfficeEditor
             layout={officeState.layout}

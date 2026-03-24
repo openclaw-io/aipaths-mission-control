@@ -3,6 +3,7 @@
 import React, { useRef, useEffect, useCallback, useState, useMemo } from "react";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import type { AgentStatus, FurniturePlacement, OfficeLayout, SpriteAgent } from "@/lib/types/office";
+import { getZonePositions, getRandomZonePosition, type ZonePositions } from "@/lib/office-zones";
 import {
   TILE_SIZE,
   drawFloorTile,
@@ -245,6 +246,7 @@ interface CanvasAgentSprite {
   phaseAge: number;
   appearance: AgentAppearance;
   workstationIdx: number;
+  zone: "work" | "kitchen" | "lounge";
   x: number;
   y: number;
   targetX: number;
@@ -337,12 +339,13 @@ function renderOfficeBackground(
 export interface PixelOfficeProps {
   layout: OfficeLayout;
   agents?: SpriteAgent[];
+  agentZones?: Record<string, { zone: "work" | "kitchen" | "lounge"; task?: string }>;
   className?: string;
 }
 
 // ── Component ───────────────────────────────────────────────
 
-export function PixelOffice({ layout, agents = [], className = "" }: PixelOfficeProps) {
+export function PixelOffice({ layout, agents = [], agentZones = {}, className = "" }: PixelOfficeProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const officeStateRef = useRef<OfficeCanvasState | null>(null);
@@ -393,27 +396,52 @@ export function PixelOffice({ layout, agents = [], className = "" }: PixelOffice
           existing.animation = agent.animation;
           existing.phaseAge = agent.phaseAge;
           existing.despawning = agent.lifecycle === "despawning";
+
+          // Zone-based positioning
+          const zoneInfo = agentZones[agent.id];
+          if (zoneInfo && zoneInfo.zone !== existing.zone) {
+            existing.zone = zoneInfo.zone;
+            const zonePositions = getZonePositions(layout);
+            const pos = getRandomZonePosition(zonePositions, zoneInfo.zone, usedSlots);
+            existing.targetX = pos.x * TILE_SIZE * SCALE;
+            existing.targetY = pos.y * TILE_SIZE * SCALE;
+            // Walking animation during transit
+            existing.animation = "walking";
+          }
+
           if (statusChanged && !existing.despawning) {
             particlesRef.current.push(...createSpawnParticles(existing.x, existing.y - 10, agent.agentStatus));
           }
         } else {
           let slot = 0;
           while (usedSlots.has(slot) && slot < workstations.length) slot++;
-          const ws = slot < workstations.length
-            ? workstations[slot]
-            : { index: slot, seatX: 15 * TILE_SIZE * SCALE + (slot - workstations.length) * 50, seatY: 12 * TILE_SIZE * SCALE, labelX: 15 * TILE_SIZE * SCALE + (slot - workstations.length) * 50, labelY: 14 * TILE_SIZE * SCALE };
           usedSlots.add(slot);
+
+          // Determine initial position from zone
+          const zoneInfo = agentZones[agent.id];
+          const zone = zoneInfo?.zone || "lounge";
+          const zonePositions = getZonePositions(layout);
+          const pos = getRandomZonePosition(zonePositions, zone, usedSlots);
+          const targetX = pos.x * TILE_SIZE * SCALE;
+          const targetY = pos.y * TILE_SIZE * SCALE;
+
+          // Fallback to workstation if in work zone
+          const ws = zone === "work" && slot < workstations.length
+            ? workstations[slot]
+            : null;
+          const finalTargetX = ws ? ws.seatX : targetX;
+          const finalTargetY = ws ? ws.seatY : targetY;
 
           canvasSprites.set(agent.id, {
             id: agent.id, name: agent.name, status: agent.agentStatus, prevStatus: agent.agentStatus,
             animation: agent.animation, phaseAge: agent.phaseAge,
-            appearance: getAppearanceForAgent(agent.id), workstationIdx: slot,
-            x: ws.seatX, y: ws.seatY + 40, targetX: ws.seatX, targetY: ws.seatY,
+            appearance: getAppearanceForAgent(agent.id), workstationIdx: slot, zone,
+            x: finalTargetX, y: finalTargetY + 40, targetX: finalTargetX, targetY: finalTargetY,
             animFrame: 0, spawnTime: agent.spawnedAt, despawning: agent.lifecycle === "despawning",
             despawnAlpha: 1, currentTask: agent.currentTask, isSubAgent: agent.isSubAgent, parentId: agent.parentId,
           });
           if (prevIds.size > 0) {
-            particlesRef.current.push(...createSpawnParticles(ws.seatX, ws.seatY, agent.agentStatus));
+            particlesRef.current.push(...createSpawnParticles(finalTargetX, finalTargetY, agent.agentStatus));
           }
         }
       }
@@ -510,8 +538,26 @@ export function PixelOffice({ layout, agents = [], className = "" }: PixelOffice
 
       for (const sprite of sortedSprites) {
         const animParams = getAnimationParams(sprite.animation, sprite.phaseAge, frame);
-        sprite.x += (sprite.targetX - sprite.x) * 0.12;
-        sprite.y += (sprite.targetY - sprite.y) * 0.12;
+        // Smooth movement towards target (lerp)
+        const dx = sprite.targetX - sprite.x;
+        const dy = sprite.targetY - sprite.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+
+        if (dist > 2) {
+          // Moving — use slower speed for walking effect (0.06 instead of 0.12)
+          const speed = sprite.animation === "walking" ? 0.06 : 0.12;
+          sprite.x += dx * speed;
+          sprite.y += dy * speed;
+        } else {
+          sprite.x = sprite.targetX;
+          sprite.y = sprite.targetY;
+          // Arrived — set zone-appropriate animation
+          if (sprite.animation === "walking") {
+            if (sprite.zone === "work") sprite.animation = "working";
+            else if (sprite.zone === "lounge") sprite.animation = "sleeping";
+            else sprite.animation = "idle";
+          }
+        }
 
         if (sprite.despawning && animParams.opacityMult <= 0.01) { canvasSprites.delete(sprite.id); continue; }
         if (sprite.despawning) {
