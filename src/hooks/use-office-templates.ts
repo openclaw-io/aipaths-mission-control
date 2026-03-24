@@ -2,6 +2,7 @@
 
 import { useState, useCallback } from "react";
 import type { OfficeLayout, OfficeTemplate } from "@/lib/types/office";
+import { BUILTIN_TEMPLATES } from "@/lib/builtin-templates";
 
 const STORAGE_KEY = "mc-office-templates";
 
@@ -10,14 +11,20 @@ function generateId(): string {
 }
 
 function loadTemplates(): OfficeTemplate[] {
-  if (typeof window === "undefined") return [];
+  if (typeof window === "undefined") return [...BUILTIN_TEMPLATES];
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return JSON.parse(raw) as OfficeTemplate[];
+    const userTemplates = raw ? (JSON.parse(raw) as OfficeTemplate[]) : [];
+    // Merge built-in + user templates (built-in first, no duplicates)
+    const userIds = new Set(userTemplates.map((t) => t.id));
+    return [
+      ...BUILTIN_TEMPLATES.filter((t) => !userIds.has(t.id)),
+      ...userTemplates,
+    ];
   } catch {
     /* ignore */
   }
-  return [];
+  return [...BUILTIN_TEMPLATES];
 }
 
 function persistTemplates(templates: OfficeTemplate[]) {
