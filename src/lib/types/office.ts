@@ -32,6 +32,16 @@ export interface OfficeLayout {
   furniture: FurniturePlacement[];
 }
 
+export interface OfficeTemplate {
+  id: string;
+  name: string;
+  thumbnail?: string;
+  layout: OfficeLayout;
+  builtIn?: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export type SpriteAnimation =
   | "idle" | "working" | "spawning" | "despawning"
   | "walking" | "error" | "sleeping" | "celebrating";

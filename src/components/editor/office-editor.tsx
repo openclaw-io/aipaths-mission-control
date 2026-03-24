@@ -19,8 +19,9 @@ import {
   drawWindow,
   drawLamp,
 } from "@/components/office/pixel-sprites";
-import type { FurnitureType, TileType, OfficeLayout, FurniturePlacement } from "@/lib/types/office";
-import { Trash2, RotateCcw, Download, Upload, Grid3X3, MousePointer, Paintbrush } from "lucide-react";
+import type { FurnitureType, TileType, OfficeLayout, FurniturePlacement, OfficeTemplate } from "@/lib/types/office";
+import { generateThumbnail } from "@/hooks/use-office-templates";
+import { Trash2, RotateCcw, Download, Upload, Grid3X3, MousePointer, Paintbrush, Save, Copy, Pencil } from "lucide-react";
 
 // ── Constants ───────────────────────────────────────────────
 
@@ -69,11 +70,20 @@ export interface OfficeEditorProps {
   onReset: () => void;
   onExport: () => string;
   onImport: (json: string) => boolean;
+  onLoadLayout: (layout: OfficeLayout) => void;
+  templates: OfficeTemplate[];
+  onSaveTemplate: (name: string, layout: OfficeLayout, thumbnail?: string) => OfficeTemplate;
+  onUpdateTemplate: (id: string, layout: OfficeLayout, thumbnail?: string) => void;
+  onDeleteTemplate: (id: string) => void;
+  onDuplicateTemplate: (id: string, newName: string) => OfficeTemplate | null;
+  onRenameTemplate: (id: string, name: string) => void;
 }
 
 export function OfficeEditor({
   layout, selectedId, onSelect, onAddFurniture, onMoveFurniture,
   onRemoveFurniture, onUpdateLabel, onSetTile, onReset, onExport, onImport,
+  onLoadLayout, templates, onSaveTemplate, onUpdateTemplate, onDeleteTemplate,
+  onDuplicateTemplate, onRenameTemplate,
 }: OfficeEditorProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -86,6 +96,10 @@ export function OfficeEditor({
   const [editingLabel, setEditingLabel] = useState(false);
   const [labelValue, setLabelValue] = useState("");
   const [isPainting, setIsPainting] = useState(false);
+  const [showSavePrompt, setShowSavePrompt] = useState(false);
+  const [templateName, setTemplateName] = useState("");
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
 
   const CANVAS_W = layout.cols * TILE_SIZE * SCALE;
   const CANVAS_H = layout.rows * TILE_SIZE * SCALE;
@@ -294,6 +308,31 @@ export function OfficeEditor({
 
   const selectedItem = selectedId ? layout.furniture.find((f) => f.id === selectedId) : null;
 
+  const handleSaveTemplate = useCallback(() => {
+    if (!templateName.trim()) return;
+    const thumb = generateThumbnail(canvasRef.current);
+    onSaveTemplate(templateName.trim(), layout, thumb);
+    setTemplateName("");
+    setShowSavePrompt(false);
+  }, [templateName, layout, onSaveTemplate]);
+
+  const handleLoadTemplate = useCallback((tpl: OfficeTemplate) => {
+    if (!confirm(`Load template "${tpl.name}"? Current unsaved layout will be replaced.`)) return;
+    onLoadLayout(tpl.layout);
+  }, [onLoadLayout]);
+
+  const handleUpdateTemplate = useCallback((tpl: OfficeTemplate) => {
+    if (!confirm(`Overwrite template "${tpl.name}" with the current layout?`)) return;
+    const thumb = generateThumbnail(canvasRef.current);
+    onUpdateTemplate(tpl.id, layout, thumb);
+  }, [layout, onUpdateTemplate]);
+
+  const handleDuplicateTemplate = useCallback((tpl: OfficeTemplate) => {
+    const name = prompt("Name for the copy:", `${tpl.name} (copy)`);
+    if (!name) return;
+    onDuplicateTemplate(tpl.id, name);
+  }, [onDuplicateTemplate]);
+
   return (
     <div className="flex h-full">
       {/* Sidebar */}
@@ -399,20 +438,154 @@ export function OfficeEditor({
         </div>
       </div>
 
-      {/* Canvas area */}
-      <div ref={containerRef} className="flex-1 flex items-center justify-center overflow-hidden bg-[#0a150a] p-4 relative"
-        onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp}>
-        <canvas ref={canvasRef} width={CANVAS_W} height={CANVAS_H}
-          style={{ width: CANVAS_W * canvasScale, height: CANVAS_H * canvasScale, imageRendering: "pixelated", cursor: mode === "paint" ? "crosshair" : mode === "place" ? "copy" : dragging ? "grabbing" : "default" }}
-          className="rounded-lg shadow-2xl border border-white/10"
-          onMouseDown={handleMouseDown} onMouseMove={handleMouseMove}
-        />
-        <div className="absolute top-3 left-3 bg-black/70 text-white text-xs px-3 py-1.5 rounded-md font-mono">
-          {mode === "select" && "Click to select, drag to move"}
-          {mode === "place" && placingType && `Click to place: ${placingType}`}
-          {mode === "place" && !placingType && "Select furniture from sidebar"}
-          {mode === "paint" && `Painting: ${TILE_LABELS.find((t) => t.type === paintTile)?.label}`}
+      {/* Canvas + Templates area */}
+      <div className="flex-1 flex flex-col overflow-hidden">
+        {/* Canvas */}
+        <div ref={containerRef} className="flex-1 flex items-center justify-center overflow-hidden bg-[#0a150a] p-4 relative"
+          onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp}>
+          <canvas ref={canvasRef} width={CANVAS_W} height={CANVAS_H}
+            style={{ width: CANVAS_W * canvasScale, height: CANVAS_H * canvasScale, imageRendering: "pixelated", cursor: mode === "paint" ? "crosshair" : mode === "place" ? "copy" : dragging ? "grabbing" : "default" }}
+            className="rounded-lg shadow-2xl border border-white/10"
+            onMouseDown={handleMouseDown} onMouseMove={handleMouseMove}
+          />
+          <div className="absolute top-3 left-3 bg-black/70 text-white text-xs px-3 py-1.5 rounded-md font-mono">
+            {mode === "select" && "Click to select, drag to move"}
+            {mode === "place" && placingType && `Click to place: ${placingType}`}
+            {mode === "place" && !placingType && "Select furniture from sidebar"}
+            {mode === "paint" && `Painting: ${TILE_LABELS.find((t) => t.type === paintTile)?.label}`}
+          </div>
         </div>
+
+        {/* Templates strip */}
+        {mode === "select" && (
+          <div className="shrink-0 border-t border-white/10 bg-[#111] px-4 py-3">
+            <div className="flex items-center gap-3 mb-2">
+              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Templates</h3>
+              {!showSavePrompt ? (
+                <button
+                  onClick={() => setShowSavePrompt(true)}
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border border-blue-500/30 transition-colors"
+                >
+                  <Save size={11} /> Save Current
+                </button>
+              ) : (
+                <form
+                  onSubmit={(e) => { e.preventDefault(); handleSaveTemplate(); }}
+                  className="flex items-center gap-2"
+                >
+                  <input
+                    value={templateName}
+                    onChange={(e) => setTemplateName(e.target.value)}
+                    placeholder="Template name..."
+                    className="bg-white/10 border border-white/20 rounded px-2 py-1 text-xs text-white focus:outline-none focus:border-blue-500 w-40"
+                    autoFocus
+                  />
+                  <button
+                    type="submit"
+                    disabled={!templateName.trim()}
+                    className="px-2 py-1 rounded text-xs bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-40 transition-colors"
+                  >
+                    Save
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setShowSavePrompt(false); setTemplateName(""); }}
+                    className="px-2 py-1 rounded text-xs bg-white/5 hover:bg-white/10 text-gray-400 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </form>
+              )}
+            </div>
+            {templates.length === 0 ? (
+              <p className="text-xs text-gray-600">No saved templates yet. Click &quot;Save Current&quot; to save this layout as a template.</p>
+            ) : (
+              <div className="flex gap-3 overflow-x-auto pb-1">
+                {templates.map((tpl) => (
+                  <div key={tpl.id} className="group relative shrink-0 w-[140px]">
+                    {/* Thumbnail + Click to load */}
+                    <button
+                      onClick={() => handleLoadTemplate(tpl)}
+                      className="w-full rounded-lg overflow-hidden border border-white/10 hover:border-blue-500/50 transition-colors bg-[#0a150a]"
+                      title={`Load "${tpl.name}"`}
+                    >
+                      {tpl.thumbnail ? (
+                        <img
+                          src={tpl.thumbnail}
+                          alt={tpl.name}
+                          className="w-full h-[80px] object-cover"
+                          style={{ imageRendering: "pixelated" }}
+                        />
+                      ) : (
+                        <div className="w-full h-[80px] flex items-center justify-center text-gray-600 text-xs">
+                          No preview
+                        </div>
+                      )}
+                    </button>
+                    {/* Name */}
+                    <div className="mt-1 px-1">
+                      {renamingId === tpl.id ? (
+                        <input
+                          value={renameValue}
+                          onChange={(e) => setRenameValue(e.target.value)}
+                          onBlur={() => {
+                            if (renameValue.trim()) onRenameTemplate(tpl.id, renameValue.trim());
+                            setRenamingId(null);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              if (renameValue.trim()) onRenameTemplate(tpl.id, renameValue.trim());
+                              setRenamingId(null);
+                            }
+                            if (e.key === "Escape") setRenamingId(null);
+                          }}
+                          className="w-full bg-white/10 border border-white/20 rounded px-1.5 py-0.5 text-[10px] text-white focus:outline-none focus:border-blue-500"
+                          autoFocus
+                        />
+                      ) : (
+                        <p className="text-[10px] text-gray-400 truncate">{tpl.name}</p>
+                      )}
+                    </div>
+                    {/* Action buttons (visible on hover) */}
+                    <div className="absolute top-1 right-1 flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleUpdateTemplate(tpl); }}
+                        className="p-1 rounded bg-black/70 hover:bg-black/90 text-gray-300 hover:text-white transition-colors"
+                        title="Overwrite with current layout"
+                      >
+                        <Save size={10} />
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setRenamingId(tpl.id); setRenameValue(tpl.name); }}
+                        className="p-1 rounded bg-black/70 hover:bg-black/90 text-gray-300 hover:text-white transition-colors"
+                        title="Rename"
+                      >
+                        <Pencil size={10} />
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleDuplicateTemplate(tpl); }}
+                        className="p-1 rounded bg-black/70 hover:bg-black/90 text-gray-300 hover:text-white transition-colors"
+                        title="Duplicate"
+                      >
+                        <Copy size={10} />
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (confirm(`Delete template "${tpl.name}"?`)) onDeleteTemplate(tpl.id);
+                        }}
+                        className="p-1 rounded bg-black/70 hover:bg-red-900/80 text-gray-300 hover:text-red-400 transition-colors"
+                        title="Delete"
+                      >
+                        <Trash2 size={10} />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
