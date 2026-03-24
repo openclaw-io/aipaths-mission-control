@@ -110,7 +110,7 @@ export function EditTaskModal({
   });
   const [showCalendar, setShowCalendar] = useState(false);
   const [isBacklog, setIsBacklog] = useState(task.tags?.includes("backlog") || false);
-  const [dependsOn, setDependsOn] = useState(task.depends_on || "");
+  const [dependsOn, setDependsOn] = useState(task.depends_on?.[0] || "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 

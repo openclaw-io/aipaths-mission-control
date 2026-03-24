@@ -31,14 +31,13 @@ export async function POST() {
 
   for (const task of tasks) {
     // If has dependency, check if it's done
-    if (task.depends_on) {
-      const { data: dep } = await supabase
+    if (task.depends_on?.length) {
+      const { data: deps } = await supabase
         .from("agent_tasks")
         .select("status")
-        .eq("id", task.depends_on)
-        .single();
-
-      if (dep && dep.status !== "done") continue; // Still blocked
+        .in("id", task.depends_on);
+      const allDone = deps?.every((d: any) => d.status === "done") ?? false;
+      if (!allDone) continue; // Still blocked
     }
 
     // Update status to "new" if blocked, and clear scheduled_for to mark as activated

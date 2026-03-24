@@ -61,10 +61,10 @@ export function TaskDetailModal({
     return () => window.removeEventListener("keydown", handleKey);
   }, [onClose, showEdit]);
 
-  const dependency = task.depends_on
-    ? allTasks.find((t) => t.id === task.depends_on)
-    : null;
-  const dependents = allTasks.filter((t) => t.depends_on === task.id);
+  const dependencies = task.depends_on?.length
+    ? allTasks.filter((t) => task.depends_on!.includes(t.id))
+    : [];
+  const dependents = allTasks.filter((t) => t.depends_on?.includes(task.id));
   const badge = STATUS_BADGE[task.status] ?? { label: task.status, color: "bg-gray-500/20 text-gray-400" };
 
   async function handleAction(newStatus: string) {
@@ -181,14 +181,18 @@ export function TaskDetailModal({
             </div>
 
           {/* Dependencies */}
-          {(dependency || dependents.length > 0) && (
+          {(dependencies.length > 0 || dependents.length > 0) && (
             <div className="pt-2 border-t border-gray-800 space-y-2">
-              {dependency && (
-                <Field label="Depends on">
-                  <p className="text-sm text-gray-300">
-                    ⛓️ {dependency.title}
-                    <span className="ml-2 text-xs text-gray-500">({dependency.status})</span>
-                  </p>
+              {dependencies.length > 0 && (
+                <Field label={`Depends on (${dependencies.length})`}>
+                  <div className="space-y-1">
+                    {dependencies.map((dep) => (
+                      <p key={dep.id} className="text-sm text-gray-300">
+                        ⛓️ {dep.title}
+                        <span className="ml-2 text-xs text-gray-500">({dep.status})</span>
+                      </p>
+                    ))}
+                  </div>
                 </Field>
               )}
               {dependents.length > 0 && (

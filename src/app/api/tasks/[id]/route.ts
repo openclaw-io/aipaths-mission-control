@@ -14,18 +14,23 @@ export async function DELETE(
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  // Unblock dependents: clear depends_on and promote blocked → new
-  await supabase
+  // Remove this task from all dependents' depends_on arrays and unblock if no deps left
+  const { data: dependents } = await supabase
     .from("agent_tasks")
-    .update({ depends_on: null, status: "new" })
-    .eq("depends_on", id)
-    .eq("status", "blocked");
+    .select("id, depends_on, status")
+    .contains("depends_on", [id]);
 
-  // Also clear depends_on for non-blocked dependents (just in case)
-  await supabase
-    .from("agent_tasks")
-    .update({ depends_on: null })
-    .eq("depends_on", id);
+  if (dependents) {
+    for (const dep of dependents) {
+      const newDeps = (dep.depends_on || []).filter((d: string) => d !== id);
+      const updates: Record<string, unknown> = { depends_on: newDeps.length ? newDeps : [] };
+      // If no more dependencies and task was blocked, promote to new
+      if (newDeps.length === 0 && dep.status === "blocked") {
+        updates.status = "new";
+      }
+      await supabase.from("agent_tasks").update(updates).eq("id", dep.id);
+    }
+  }
 
   const { error } = await supabase.from("agent_tasks").delete().eq("id", id);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });

@@ -93,9 +93,9 @@ function TaskCard({
 }) {
   const [loading, setLoading] = useState(false);
 
-  const dependents = allTasks.filter((t) => t.depends_on === task.id);
-  const dependency = task.depends_on
-    ? allTasks.find((t) => t.id === task.depends_on)
+  const dependents = allTasks.filter((t) => t.depends_on?.includes(task.id));
+  const dependency = task.depends_on?.length
+    ? allTasks.find((t) => t.id === task.depends_on![0])
     : null;
 
   async function handleStatusChange(newStatus: string) {

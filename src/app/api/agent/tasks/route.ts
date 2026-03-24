@@ -46,7 +46,7 @@ export async function POST(req: NextRequest) {
   if (!checkAuth(req)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const body = await req.json();
-  const { title, instruction, agent, created_by, depends_on, scheduled_for, tags, priority, assignee } = body;
+  const { title, instruction, agent, created_by, depends_on, scheduled_for, tags, priority, assignee, parent_id, description } = body;
 
   if (!title || !agent) {
     return NextResponse.json({ error: "title and agent required" }, { status: 400 });
@@ -54,7 +54,12 @@ export async function POST(req: NextRequest) {
 
   const supabase = createServiceClient();
 
-  const status = depends_on ? "blocked" : "new";
+  // Normalize depends_on to array
+  const depsArray = depends_on
+    ? Array.isArray(depends_on) ? depends_on : [depends_on]
+    : [];
+
+  const status = body.status || (depsArray.length ? "blocked" : "new");
 
   const { data, error } = await supabase
     .from("agent_tasks")
@@ -65,7 +70,9 @@ export async function POST(req: NextRequest) {
       created_by: created_by || "agent",
       status,
       priority: priority || "medium",
-      depends_on: depends_on || null,
+      depends_on: depsArray,
+      parent_id: parent_id || null,
+      description: description || null,
       scheduled_for: scheduled_for || null,
       tags: tags || [],
       assignee: assignee || null,

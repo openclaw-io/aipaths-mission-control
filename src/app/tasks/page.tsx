@@ -10,7 +10,9 @@ export interface Task {
   instruction: string | null;
   result: string | null;
   tags: string[] | null;
-  depends_on: string | null;
+  depends_on: string[] | null;
+  parent_id: string | null;
+  description: string | null;
   due_date: string | null;
   created_at: string;
   started_at: string | null;

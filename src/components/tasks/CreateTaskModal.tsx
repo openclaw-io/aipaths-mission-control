@@ -211,7 +211,7 @@ export function CreateTaskModal({
         instruction: instruction.trim() || null,
         scheduled_for: scheduledFor,
         task_type: scheduledFor ? "scheduled" : "auto",
-        depends_on: dependsOn || null,
+        depends_on: dependsOn ? [dependsOn] : [],
         status,
         tags: isBacklog ? ["backlog"] : [],
       })

@@ -47,7 +47,7 @@ export async function PATCH(
     const { data: unblocked } = await supabase
       .from("agent_tasks")
       .select("id, title, agent, status")
-      .eq("depends_on", id)
+      .contains("depends_on", [id])
       .in("status", ["new", "pending_approval"]);
 
     // Notify unblocked agents (Discord + gateway wake)

@@ -94,12 +94,12 @@ export function TaskRow({ task }: { task: Task }) {
                 </div>
               </div>
             )}
-            {task.depends_on && (
+            {task.depends_on?.length ? (
               <div>
                 <span className="text-gray-500">Depends on</span>
-                <p className="mt-1 text-gray-300">{task.depends_on}</p>
+                <p className="mt-1 text-gray-300">{task.depends_on.join(", ")}</p>
               </div>
-            )}
+            ) : null}
             <div>
               <span className="text-gray-500">Created</span>
               <p className="mt-1 text-gray-300">{formatDate(task.created_at)}</p>
