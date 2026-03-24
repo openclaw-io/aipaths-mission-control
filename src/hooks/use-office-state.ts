@@ -158,9 +158,16 @@ export function useOfficeState() {
     return false;
   }, [persist]);
 
+  const loadLayout = useCallback((newLayout: OfficeLayout) => {
+    const cloned = structuredClone(newLayout);
+    setLayout(cloned);
+    persist(cloned);
+    setSelectedId(null);
+  }, [persist]);
+
   return {
     layout, selectedId, setSelectedId,
     addFurniture, moveFurniture, removeFurniture, updateFurnitureLabel,
-    setTile, resetLayout, exportLayout, importLayout,
+    setTile, resetLayout, exportLayout, importLayout, loadLayout,
   };
 }

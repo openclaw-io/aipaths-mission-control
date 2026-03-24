@@ -5,6 +5,7 @@ import { PixelOffice } from "@/components/office/pixel-office";
 import { OfficeEditor } from "@/components/editor/office-editor";
 import { useOfficeState } from "@/hooks/use-office-state";
 import { useOfficeAgents } from "@/hooks/use-office-agents";
+import { useOfficeTemplates } from "@/hooks/use-office-templates";
 
 interface TaskRow {
   id: string;
@@ -38,6 +39,7 @@ export function OfficeClient({
   const [tab, setTab] = useState<"view" | "edit">("view");
   const officeState = useOfficeState();
   const agents = useOfficeAgents(initialTasks, initialMemory);
+  const templateManager = useOfficeTemplates();
 
   return (
     <div className="flex flex-col" style={{ height: "calc(100vh - 0px)" }}>
@@ -106,6 +108,13 @@ export function OfficeClient({
             onReset={officeState.resetLayout}
             onExport={officeState.exportLayout}
             onImport={officeState.importLayout}
+            onLoadLayout={officeState.loadLayout}
+            templates={templateManager.templates}
+            onSaveTemplate={templateManager.saveAsTemplate}
+            onUpdateTemplate={templateManager.updateTemplate}
+            onDeleteTemplate={templateManager.deleteTemplate}
+            onDuplicateTemplate={templateManager.duplicateTemplate}
+            onRenameTemplate={templateManager.renameTemplate}
           />
         )}
       </div>
