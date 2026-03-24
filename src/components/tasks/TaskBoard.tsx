@@ -124,6 +124,13 @@ function TaskCard({
           <p className="text-sm font-medium text-white leading-snug">{task.title}</p>
           <div className="mt-1.5 flex items-center gap-2 text-xs text-gray-500">
             <span>{AGENT_EMOJI[task.agent] ?? "🤖"} {task.agent}</span>
+            {task.model && (
+              <span className={`rounded px-1 py-0.5 text-xs ${
+                task.model === "opus" ? "bg-purple-500/20 text-purple-400" : "bg-blue-500/15 text-blue-400"
+              }`}>
+                {task.model === "opus" ? "🧠" : "⚡"}
+              </span>
+            )}
             <span>·</span>
             <span>{timeAgo(task.created_at)}</span>
           </div>

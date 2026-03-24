@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import type { Task } from "@/app/tasks/page";
 import { timeAgo } from "@/lib/utils";
 import { EditTaskModal } from "./EditTaskModal";
+import { createClient } from "@/lib/supabase/client";
 
 const AGENT_EMOJI: Record<string, string> = {
   strategist: "🧠",
@@ -52,6 +53,22 @@ export function TaskDetailModal({
 }) {
   const [showEdit, setShowEdit] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [taskCost, setTaskCost] = useState<number | null>(null);
+
+  // Fetch cost for this task
+  useEffect(() => {
+    const supabase = createClient();
+    supabase
+      .from("usage_logs")
+      .select("cost_usd")
+      .eq("task_id", task.id)
+      .then(({ data }) => {
+        if (data && data.length > 0) {
+          const total = data.reduce((sum, r) => sum + Number(r.cost_usd), 0);
+          setTaskCost(total);
+        }
+      });
+  }, [task.id]);
 
   useEffect(() => {
     function handleKey(e: KeyboardEvent) {
@@ -152,6 +169,11 @@ export function TaskDetailModal({
                   }`}>
                     {task.model === "opus" ? "🧠 Opus" : "⚡ Sonnet"}
                   </span>
+                </Field>
+              )}
+              {taskCost !== null && taskCost > 0 && (
+                <Field label="Cost">
+                  <p className="text-sm font-medium text-green-400">${taskCost.toFixed(4)}</p>
                 </Field>
               )}
               {task.scheduled_for && (
