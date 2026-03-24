@@ -88,12 +88,15 @@ export function getZonePositions(layout: OfficeLayout): ZonePositions {
 }
 
 /**
- * Pick a random position from a zone for an agent.
+ * Pick a position from a zone for an agent.
+ * Uses agentIndex to spread agents across available positions instead of
+ * randomly stacking them on the same spot.
  */
 export function getRandomZonePosition(
   zonePositions: ZonePositions,
   zone: "work" | "kitchen" | "lounge",
-  occupiedDesks: Set<number> = new Set()
+  occupiedDesks: Set<number> = new Set(),
+  agentIndex: number = 0,
 ): Position {
   if (zone === "work") {
     // Find first free desk
@@ -106,10 +109,28 @@ export function getRandomZonePosition(
 
   if (zone === "kitchen") {
     const spots = zonePositions.kitchen.spots;
-    return spots[Math.floor(Math.random() * spots.length)] || { x: 11, y: 6 };
+    if (spots.length > 0) return spots[agentIndex % spots.length];
+    return { x: 11, y: 6 };
   }
 
-  // Lounge
+  // Lounge — spread agents across seats, then generate overflow positions
   const seats = zonePositions.lounge.seats;
-  return seats[Math.floor(Math.random() * seats.length)] || { x: 3, y: 5 };
+  if (seats.length > 0) {
+    if (agentIndex < seats.length) return seats[agentIndex];
+    // Overflow: offset from existing seats
+    const baseSeat = seats[agentIndex % seats.length];
+    const overflowOffset = Math.floor(agentIndex / seats.length);
+    return { x: baseSeat.x + overflowOffset * 2, y: baseSeat.y + overflowOffset };
+  }
+
+  // No lounge furniture at all — spread across the lounge area
+  const area = zonePositions.lounge.area;
+  const areaW = area.maxX - area.minX;
+  const cols = Math.max(Math.floor(areaW / 3), 1);
+  const col = agentIndex % cols;
+  const row = Math.floor(agentIndex / cols);
+  return {
+    x: area.minX + 1 + col * 3,
+    y: area.minY + 1 + row * 3,
+  };
 }

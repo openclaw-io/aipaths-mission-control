@@ -1,12 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { PixelOffice } from "@/components/office/pixel-office";
 import { OfficeEditor } from "@/components/editor/office-editor";
 import { useOfficeState } from "@/hooks/use-office-state";
 import { useOfficeAgents } from "@/hooks/use-office-agents";
 import { useOfficeTemplates } from "@/hooks/use-office-templates";
-import { useAgentZones } from "@/hooks/useAgentZones";
+import type { SpriteAgent } from "@/lib/types/office";
 
 interface TaskRow {
   id: string;
@@ -41,7 +41,24 @@ export function OfficeClient({
   const officeState = useOfficeState();
   const agents = useOfficeAgents(initialTasks, initialMemory);
   const templateManager = useOfficeTemplates();
-  const agentZones = useAgentZones();
+
+  // Derive zone assignments from agent animation state
+  const agentZones = useMemo(() => {
+    const zones: Record<string, { zone: "work" | "kitchen" | "lounge"; task?: string }> = {};
+    for (const agent of agents) {
+      let zone: "work" | "kitchen" | "lounge" = "lounge";
+      if (agent.animation === "working" || agent.animation === "error" || agent.animation === "celebrating") {
+        zone = "work";
+      } else if (agent.animation === "idle" && agent.currentTask) {
+        // idle with a memory note → lounge (reading)
+        zone = "lounge";
+      } else if (agent.animation === "sleeping") {
+        zone = "lounge";
+      }
+      zones[agent.id] = { zone, task: agent.currentTask };
+    }
+    return zones;
+  }, [agents]);
 
   return (
     <div className="flex flex-col" style={{ height: "calc(100vh - 0px)" }}>

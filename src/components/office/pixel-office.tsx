@@ -383,6 +383,9 @@ export function PixelOffice({ layout, agents = [], agentZones = {}, className = 
         if (!cs.despawning) usedSlots.add(cs.workstationIdx);
       }
 
+      // Track per-zone agent index so they spread out instead of stacking
+      const zoneCounters: Record<string, number> = { work: 0, kitchen: 0, lounge: 0 };
+
       for (const agent of agentList) {
         if (agent.lifecycle === "gone") continue;
         currentIds.add(agent.id);
@@ -403,11 +406,14 @@ export function PixelOffice({ layout, agents = [], agentZones = {}, className = 
           if (zoneInfo && zoneInfo.zone !== existing.zone) {
             existing.zone = zoneInfo.zone;
             const zonePositions = getZonePositions(layout);
-            const pos = getRandomZonePosition(zonePositions, zoneInfo.zone, usedSlots);
+            const idx = zoneCounters[zoneInfo.zone]++;
+            const pos = getRandomZonePosition(zonePositions, zoneInfo.zone, usedSlots, idx);
             existing.targetX = pos.x * TILE_SIZE * SCALE;
             existing.targetY = pos.y * TILE_SIZE * SCALE;
             // Walking animation during transit
             existing.animation = "walking";
+          } else if (zoneInfo) {
+            zoneCounters[zoneInfo.zone]++;
           }
 
           if (statusChanged && !existing.despawning) {
@@ -422,7 +428,8 @@ export function PixelOffice({ layout, agents = [], agentZones = {}, className = 
           const zoneInfo = agentZones[agent.id];
           const zone = zoneInfo?.zone || "lounge";
           const zonePositions = getZonePositions(layout);
-          const pos = getRandomZonePosition(zonePositions, zone, usedSlots);
+          const zoneIdx = zoneCounters[zone]++;
+          const pos = getRandomZonePosition(zonePositions, zone, usedSlots, zoneIdx);
           const targetX = pos.x * TILE_SIZE * SCALE;
           const targetY = pos.y * TILE_SIZE * SCALE;
 
