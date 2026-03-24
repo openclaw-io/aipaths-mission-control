@@ -110,6 +110,8 @@ export function ProjectDetailModal({
   const [addingEpic, setAddingEpic] = useState(false);
   const [addingTaskTo, setAddingTaskTo] = useState<string | null>(null);
   const [expandedTask, setExpandedTask] = useState<string | null>(null);
+  const [activatedEpics, setActivatedEpics] = useState<Set<string>>(new Set());
+  const [projectActive, setProjectActive] = useState(project.status !== "draft");
 
   useEffect(() => {
     function handleKey(e: KeyboardEvent) {
@@ -120,13 +122,29 @@ export function ProjectDetailModal({
   }, [onClose]);
 
   async function activateEpic(epicId: string) {
-    if (!confirm("Activate this epic? Its tasks will become available for the scheduler.")) return;
-    await fetch(`/api/tasks/${epicId}/status`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status: "new" }),
-    });
-    window.location.reload();
+    const res = await fetch(`/api/projects/${epicId}/activate`, { method: "POST" });
+    if (res.ok) {
+      setActivatedEpics((prev) => new Set([...prev, epicId]));
+    }
+  }
+
+  async function toggleProject() {
+    if (projectActive) {
+      // Pause all epics
+      for (const epic of epics) {
+        await fetch(`/api/projects/${epic.id}/activate?pause=true`, { method: "POST" });
+      }
+      await fetch(`/api/projects/${project.id}/activate?pause=true`, { method: "POST" });
+      setProjectActive(false);
+      setActivatedEpics(new Set());
+    } else {
+      // Activate all epics
+      const res = await fetch(`/api/projects/${project.id}/activate?all=true`, { method: "POST" });
+      if (res.ok) {
+        setProjectActive(true);
+        setActivatedEpics(new Set(epics.map((e) => e.id)));
+      }
+    }
   }
 
   // Count all tasks across epics
@@ -155,7 +173,20 @@ export function ProjectDetailModal({
                 </div>
               )}
             </div>
-            <button onClick={onClose} className="rounded p-1 text-gray-500 hover:text-white transition shrink-0 ml-4">✕</button>
+            <div className="flex items-center gap-2 shrink-0 ml-4">
+              <button
+                onClick={toggleProject}
+                className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                  projectActive
+                    ? "border border-yellow-600/50 bg-yellow-600/10 text-yellow-400 hover:bg-yellow-600/20"
+                    : "border border-green-600/50 bg-green-600/10 text-green-400 hover:bg-green-600/20"
+                }`}
+                title={projectActive ? "Pause all epics" : "Activate all epics"}
+              >
+                {projectActive ? "⏸ Pause" : "▶️ Start"}
+              </button>
+              <button onClick={onClose} className="rounded p-1 text-gray-500 hover:text-white transition">✕</button>
+            </div>
           </div>
         </div>
 
@@ -205,13 +236,16 @@ export function ProjectDetailModal({
                       </div>
                     )}
                   </div>
-                  {epic.status === "draft" && (
+                  {epic.status === "draft" && !activatedEpics.has(epic.id) && (
                     <button
                       onClick={() => activateEpic(epic.id)}
                       className="rounded-lg border border-green-600/50 bg-green-600/10 px-3 py-1 text-xs font-medium text-green-400 hover:bg-green-600/20 transition shrink-0"
                     >
                       ▶️ Activate
                     </button>
+                  )}
+                  {activatedEpics.has(epic.id) && (
+                    <span className="text-xs text-green-400">✅ Activated</span>
                   )}
                 </div>
 
