@@ -109,6 +109,7 @@ export function ProjectDetailModal({
 }) {
   const [addingEpic, setAddingEpic] = useState(false);
   const [addingTaskTo, setAddingTaskTo] = useState<string | null>(null);
+  const [expandedTask, setExpandedTask] = useState<string | null>(null);
 
   useEffect(() => {
     function handleKey(e: KeyboardEvent) {
@@ -218,17 +219,34 @@ export function ProjectDetailModal({
                 {tasks.length > 0 && (
                   <div className="border-t border-gray-800/50 px-4 py-2 space-y-0.5">
                     {tasks.map((task) => (
-                      <div key={task.id} className="flex items-center gap-2 py-1">
-                        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${STATUS_COLORS[task.status]}`} />
-                        <span className={`flex-1 text-xs ${task.status === "done" ? "text-gray-600 line-through" : "text-gray-300"}`}>
-                          {task.title}
-                        </span>
-                        <span className="text-xs text-gray-600">{AGENT_EMOJI[task.agent] ?? "🤖"}</span>
-                        <span className={`text-xs ${
-                          task.status === "draft" ? "text-gray-600" : task.status === "done" ? "text-gray-700" : "text-gray-500"
-                        }`}>
-                          {STATUS_LABELS[task.status]}
-                        </span>
+                      <div key={task.id}>
+                        <button
+                          onClick={() => setExpandedTask(expandedTask === task.id ? null : task.id)}
+                          className="w-full flex items-center gap-2 py-1.5 text-left hover:bg-white/5 rounded px-1 -mx-1 transition"
+                        >
+                          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${STATUS_COLORS[task.status]}`} />
+                          <span className={`flex-1 text-xs ${task.status === "done" ? "text-gray-600 line-through" : "text-gray-300"}`}>
+                            {task.title}
+                          </span>
+                          {task.instruction && (
+                            <span className="text-gray-700 text-xs">
+                              {expandedTask === task.id ? "▾" : "▸"}
+                            </span>
+                          )}
+                          <span className="text-xs text-gray-600">{AGENT_EMOJI[task.agent] ?? "🤖"}</span>
+                          <span className={`text-xs ${
+                            task.status === "draft" ? "text-gray-600" : task.status === "done" ? "text-gray-700" : "text-gray-500"
+                          }`}>
+                            {STATUS_LABELS[task.status]}
+                          </span>
+                        </button>
+                        {expandedTask === task.id && task.instruction && (
+                          <div className="ml-4 mb-2 rounded-lg border border-gray-800/50 bg-[#0d0d14] px-3 py-2">
+                            <pre className="text-xs text-gray-400 whitespace-pre-wrap font-mono leading-relaxed">
+                              {task.instruction}
+                            </pre>
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>
