@@ -85,7 +85,9 @@ export function ProjectsClient({
 
               // Use leaf tasks for progress if they exist, otherwise use epics
               const epicsOnly = projectEpics.filter((t) => t.tags?.includes("epic"));
-              const leafTasks = [...allProjectTasks, ...directTasks];
+              // Exclude planning tasks (AI: Plan*) from progress
+              const isPlanning = (t: Task) => t.title.startsWith("AI: Plan");
+              const leafTasks = [...allProjectTasks, ...directTasks].filter((t) => !isPlanning(t));
               const hasLeafTasks = leafTasks.length > 0;
               const totalForProgress = hasLeafTasks ? leafTasks.length : epicsOnly.length;
               const doneForProgress = hasLeafTasks
