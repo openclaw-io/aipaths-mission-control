@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/admin";
+import { logActivity } from "@/lib/activity";
 
 export const dynamic = "force-dynamic";
 
@@ -168,6 +169,9 @@ curl -s -X PATCH -H "Authorization: Bearer $MISSION_CONTROL_API_KEY" -H "Content
   if (agent !== "gonza") {
     woke = await wakeAgent(routing.agentId, routing.channelId, message);
   }
+
+  // 3. Log activity
+  logActivity(agent, "agent_woke", title, `Action: ${action}`, taskId);
 
   return NextResponse.json({ ok: true, agent, woke });
 }

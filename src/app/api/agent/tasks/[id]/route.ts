@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createServiceClient } from "@/lib/supabase/admin";
+import { logActivity } from "@/lib/activity";
 
 export const dynamic = "force-dynamic";
 
@@ -47,6 +48,15 @@ export async function PATCH(
     .single();
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  // Log activity
+  if (status === "in_progress") {
+    logActivity(data.agent, "task_claimed", data.title, null, data.id);
+  } else if (status === "done") {
+    logActivity(data.agent, "task_completed", data.title, data.result, data.id);
+  } else if (status === "failed") {
+    logActivity(data.agent, "task_failed", data.title, data.error, data.id);
+  }
 
   // Notify the task creator when done or failed
   if ((status === "done" || status === "failed") && data.created_by && data.created_by !== data.agent) {

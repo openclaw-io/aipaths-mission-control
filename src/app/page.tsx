@@ -1,7 +1,9 @@
 import { createClient } from "@/lib/supabase/server";
+import { supabaseAdmin } from "@/lib/supabase/admin";
 import { timeAgo } from "@/lib/utils";
 import { AGENTS } from "@/lib/agents";
 import { SchedulerToggle } from "@/components/SchedulerToggle";
+import { ActivityFeed } from "@/components/ActivityFeed";
 
 const STATUS_COLORS: Record<string, string> = {
   done: "bg-green-500",
@@ -12,6 +14,13 @@ const STATUS_COLORS: Record<string, string> = {
 
 export default async function OverviewPage() {
   const supabase = await createClient();
+
+  // Fetch activity log
+  const { data: activityData } = await supabaseAdmin
+    .from("activity_log")
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(50);
 
   // Fetch all stats in parallel
   const [activeTasksRes, cronHealthRes, memoryCountRes, recentTasksRes, recentMemoryRes] =
@@ -83,6 +92,14 @@ export default async function OverviewPage() {
             <div className="mt-1 text-sm text-gray-400">{stat.label}</div>
           </div>
         ))}
+      </div>
+
+      {/* Activity Feed */}
+      <div className="mt-8">
+        <h2 className="text-xl font-semibold text-white mb-3">⚡ Live Activity</h2>
+        <div className="rounded-xl border border-gray-800 bg-[#111118] p-3">
+          <ActivityFeed initialEvents={activityData ?? []} />
+        </div>
       </div>
 
       {/* Recent Tasks */}
