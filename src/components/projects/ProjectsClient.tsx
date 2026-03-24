@@ -17,17 +17,22 @@ export function ProjectsClient({
 }) {
   const [showCreate, setShowCreate] = useState(false);
   const [expandedProject, setExpandedProject] = useState<string | null>(null);
+  const [showDone, setShowDone] = useState(false);
 
   // Projects = tasks tagged "project" or "epic" with no parent_id
   const projects = epics.filter((e) => !e.parent_id);
 
-  // Sort: active first, then by created_at desc
-  const sorted = [...projects].sort((a, b) => {
-    const aActive = a.status !== "done";
-    const bActive = b.status !== "done";
-    if (aActive !== bActive) return aActive ? -1 : 1;
-    return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
-  });
+  const doneCount = projects.filter((p) => p.status === "done").length;
+
+  // Filter + sort: active first, then by created_at desc
+  const sorted = [...projects]
+    .filter((p) => showDone || p.status !== "done")
+    .sort((a, b) => {
+      const aActive = a.status !== "done";
+      const bActive = b.status !== "done";
+      if (aActive !== bActive) return aActive ? -1 : 1;
+      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+    });
 
   return (
     <>
@@ -36,6 +41,17 @@ export function ProjectsClient({
           <span>{projects.length} project{projects.length !== 1 ? "s" : ""}</span>
           <span>·</span>
           <span>{projects.filter((e) => e.status !== "done").length} active</span>
+          {doneCount > 0 && (
+            <>
+              <span>·</span>
+              <button
+                onClick={() => setShowDone(!showDone)}
+                className="text-gray-500 hover:text-gray-300 transition"
+              >
+                {showDone ? "Hide" : "Show"} {doneCount} done
+              </button>
+            </>
+          )}
         </div>
         <button
           onClick={() => setShowCreate(true)}
