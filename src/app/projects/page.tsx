@@ -1,4 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
+import { supabaseAdmin } from "@/lib/supabase/admin";
 import { ProjectsClient } from "@/components/projects/ProjectsClient";
 
 export const dynamic = "force-dynamic";
@@ -8,7 +9,7 @@ export default async function ProjectsPage() {
 
   // Epics = tasks with no parent_id that have children
   // Also include tasks that have parent_id (sub-tasks) for grouping
-  const { data: allTasks } = await supabase
+  const { data: allTasks, error: queryError } = await supabaseAdmin
     .from("agent_tasks")
     .select("*")
     .order("created_at", { ascending: true });
@@ -17,7 +18,12 @@ export default async function ProjectsPage() {
 
   // Identify epics: tasks tagged "epic" OR referenced as parent_id by other tasks
   const parentIds = new Set(tasks.filter((t) => t.parent_id).map((t) => t.parent_id));
-  const epics = tasks.filter((t) => parentIds.has(t.id) || t.tags?.includes("epic"));
+  const epics = tasks.filter((t) => {
+    const tags = t.tags ?? [];
+    const isTaggedEpic = Array.isArray(tags) && tags.includes("epic");
+    const isParent = parentIds.has(t.id);
+    return isTaggedEpic || isParent;
+  });
   const subTasksByParent: Record<string, typeof tasks> = {};
 
   for (const task of tasks) {
