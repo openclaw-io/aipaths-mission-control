@@ -41,7 +41,7 @@ const COLUMNS: BoardColumn[] = [
     emoji: "🔴",
     color: "text-red-400",
     borderColor: "border-red-500/30",
-    filter: (t) => t.assignee === "gonza" || t.status === "pending_approval",
+    filter: (t) => (t.assignee === "gonza" || t.status === "pending_approval") && t.status !== "blocked" && t.status !== "draft",
   },
   {
     id: "ready",
