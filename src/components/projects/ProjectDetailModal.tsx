@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import type { Task } from "@/app/tasks/page";
 import { createClient } from "@/lib/supabase/client";
+import { AIActionButton } from "./AIActionButton";
 
 const AGENT_EMOJI: Record<string, string> = {
   strategist: "🧠", youtube: "🎬", content: "✍️", marketing: "📣",
@@ -243,12 +244,22 @@ export function ProjectDetailModal({
                       onCreated={() => { setAddingTaskTo(null); window.location.reload(); }}
                     />
                   ) : (
-                    <button
-                      onClick={() => setAddingTaskTo(epic.id)}
-                      className="text-xs text-gray-600 hover:text-gray-400 transition"
-                    >
-                      + Add task
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => setAddingTaskTo(epic.id)}
+                        className="text-xs text-gray-600 hover:text-gray-400 transition"
+                      >
+                        + Add task
+                      </button>
+                      <AIActionButton
+                        label="AI: Plan Tasks"
+                        projectId={epic.id}
+                        projectTitle={epic.title}
+                        projectDescription={epic.instruction}
+                        agent={project.agent}
+                        instruction={buildTaskPlanInstruction(project, epic, tasks)}
+                      />
+                    </div>
                   )}
                 </div>
               </div>
@@ -256,7 +267,7 @@ export function ProjectDetailModal({
           })}
 
           {/* Add epic */}
-          <div className="pt-2">
+          <div className="pt-2 space-y-2">
             {addingEpic ? (
               <InlineAddForm
                 parentId={project.id}
@@ -265,16 +276,89 @@ export function ProjectDetailModal({
                 onCreated={() => { setAddingEpic(false); window.location.reload(); }}
               />
             ) : (
-              <button
-                onClick={() => setAddingEpic(true)}
-                className="w-full rounded-lg border border-dashed border-gray-700 py-3 text-sm text-gray-500 hover:text-gray-300 hover:border-gray-500 transition"
-              >
-                + Add Epic
-              </button>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setAddingEpic(true)}
+                  className="flex-1 rounded-lg border border-dashed border-gray-700 py-3 text-sm text-gray-500 hover:text-gray-300 hover:border-gray-500 transition"
+                >
+                  + Add Epic
+                </button>
+                <AIActionButton
+                  label="AI: Plan Epics"
+                  projectId={project.id}
+                  projectTitle={project.title}
+                  projectDescription={project.description}
+                  agent={project.agent}
+                  instruction={buildEpicPlanInstruction(project, epics)}
+                  className="py-3 px-5"
+                />
+              </div>
             )}
           </div>
         </div>
       </div>
     </div>
   );
+}
+
+function buildEpicPlanInstruction(project: Task, existingEpics: Task[]): string {
+  const existing = existingEpics.length > 0
+    ? `\n\nExisting epics (don't duplicate):\n${existingEpics.map((e) => `- ${e.title}`).join("\n")}`
+    : "";
+
+  return `## Task: Plan epics for project "${project.title}"
+
+### Project Description
+${project.description || "(no description yet — ask Gonza for clarification)"}
+${existing}
+
+### What to do
+1. First, **improve the project description** if it's rough — rewrite it clearly and update it via the Mission Control API (PATCH the project task with a better description field).
+2. Then **create 3-6 epics** that break this project into logical phases. Each epic should be:
+   - A coherent unit of work that can be activated independently
+   - Named clearly (e.g., "Backend: Database + API", "Frontend: UI Components", "Integration + Testing")
+   - Created as a task with parent_id="${project.id}", tags=["epic"], status="draft"
+
+### How to create epics
+Use the Mission Control API:
+\`\`\`bash
+curl -s -X POST -H "Authorization: Bearer $MISSION_CONTROL_API_KEY" -H "Content-Type: application/json" "http://localhost:3001/api/agent/tasks" -d '{"title": "Epic name", "agent": "${project.agent}", "parent_id": "${project.id}", "tags": ["epic"], "status": "draft", "created_by": "${project.agent}"}'
+\`\`\`
+
+After creating all epics, mark this task as done with a summary of what you created.`;
+}
+
+function buildTaskPlanInstruction(project: Task, epic: Task, existingTasks: Task[]): string {
+  const existing = existingTasks.length > 0
+    ? `\n\nExisting tasks (don't duplicate):\n${existingTasks.map((t) => `- ${t.title} (${t.agent})`).join("\n")}`
+    : "";
+
+  return `## Task: Plan tasks for epic "${epic.title}" in project "${project.title}"
+
+### Project Context
+${project.description || "(no project description)"}
+
+### Epic
+${epic.title}
+${epic.instruction || ""}
+${existing}
+
+### What to do
+Create **concrete, actionable tasks** for this epic. Each task should:
+- Be completable by a single agent in one session
+- Have clear acceptance criteria
+- Specify the right agent (dev for code, content for writing, etc.)
+- Include dependencies if task B needs task A done first (use depends_on array)
+
+### How to create tasks
+\`\`\`bash
+curl -s -X POST -H "Authorization: Bearer $MISSION_CONTROL_API_KEY" -H "Content-Type: application/json" "http://localhost:3001/api/agent/tasks" -d '{"title": "Task name", "instruction": "Detailed instructions...", "agent": "dev", "parent_id": "${epic.id}", "status": "draft", "created_by": "${project.agent}", "depends_on": []}'
+\`\`\`
+
+For dependencies, use the task IDs returned from previous creates:
+\`\`\`bash
+... "depends_on": ["<task-id-of-prerequisite>"]
+\`\`\`
+
+After creating all tasks, mark this planning task as done with a summary.`;
 }
