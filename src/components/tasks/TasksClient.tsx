@@ -6,29 +6,25 @@ import { CreateTaskModal } from "./CreateTaskModal";
 import { TaskBoard } from "./TaskBoard";
 import { TaskLogs } from "./TaskLogs";
 import { AGENTS } from "@/lib/agents";
+import { useRealtimeTasks } from "@/hooks/useRealtimeTasks";
 
 const VIEWS = [
   { id: "board", label: "Board", emoji: "📊" },
   { id: "logs", label: "Logs", emoji: "📜" },
 ];
 export function TasksClient({ initialTasks }: { initialTasks: Task[] }) {
-  const [tasks, setTasks] = useState<Task[]>(initialTasks);
+  const tasks = useRealtimeTasks(initialTasks);
   const [view, setView] = useState<string>("board");
   const [agentFilter, setAgentFilter] = useState<string>("all");
   const [showCreateForm, setShowCreateForm] = useState(false);
 
-  // Auto-promote past-due scheduled tasks on load
+  // Auto-promote past-due scheduled tasks on load (no reload needed — realtime handles updates)
   useEffect(() => {
-    fetch("/api/tasks/promote-scheduled", { method: "POST" }).then(async (res) => {
-      if (res.ok) {
-        const { promoted } = await res.json();
-        if (promoted > 0) window.location.reload();
-      }
-    }).catch(() => {}); // Silently fail
+    fetch("/api/tasks/promote-scheduled", { method: "POST" }).catch(() => {});
   }, []);
 
-  function handleTaskCreated(task: Task) {
-    setTasks((prev) => [task, ...prev]);
+  function handleTaskCreated() {
+    // Realtime will pick up the new task automatically
     setShowCreateForm(false);
   }
 
@@ -109,21 +105,8 @@ export function TasksClient({ initialTasks }: { initialTasks: Task[] }) {
       {view === "board" && (
         <TaskBoard
           tasks={tasks}
-          onTaskUpdate={(taskId, newStatus) => {
-            if (taskId === "__delete__") {
-              setTasks((prev) => prev.filter((t) => t.id !== newStatus));
-            } else if (taskId === "__refresh__") {
-              // Reload page to get fresh data
-              window.location.reload();
-            } else {
-              setTasks((prev) =>
-                prev.map((t) =>
-                  t.id === taskId
-                    ? { ...t, status: newStatus, completed_at: newStatus === "done" ? new Date().toISOString() : t.completed_at }
-                    : t
-                )
-              );
-            }
+          onTaskUpdate={() => {
+            // Realtime handles all state updates automatically
           }}
         />
       )}
