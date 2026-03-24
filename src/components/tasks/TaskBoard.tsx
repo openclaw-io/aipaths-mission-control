@@ -200,6 +200,8 @@ export function TaskBoard({
     (t) =>
       t.status !== "done" &&
       !t.tags?.includes("backlog") &&
+      !t.tags?.includes("epic") &&
+      !t.tags?.includes("project") &&
       (!t.scheduled_for || new Date(t.scheduled_for) <= now)
   );
 
@@ -214,7 +216,7 @@ export function TaskBoard({
   sevenDaysOut.setDate(sevenDaysOut.getDate() + 7);
 
   const scheduledTasks = tasks.filter(
-    (t) => t.scheduled_for && t.status !== "done" && new Date(t.scheduled_for) > now
+    (t) => t.scheduled_for && t.status !== "done" && !t.tags?.includes("epic") && !t.tags?.includes("project") && new Date(t.scheduled_for) > now
   );
 
   function getTasksForDay(day: Date): Task[] {
@@ -357,7 +359,7 @@ export function TaskBoard({
       {/* Backlog */}
       {(() => {
         const backlogTasks = tasks.filter(
-          (t) => t.tags?.includes("backlog") && t.status !== "done"
+          (t) => t.tags?.includes("backlog") && t.status !== "done" && !t.tags?.includes("epic") && !t.tags?.includes("project")
         );
         if (backlogTasks.length === 0) return null;
         return (
