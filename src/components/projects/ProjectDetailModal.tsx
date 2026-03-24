@@ -335,6 +335,18 @@ export function ProjectDetailModal({
                 >
                   + Add Epic
                 </button>
+                {/* Plan all tasks across all epics */}
+                {epics.filter((e) => !(subTasksByParent[e.id]?.some((t) => !t.tags?.includes("epic")))).length > 0 && (
+                  <AIActionButton
+                    label="AI: Plan All Tasks"
+                    projectId={project.id}
+                    projectTitle={project.title}
+                    projectDescription={project.description}
+                    agent={project.agent}
+                    instruction={buildAllTasksPlanInstruction(project, epics, subTasksByParent)}
+                    className="py-3 px-5"
+                  />
+                )}
                 <AIActionButton
                   label="AI: Plan Epics"
                   projectId={project.id}
@@ -413,4 +425,45 @@ For dependencies, use the task IDs returned from previous creates:
 \`\`\`
 
 After creating all tasks, mark this planning task as done with a summary.`;
+}
+
+function buildAllTasksPlanInstruction(
+  project: Task,
+  epics: Task[],
+  subTasksByParent: Record<string, Task[]>
+): string {
+  const epicList = epics
+    .map((e) => {
+      const existing = (subTasksByParent[e.id] || []).filter((t) => !t.tags?.includes("epic"));
+      const existingStr = existing.length > 0
+        ? ` (has ${existing.length} tasks already)`
+        : " (needs tasks)";
+      return `- "${e.title}" (id: ${e.id}, agent: ${e.agent})${existingStr}\n  ${e.instruction || ""}`;
+    })
+    .join("\n");
+
+  return `## Task: Plan tasks for ALL epics in project "${project.title}"
+
+### Project Description
+${project.description || "(no description)"}
+
+### Epics to plan
+${epicList}
+
+### What to do
+For EACH epic that needs tasks, create concrete, actionable tasks. Each task should:
+- Be completable by a single agent in one session
+- Have clear instructions
+- Specify the right agent
+- Include dependencies (use depends_on array with task IDs from previous creates)
+- Cross-epic dependencies are OK (e.g., a task in Epic 2 can depend on a task in Epic 1)
+
+### How to create tasks
+\`\`\`bash
+curl -s -X POST -H "Authorization: Bearer $MISSION_CONTROL_API_KEY" -H "Content-Type: application/json" "http://localhost:3001/api/agent/tasks" -d '{"title": "Task name", "instruction": "Details...", "agent": "dev", "parent_id": "EPIC_ID", "status": "draft", "created_by": "${project.agent}", "depends_on": []}'
+\`\`\`
+
+IMPORTANT: Use the correct parent_id for each task (the epic it belongs to).
+
+After creating all tasks for all epics, mark this planning task as done with a summary.`;
 }
