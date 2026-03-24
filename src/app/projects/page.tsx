@@ -15,9 +15,9 @@ export default async function ProjectsPage() {
 
   const tasks = allTasks ?? [];
 
-  // Identify epics: tasks that are referenced as parent_id by other tasks
+  // Identify epics: tasks tagged "epic" OR referenced as parent_id by other tasks
   const parentIds = new Set(tasks.filter((t) => t.parent_id).map((t) => t.parent_id));
-  const epics = tasks.filter((t) => parentIds.has(t.id));
+  const epics = tasks.filter((t) => parentIds.has(t.id) || t.tags?.includes("epic"));
   const subTasksByParent: Record<string, typeof tasks> = {};
 
   for (const task of tasks) {
