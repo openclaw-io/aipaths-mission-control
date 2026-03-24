@@ -47,7 +47,7 @@ export async function POST(req: NextRequest) {
   if (!checkAuth(req)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const body = await req.json();
-  const { title, instruction, agent, created_by, depends_on, scheduled_for, tags, priority, assignee, parent_id, description } = body;
+  const { title, instruction, agent, created_by, depends_on, scheduled_for, tags, priority, assignee, parent_id, description, model } = body;
 
   if (!title || !agent) {
     return NextResponse.json({ error: "title and agent required" }, { status: 400 });
@@ -74,6 +74,7 @@ export async function POST(req: NextRequest) {
       depends_on: depsArray,
       parent_id: parent_id || null,
       description: description || null,
+      model: model || null,
       scheduled_for: scheduled_for || null,
       tags: tags || [],
       assignee: assignee || null,

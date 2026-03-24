@@ -52,7 +52,7 @@ export async function PATCH(
   const body = await request.json();
 
   // Only allow updating safe fields
-  const allowed = ["title", "instruction", "agent", "scheduled_for", "tags", "priority", "assignee", "description"];
+  const allowed = ["title", "instruction", "agent", "scheduled_for", "tags", "priority", "assignee", "description", "model"];
   const updates: Record<string, unknown> = {};
   for (const key of allowed) {
     if (key in body) updates[key] = body[key];

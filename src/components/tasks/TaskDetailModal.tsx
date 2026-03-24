@@ -145,6 +145,15 @@ export function TaskDetailModal({
               <Field label="Created">
                 <p className="text-sm text-gray-300">{timeAgo(task.created_at)}</p>
               </Field>
+              {task.model && (
+                <Field label="Model">
+                  <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                    task.model === "opus" ? "bg-purple-500/20 text-purple-400" : "bg-blue-500/20 text-blue-400"
+                  }`}>
+                    {task.model === "opus" ? "🧠 Opus" : "⚡ Sonnet"}
+                  </span>
+                </Field>
+              )}
               {task.scheduled_for && (
                 <Field label="Scheduled for">
                   <p className="text-sm text-blue-400">
