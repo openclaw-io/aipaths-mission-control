@@ -15,11 +15,13 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex min-h-screen">
       <Sidebar />
-      <main className="ml-64 flex-1 p-8">
-        <div className="fixed right-8 top-8 z-30">
+      <main className="ml-64 flex-1 flex flex-col">
+        <div className="flex items-center justify-end px-8 py-3 shrink-0">
           <GatewayStatus />
         </div>
-        {children}
+        <div className="flex-1 px-8 pb-8">
+          {children}
+        </div>
       </main>
     </div>
   );

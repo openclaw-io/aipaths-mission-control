@@ -250,6 +250,10 @@ export default function CronsClient({ crons: initialCrons, logs }: CronsClientPr
                         {cron.enabled ? "● Active" : "○ Paused"}
                       </button>
                     </div>
+                    {/* Scheduler config row */}
+                    {cron.cron_name === "task-scheduler" && cron.config && (
+                      <SchedulerConfig config={cron.config as Record<string, unknown>} />
+                    )}
                   </div>
                 );
               })}
@@ -330,5 +334,44 @@ export default function CronsClient({ crons: initialCrons, logs }: CronsClientPr
         </div>
       </div>
     </>
+  );
+}
+
+function SchedulerConfig({ config }: { config: Record<string, unknown> }) {
+  const [concurrent, setConcurrent] = useState(String(config.max_concurrent || 2));
+  const [budget, setBudget] = useState(String(config.daily_budget_usd || 50));
+
+  async function save(key: string, value: string) {
+    await fetch("/api/crons/task-scheduler/config", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ [key]: Number(value) }),
+    });
+  }
+
+  return (
+    <div className="flex items-center gap-4 px-4 py-2 border-t border-gray-800/50 text-xs" onClick={(e) => e.stopPropagation()}>
+      <div className="flex items-center gap-1.5">
+        <span className="text-gray-500">Concurrent:</span>
+        <input
+          type="number" value={concurrent}
+          onChange={(e) => setConcurrent(e.target.value)}
+          onBlur={() => save("max_concurrent", concurrent)}
+          className="w-10 rounded border border-gray-700 bg-[#1a1a24] px-1 py-0.5 text-white text-center focus:outline-none"
+          min={1} max={10}
+        />
+      </div>
+      <div className="flex items-center gap-1.5">
+        <span className="text-gray-500">Daily budget:</span>
+        <span className="text-gray-400">$</span>
+        <input
+          type="number" value={budget}
+          onChange={(e) => setBudget(e.target.value)}
+          onBlur={() => save("daily_budget_usd", budget)}
+          className="w-14 rounded border border-gray-700 bg-[#1a1a24] px-1 py-0.5 text-white text-center focus:outline-none"
+          min={1}
+        />
+      </div>
+    </div>
   );
 }
