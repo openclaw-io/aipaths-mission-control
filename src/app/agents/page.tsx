@@ -1,129 +1,93 @@
-import { createClient } from "@/lib/supabase/server";
-import { timeAgo } from "@/lib/utils";
+import { supabaseAdmin } from "@/lib/supabase/admin";
 import { AGENTS } from "@/lib/agents";
-import { AgentSessionBadge } from "@/components/agents/AgentSessionBadge";
+import { AgentsClient } from "@/components/agents/AgentsClient";
 
-const STATUS_COLORS: Record<string, string> = {
-  done: "text-green-400",
-  in_progress: "text-yellow-400",
-  new: "text-blue-400",
-  blocked: "text-red-400",
-};
+export const dynamic = "force-dynamic";
 
-interface TaskRow {
-  id: string;
-  title: string;
-  status: string;
-  agent: string;
-}
-
-interface MemoryRow {
-  id: string;
-  agent: string;
-  created_at: string;
+export interface AgentStats {
+  totalTasks: number;
+  doneTasks: number;
+  failedTasks: number;
+  successRate: number;
+  totalCost: number;
+  avgCostPerTask: number;
+  totalTokens: number;
+  last7Days: number[]; // 7 elements, tasks per day (oldest→newest)
+  lastActivityAt: string | null;
 }
 
 export default async function AgentsPage() {
-  const supabase = await createClient();
+  const today = new Date();
+  const sevenDaysAgo = new Date(today);
+  sevenDaysAgo.setDate(today.getDate() - 6);
 
-  // Fetch all tasks and memory in bulk, then group client-side
-  const [tasksRes, memoryRes] = await Promise.all([
-    supabase
+  // Fetch all data in bulk
+  const [tasksRes, usageRes, activityRes] = await Promise.all([
+    supabaseAdmin
       .from("agent_tasks")
-      .select("id, title, status, agent")
-      .order("created_at", { ascending: false }),
-    supabase
-      .from("agent_memory")
-      .select("id, agent, created_at")
-      .order("created_at", { ascending: false }),
+      .select("agent, status, created_at")
+      .not("tags", "cs", '{"epic"}')
+      .not("tags", "cs", '{"project"}'),
+    supabaseAdmin
+      .from("usage_logs")
+      .select("agent, cost_usd, input_tokens, output_tokens"),
+    supabaseAdmin
+      .from("activity_log")
+      .select("agent, created_at")
+      .order("created_at", { ascending: false })
+      .limit(200),
   ]);
 
-  const allTasks = (tasksRes.data ?? []) as TaskRow[];
-  const allMemory = (memoryRes.data ?? []) as MemoryRow[];
+  const allTasks = tasksRes.data || [];
+  const allUsage = usageRes.data || [];
+  const allActivity = activityRes.data || [];
 
-  // Group by agent
-  const tasksByAgent: Record<string, TaskRow[]> = {};
-  for (const task of allTasks) {
-    if (!tasksByAgent[task.agent]) tasksByAgent[task.agent] = [];
-    tasksByAgent[task.agent].push(task);
-  }
+  // Build per-agent stats
+  const agentStats: Record<string, AgentStats> = {};
 
-  const memoryByAgent: Record<string, MemoryRow[]> = {};
-  for (const mem of allMemory) {
-    if (!memoryByAgent[mem.agent]) memoryByAgent[mem.agent] = [];
-    memoryByAgent[mem.agent].push(mem);
+  for (const agent of AGENTS) {
+    const tasks = allTasks.filter((t) => t.agent === agent.id);
+    const done = tasks.filter((t) => t.status === "done").length;
+    const failed = tasks.filter((t) => t.status === "failed").length;
+    const successRate = done + failed > 0 ? Math.round((done / (done + failed)) * 100) : 100;
+
+    const usage = allUsage.filter((u) => u.agent === agent.id);
+    const totalCost = usage.reduce((s, u) => s + Number(u.cost_usd), 0);
+    const totalTokens = usage.reduce((s, u) => s + Number(u.input_tokens) + Number(u.output_tokens), 0);
+    const avgCostPerTask = done > 0 ? totalCost / done : 0;
+
+    // Last 7 days activity (tasks created per day)
+    const last7Days: number[] = [];
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(sevenDaysAgo);
+      d.setDate(sevenDaysAgo.getDate() + i);
+      const dateStr = d.toISOString().split("T")[0];
+      const count = tasks.filter((t) => t.created_at?.startsWith(dateStr)).length;
+      last7Days.push(count);
+    }
+
+    // Last activity
+    const lastAct = allActivity.find((a) => a.agent === agent.id);
+
+    agentStats[agent.id] = {
+      totalTasks: tasks.length,
+      doneTasks: done,
+      failedTasks: failed,
+      successRate,
+      totalCost,
+      avgCostPerTask,
+      totalTokens,
+      last7Days,
+      lastActivityAt: lastAct?.created_at || null,
+    };
   }
 
   return (
     <div>
-      <h1 className="text-3xl font-bold text-white">🤖 Agents</h1>
-      <p className="mt-2 text-gray-400">
-        View and manage your AI agents.
-      </p>
-
-      <div className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        {AGENTS.map((agent) => {
-          const agentTasks = tasksByAgent[agent.id] ?? [];
-          const lastTask = agentTasks[0] ?? null;
-          const taskCount = agentTasks.length;
-          const lastMemory = memoryByAgent[agent.id]?.[0] ?? null;
-
-          return (
-            <div
-              key={agent.id}
-              className="rounded-lg border border-gray-800 bg-[#111118] p-5"
-            >
-              {/* Header */}
-              <div className="flex items-center gap-3">
-                <span className="text-3xl">{agent.emoji}</span>
-                <div className="flex-1">
-                  <h3 className="text-lg font-semibold text-white">
-                    {agent.name}
-                  </h3>
-                </div>
-              </div>
-
-              {/* Session status */}
-              <AgentSessionBadge agentId={agent.id} />
-
-              {/* Role */}
-              <p className="mt-2 text-sm text-gray-400">{agent.role}</p>
-
-              {/* Stats */}
-              <div className="mt-4 space-y-2 border-t border-gray-800 pt-4">
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-gray-500">Tasks</span>
-                  <span className="text-white">{taskCount}</span>
-                </div>
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-gray-500">Last task</span>
-                  {lastTask ? (
-                    <span
-                      className={`truncate max-w-[140px] ${STATUS_COLORS[lastTask.status] ?? "text-gray-400"}`}
-                      title={lastTask.title}
-                    >
-                      {lastTask.title.length > 20
-                        ? lastTask.title.slice(0, 20) + "..."
-                        : lastTask.title}
-                    </span>
-                  ) : (
-                    <span className="text-gray-600">—</span>
-                  )}
-                </div>
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-gray-500">Last memory</span>
-                  {lastMemory ? (
-                    <span className="text-gray-300">
-                      {timeAgo(lastMemory.created_at)}
-                    </span>
-                  ) : (
-                    <span className="text-gray-600">—</span>
-                  )}
-                </div>
-              </div>
-            </div>
-          );
-        })}
+      <h1 className="text-2xl font-bold text-white">🤖 Agents</h1>
+      <p className="mt-1 text-sm text-gray-500">Performance and activity per agent</p>
+      <div className="mt-6">
+        <AgentsClient agentStats={agentStats} />
       </div>
     </div>
   );
