@@ -50,7 +50,7 @@ export async function POST() {
     // Notify the assigned agent (Discord + gateway wake)
     if (task.agent && task.agent !== "gonza") {
       try {
-        const notifyRes = await fetch(`http://localhost:3001/api/tasks/notify`, {
+        const notifyRes = await fetch(`http://127.0.0.1:3001/api/tasks/notify`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",

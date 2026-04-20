@@ -307,7 +307,6 @@ export function ProjectDetailModal({
                         label="AI: Plan Tasks"
                         projectId={epic.id}
                         projectTitle={epic.title}
-                        projectDescription={epic.instruction}
                         agent={project.agent}
                         instruction={buildTaskPlanInstruction(project, epic, tasks)}
                       />
@@ -341,7 +340,6 @@ export function ProjectDetailModal({
                     label="AI: Plan All Tasks"
                     projectId={project.id}
                     projectTitle={project.title}
-                    projectDescription={project.description}
                     agent={project.agent}
                     instruction={buildAllTasksPlanInstruction(project, epics, subTasksByParent)}
                     className="py-3 px-5"
@@ -351,7 +349,6 @@ export function ProjectDetailModal({
                   label="AI: Plan Epics"
                   projectId={project.id}
                   projectTitle={project.title}
-                  projectDescription={project.description}
                   agent={project.agent}
                   instruction={buildEpicPlanInstruction(project, epics)}
                   className="py-3 px-5"
@@ -386,7 +383,7 @@ ${existing}
 ### How to create epics
 Use the Mission Control API:
 \`\`\`bash
-curl -s -X POST -H "Authorization: Bearer $MISSION_CONTROL_API_KEY" -H "Content-Type: application/json" "http://localhost:3001/api/agent/tasks" -d '{"title": "Epic name", "agent": "${project.agent}", "parent_id": "${project.id}", "tags": ["epic"], "status": "draft", "created_by": "${project.agent}"}'
+curl -s -X POST -H "Authorization: Bearer $MISSION_CONTROL_API_KEY" -H "Content-Type: application/json" "http://127.0.0.1:3001/api/agent/tasks" -d '{"title": "Epic name", "agent": "${project.agent}", "parent_id": "${project.id}", "tags": ["epic"], "status": "draft", "created_by": "${project.agent}"}'
 \`\`\`
 
 After creating all epics, mark this task as done with a summary of what you created.`;
@@ -416,7 +413,7 @@ Create **concrete, actionable tasks** for this epic. Each task should:
 
 ### How to create tasks
 \`\`\`bash
-curl -s -X POST -H "Authorization: Bearer $MISSION_CONTROL_API_KEY" -H "Content-Type: application/json" "http://localhost:3001/api/agent/tasks" -d '{"title": "Task name", "instruction": "Detailed instructions...", "agent": "dev", "parent_id": "${epic.id}", "status": "draft", "created_by": "${project.agent}", "depends_on": []}'
+curl -s -X POST -H "Authorization: Bearer $MISSION_CONTROL_API_KEY" -H "Content-Type: application/json" "http://127.0.0.1:3001/api/agent/tasks" -d '{"title": "Task name", "instruction": "Detailed instructions...", "agent": "dev", "parent_id": "${epic.id}", "status": "draft", "created_by": "${project.agent}", "depends_on": []}'
 \`\`\`
 
 For dependencies, use the task IDs returned from previous creates:
@@ -460,7 +457,7 @@ For EACH epic that needs tasks, create concrete, actionable tasks. Each task sho
 
 ### How to create tasks
 \`\`\`bash
-curl -s -X POST -H "Authorization: Bearer $MISSION_CONTROL_API_KEY" -H "Content-Type: application/json" "http://localhost:3001/api/agent/tasks" -d '{"title": "Task name", "instruction": "Details...", "agent": "dev", "parent_id": "EPIC_ID", "status": "draft", "created_by": "${project.agent}", "depends_on": []}'
+curl -s -X POST -H "Authorization: Bearer $MISSION_CONTROL_API_KEY" -H "Content-Type: application/json" "http://127.0.0.1:3001/api/agent/tasks" -d '{"title": "Task name", "instruction": "Details...", "agent": "dev", "parent_id": "EPIC_ID", "status": "draft", "created_by": "${project.agent}", "depends_on": []}'
 \`\`\`
 
 IMPORTANT: Use the correct parent_id for each task (the epic it belongs to).

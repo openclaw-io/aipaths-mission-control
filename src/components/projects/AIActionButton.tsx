@@ -3,14 +3,13 @@
 import { useState } from "react";
 
 /**
- * Reusable button that creates a task for an agent via the agent API.
+ * Reusable button that creates a task for an agent via a server-side route.
  * Used for: "AI: Create Epics", "AI: Create Tasks", etc.
  */
 export function AIActionButton({
   label,
   projectId,
   projectTitle,
-  projectDescription,
   agent,
   instruction,
   className,
@@ -18,7 +17,6 @@ export function AIActionButton({
   label: string;
   projectId: string;
   projectTitle: string;
-  projectDescription: string | null;
   agent: string;
   instruction: string;
   className?: string;
@@ -30,43 +28,26 @@ export function AIActionButton({
   async function handleClick() {
     if (sent || sending) return;
     setClickCount((c) => c + 1);
-    if (clickCount > 0) return; // Prevent double-click
+    if (clickCount > 0) return;
     setSending(true);
 
     try {
-      const res = await fetch("/api/agent/tasks", {
+      const res = await fetch("/api/projects/ai-action", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${process.env.NEXT_PUBLIC_AGENT_API_KEY}`,
         },
         body: JSON.stringify({
-          title: `${label}: ${projectTitle}`,
+          label,
+          projectId,
+          projectTitle,
           instruction,
           agent,
-          created_by: "gonza",
-          parent_id: projectId,
-          status: "new",
         }),
       });
 
       if (res.ok) {
         setSent(true);
-        // Also trigger notify to wake the agent
-        const task = await res.json();
-        fetch("/api/tasks/notify", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${process.env.NEXT_PUBLIC_AGENT_API_KEY}`,
-          },
-          body: JSON.stringify({
-            taskId: task.id,
-            agent,
-            title: task.title,
-            action: "created",
-          }),
-        }).catch(() => {});
       }
     } finally {
       setSending(false);
