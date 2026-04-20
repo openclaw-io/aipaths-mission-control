@@ -2,20 +2,9 @@ import { NextResponse, type NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/admin";
 import { logActivity } from "@/lib/activity";
+import { AGENT_ROUTING, isRoutedAgent } from "@/lib/agent-routing";
 
 export const dynamic = "force-dynamic";
-
-// Agent → { agentId, channelId } mapping (matches inbox-router)
-const AGENT_ROUTING: Record<string, { agentId: string; channelId: string }> = {
-  strategist: { agentId: "strategist", channelId: "1474045438989697115" },
-  youtube:    { agentId: "youtube",    channelId: "1473373627750682664" },
-  content:    { agentId: "content",    channelId: "1473373703197691934" },
-  marketing:  { agentId: "marketing",  channelId: "1473373756557623481" },
-  dev:        { agentId: "dev",        channelId: "1473373777755639982" },
-  community:  { agentId: "community",  channelId: "1473373793375490058" },
-  editor:     { agentId: "editor",     channelId: "1473373703197691934" }, // shares content channel
-  legal:      { agentId: "legal",      channelId: "1473373703197691934" },
-};
 
 /**
  * Wake an OpenClaw agent via the gateway's chat completions API.
@@ -83,12 +72,17 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  const { taskId, agent, title, action } = await request.json();
+  const body = await request.json();
+  const taskId = typeof body.taskId === "string" ? body.taskId : "";
+  const agent = typeof body.agent === "string" ? body.agent : "";
+  const title = typeof body.title === "string" ? body.title : "";
+  const action = typeof body.action === "string" ? body.action : "";
 
-  const routing = AGENT_ROUTING[agent];
-  if (!routing) {
+  if (!isRoutedAgent(agent)) {
     return NextResponse.json({ error: `Unknown agent: ${agent}` }, { status: 400 });
   }
+
+  const routing = AGENT_ROUTING[agent];
 
   // Fetch full task details for the wake message
   let instruction = "";
@@ -143,17 +137,17 @@ export async function POST(request: NextRequest) {
   message += `\n## REQUIRED: Update task status via Mission Control API
 **Before you start working**, claim the task:
 \`\`\`bash
-curl -s -X PATCH -H "Authorization: Bearer $MISSION_CONTROL_API_KEY" -H "Content-Type: application/json" "http://localhost:3001/api/agent/tasks/${taskId}" -d '{"status": "in_progress"}'
+curl -s -X PATCH -H "Authorization: Bearer $MISSION_CONTROL_API_KEY" -H "Content-Type: application/json" "http://127.0.0.1:3001/api/agent/tasks/${taskId}" -d '{"status": "in_progress"}'
 \`\`\`
 
 **When finished**, mark it done with a result summary:
 \`\`\`bash
-curl -s -X PATCH -H "Authorization: Bearer $MISSION_CONTROL_API_KEY" -H "Content-Type: application/json" "http://localhost:3001/api/agent/tasks/${taskId}" -d '{"status": "done", "result": "Brief summary of what was done"}'
+curl -s -X PATCH -H "Authorization: Bearer $MISSION_CONTROL_API_KEY" -H "Content-Type: application/json" "http://127.0.0.1:3001/api/agent/tasks/${taskId}" -d '{"status": "done", "result": "Brief summary of what was done"}'
 \`\`\`
 
 If you fail, mark it failed:
 \`\`\`bash
-curl -s -X PATCH -H "Authorization: Bearer $MISSION_CONTROL_API_KEY" -H "Content-Type: application/json" "http://localhost:3001/api/agent/tasks/${taskId}" -d '{"status": "failed", "error": "What went wrong"}'
+curl -s -X PATCH -H "Authorization: Bearer $MISSION_CONTROL_API_KEY" -H "Content-Type: application/json" "http://127.0.0.1:3001/api/agent/tasks/${taskId}" -d '{"status": "failed", "error": "What went wrong"}'
 \`\`\``;
   }
 
@@ -174,10 +168,7 @@ curl -s -X PATCH -H "Authorization: Bearer $MISSION_CONTROL_API_KEY" -H "Content
   }
 
   // 2. Wake the agent via gateway
-  let woke = false;
-  if (agent !== "gonza") {
-    woke = await wakeAgent(routing.agentId, routing.channelId, message);
-  }
+  const woke = await wakeAgent(routing.agentId, routing.channelId, message);
 
   // 3. Log activity
   logActivity(agent, "agent_woke", title, `Action: ${action}`, taskId);

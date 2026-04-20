@@ -62,7 +62,7 @@ export async function PATCH(
   if ((status === "done" || status === "failed") && data.created_by && data.created_by !== data.agent) {
     const action = status === "done" ? "completed" : "failed";
     const detail = status === "done" ? data.result : data.error;
-    fetch("http://localhost:3001/api/tasks/notify", {
+    fetch("http://127.0.0.1:3001/api/tasks/notify", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

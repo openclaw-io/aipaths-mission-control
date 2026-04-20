@@ -55,7 +55,7 @@ export async function PATCH(
       for (const task of unblocked) {
         const action = task.status === "pending_approval" ? "approved" : "unblocked";
         try {
-          await fetch("http://localhost:3001/api/tasks/notify", {
+          await fetch("http://127.0.0.1:3001/api/tasks/notify", {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
