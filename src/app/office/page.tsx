@@ -10,8 +10,10 @@ export default async function OfficePage() {
       .select("id, title, agent, status, created_at, started_at, completed_at")
       .order("created_at", { ascending: false }),
     supabase
-      .from("agent_memory")
-      .select("agent, date, content")
+      .from("memories")
+      .select("agent, date, content, created_at")
+      .eq("type", "journal")
+      .order("date", { ascending: false })
       .order("created_at", { ascending: false })
       .limit(50),
     supabase.from("cron_health").select("cron_name, last_status"),

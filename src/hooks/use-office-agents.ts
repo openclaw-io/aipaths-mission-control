@@ -19,6 +19,7 @@ interface MemoryRow {
   agent: string;
   date: string;
   content: string;
+  created_at?: string;
 }
 
 const POLL_INTERVAL = 10_000;
@@ -60,7 +61,12 @@ export function useOfficeAgents(
       )
       .on(
         "postgres_changes",
-        { event: "*", schema: "public", table: "agent_memory" },
+        {
+          event: "*",
+          schema: "public",
+          table: "memories",
+          filter: "type=eq.journal",
+        },
         (payload) => {
           if (payload.eventType !== "DELETE") {
             const row = payload.new as MemoryRow;
@@ -73,7 +79,13 @@ export function useOfficeAgents(
                 next[idx] = row;
                 return next;
               }
-              return [row, ...prev];
+              return [row, ...prev]
+                .sort((a, b) => {
+                  const dateCompare = b.date.localeCompare(a.date);
+                  if (dateCompare !== 0) return dateCompare;
+                  return (b.created_at ?? "").localeCompare(a.created_at ?? "");
+                })
+                .slice(0, 50);
             });
           }
         },
@@ -94,7 +106,13 @@ export function useOfficeAgents(
         pollRef.current = setInterval(async () => {
           const [tasksRes, memRes] = await Promise.all([
             supabase.from("agent_tasks").select("*").order("created_at", { ascending: false }),
-            supabase.from("agent_memory").select("agent, date, content").order("created_at", { ascending: false }).limit(50),
+            supabase
+              .from("memories")
+              .select("agent, date, content, created_at")
+              .eq("type", "journal")
+              .order("date", { ascending: false })
+              .order("created_at", { ascending: false })
+              .limit(50),
           ]);
           if (tasksRes.data) setTasks(tasksRes.data);
           if (memRes.data) setMemory(memRes.data);

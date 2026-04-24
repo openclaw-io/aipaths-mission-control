@@ -6,24 +6,42 @@ import { AGENT_ROUTING, isRoutedAgent } from "@/lib/agent-routing";
 
 export const dynamic = "force-dynamic";
 
+function shellSingleQuote(value: string) {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+function buildTaskStatusCommand(taskId: string, payload: Record<string, string>) {
+  const envLocal = `${process.cwd()}/.env.local`;
+  const envFile = `${process.cwd()}/.env`;
+  const url = `http://127.0.0.1:3001/api/agent/tasks/${taskId}`;
+  const body = JSON.stringify(payload);
+  const script = `set -a; [ -f "${envLocal}" ] && . "${envLocal}"; [ -f "${envFile}" ] && . "${envFile}"; set +a; curl -s -X PATCH -H "Authorization: Bearer $AGENT_API_KEY" -H "Content-Type: application/json" "${url}" -d '${body}'`;
+  return `bash -lc ${shellSingleQuote(script)}`;
+}
+
+function buildTaskSessionKey(agentId: string, taskId: string) {
+  return `agent:${agentId}:mission-control:task:${taskId}`;
+}
+
 /**
  * Wake an OpenClaw agent via the gateway's chat completions API.
  * Same pattern as inbox-router's wakeDirector().
  */
-async function wakeAgent(agentId: string, channelId: string, message: string): Promise<boolean> {
+async function wakeAgent(agentId: string, taskId: string, message: string): Promise<boolean> {
   const gatewayUrl = process.env.OPENCLAW_GATEWAY_URL || "http://127.0.0.1:18789";
   const gatewayToken = process.env.OPENCLAW_GATEWAY_TOKEN;
+  const wakeTimeoutMs = Number(process.env.OPENCLAW_WAKE_TIMEOUT_MS || 120_000);
 
   if (!gatewayToken) {
     console.log(`[notify] No OPENCLAW_GATEWAY_TOKEN — skipping agent wake for ${agentId}`);
     return false;
   }
 
-  const sessionKey = `agent:${agentId}:discord:channel:${channelId}`;
+  const sessionKey = buildTaskSessionKey(agentId, taskId);
 
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15_000);
+    const timeoutId = setTimeout(() => controller.abort(), wakeTimeoutMs);
 
     const res = await fetch(`${gatewayUrl}/v1/chat/completions`, {
       method: "POST",
@@ -46,8 +64,8 @@ async function wakeAgent(agentId: string, channelId: string, message: string): P
     return res.ok;
   } catch (err: any) {
     if (err.name === "AbortError") {
-      console.log(`[notify] ${agentId} wake: sent (response timed out — agent is working)`);
-      return true;
+      console.error(`[notify] ${agentId} wake timed out after ${wakeTimeoutMs}ms`);
+      return false;
     }
     console.error(`[notify] ${agentId} wake failed:`, err.message);
     return false;
@@ -126,6 +144,9 @@ export async function POST(request: NextRequest) {
     message += `\n## Instructions\n${instruction}\n`;
   }
 
+  message += `\n## Execution context
+This wake is running in a detached Mission Control task session, not a user chat thread. Do not assume you can reply in-context to a human. If you need to send an external message, use the appropriate tool explicitly.\n`;
+
   if (!isCompletion) {
   // Add model routing info for code tasks
   if (taskModel) {
@@ -134,20 +155,26 @@ export async function POST(request: NextRequest) {
     message += `\nIf this is a code task (file edits, builds), consider spawning a code worker via sessions_spawn with runtime "acp" and model "${fullModel}". See the mission-control skill for details.\n`;
   }
 
+  const claimCommand = buildTaskStatusCommand(taskId, { status: "in_progress" });
+  const doneCommand = buildTaskStatusCommand(taskId, { status: "done", result: "Brief summary of what was done" });
+  const failCommand = buildTaskStatusCommand(taskId, { status: "failed", error: "What went wrong" });
+
   message += `\n## REQUIRED: Update task status via Mission Control API
+These commands load the Mission Control repo env before calling the API.
+
 **Before you start working**, claim the task:
 \`\`\`bash
-curl -s -X PATCH -H "Authorization: Bearer $MISSION_CONTROL_API_KEY" -H "Content-Type: application/json" "http://127.0.0.1:3001/api/agent/tasks/${taskId}" -d '{"status": "in_progress"}'
+${claimCommand}
 \`\`\`
 
 **When finished**, mark it done with a result summary:
 \`\`\`bash
-curl -s -X PATCH -H "Authorization: Bearer $MISSION_CONTROL_API_KEY" -H "Content-Type: application/json" "http://127.0.0.1:3001/api/agent/tasks/${taskId}" -d '{"status": "done", "result": "Brief summary of what was done"}'
+${doneCommand}
 \`\`\`
 
 If you fail, mark it failed:
 \`\`\`bash
-curl -s -X PATCH -H "Authorization: Bearer $MISSION_CONTROL_API_KEY" -H "Content-Type: application/json" "http://127.0.0.1:3001/api/agent/tasks/${taskId}" -d '{"status": "failed", "error": "What went wrong"}'
+${failCommand}
 \`\`\``;
   }
 
@@ -168,10 +195,14 @@ curl -s -X PATCH -H "Authorization: Bearer $MISSION_CONTROL_API_KEY" -H "Content
   }
 
   // 2. Wake the agent via gateway
-  const woke = await wakeAgent(routing.agentId, routing.channelId, message);
+  const woke = await wakeAgent(routing.agentId, taskId, message);
 
   // 3. Log activity
   logActivity(agent, "agent_woke", title, `Action: ${action}`, taskId);
 
-  return NextResponse.json({ ok: true, agent, woke });
+  if (!woke) {
+    return NextResponse.json({ ok: false, agent, woke, taskId }, { status: 503 });
+  }
+
+  return NextResponse.json({ ok: true, agent, woke, taskId });
 }
