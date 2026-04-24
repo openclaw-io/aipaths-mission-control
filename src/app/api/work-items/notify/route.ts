@@ -206,6 +206,11 @@ Fail it:
 ${failCommand}
 \`\`\``;
 
+  const woke = await wakeAgent(routing.agentId, item.id, message);
+  if (!woke) {
+    return NextResponse.json({ ok: false, agent, woke, workItemId: item.id }, { status: 503 });
+  }
+
   const webhookUrl = process.env.DISCORD_TASK_ROUTER_WEBHOOK;
   if (webhookUrl) {
     try {
@@ -219,11 +224,6 @@ ${failCommand}
     } catch (err) {
       console.error("[notify-work-item] Discord webhook failed:", err);
     }
-  }
-
-  const woke = await wakeAgent(routing.agentId, item.id, message);
-  if (!woke) {
-    return NextResponse.json({ ok: false, agent, woke, workItemId: item.id }, { status: 503 });
   }
 
   return NextResponse.json({ ok: true, agent, woke, workItemId: item.id });
