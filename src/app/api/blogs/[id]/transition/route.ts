@@ -185,7 +185,7 @@ export async function POST(
 
   if (["promote", "request_changes", "approve"].includes(action)) {
     const owner_agent = "content";
-    const relationType = action === "approve" ? "localize" : action === "promote" ? "develop" : "revise";
+    const relationType = action === "approve" ? "followup" : action === "promote" ? "investigate" : "followup";
     const actionName = action === "approve" ? "localize_blog_to_en" : action === "promote" ? "develop_blog_draft" : "revise_blog_draft";
 
     const { workItem } = await createPipelineWorkItem(db, {

@@ -69,13 +69,14 @@ export async function createPipelineWorkItem(db: SupabaseClient, input: Pipeline
 
   if (error) throw error;
 
-  await db.from("pipeline_work_map").insert({
+  const { error: mapError } = await db.from("pipeline_work_map").insert({
     pipeline_item_id: input.pipelineItemId,
     work_item_id: workItem.id,
     relation_type: input.relationType,
   });
+  if (mapError) throw mapError;
 
-  await db.from("pipeline_events").insert({
+  const { error: eventError } = await db.from("pipeline_events").insert({
     pipeline_item_id: input.pipelineItemId,
     event_type: "pipeline_item.work_item_created",
     actor: "pipeline-materializer",
@@ -90,6 +91,7 @@ export async function createPipelineWorkItem(db: SupabaseClient, input: Pipeline
       action: input.action,
     },
   });
+  if (eventError) throw eventError;
 
   return { workItem, created: true };
 }
