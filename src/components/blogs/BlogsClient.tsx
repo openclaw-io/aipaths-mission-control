@@ -81,7 +81,11 @@ export function BlogsClient({ initialBlogs, initialWorkItems }: { initialBlogs: 
   }, [blogs]);
 
   const selectedReviewItem = useMemo(() => blogs.find((item) => item.id === reviewId) || null, [blogs, reviewId]);
-  const scheduledItems = useMemo(() => blogs.filter((item) => item.status === "scheduled"), [blogs]);
+  const scheduledItems = useMemo(() => {
+    return blogs
+      .filter((item) => item.status === "scheduled")
+      .sort((a, b) => getScheduleTime(a) - getScheduleTime(b));
+  }, [blogs]);
   const publishedItems = useMemo(() => blogs.filter((item) => item.status === "live"), [blogs]);
   const archivedItems = useMemo(() => blogs.filter((item) => item.status === "archived"), [blogs]);
 
@@ -217,7 +221,7 @@ export function BlogsClient({ initialBlogs, initialWorkItems }: { initialBlogs: 
       )}
 
       {tab === "scheduled" && (
-        <SimpleList title="Scheduled" items={scheduledItems} workItems={workItems} emptyLabel="No scheduled blogs" />
+        <ScheduledList items={scheduledItems} />
       )}
 
       {tab === "published" && (
@@ -370,6 +374,46 @@ function renderInline(text: string) {
     }
     return part;
   });
+}
+
+function getScheduleTime(item: BlogItem) {
+  return item.scheduled_for ? new Date(item.scheduled_for).getTime() : Number.MAX_SAFE_INTEGER;
+}
+
+function formatScheduledDate(value: string | null) {
+  if (!value) return "Fecha sin definir";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Fecha sin definir";
+  const formatted = new Intl.DateTimeFormat("es-ES", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    timeZone: "Europe/London",
+  }).format(date);
+  return formatted.charAt(0).toUpperCase() + formatted.slice(1);
+}
+
+function ScheduledList({ items }: { items: BlogItem[] }) {
+  return (
+    <section className="mt-6 rounded-xl border border-gray-800 bg-[#111118] p-4">
+      <div className="mb-4 flex items-center justify-between">
+        <h2 className="text-lg font-semibold text-white">Scheduled</h2>
+        <span className="text-xs text-gray-500">{items.length}</span>
+      </div>
+      {items.length === 0 ? (
+        <p className="text-sm text-gray-600">No scheduled blogs</p>
+      ) : (
+        <div className="divide-y divide-gray-800">
+          {items.map((item) => (
+            <div key={item.id} className="py-4 first:pt-0 last:pb-0">
+              <p className="text-sm font-medium text-purple-300">{formatScheduledDate(item.scheduled_for)}</p>
+              <h3 className="mt-1 text-base font-semibold text-white">{item.title}</h3>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
 }
 
 function SimpleList({ title, items, workItems, emptyLabel }: { title: string; items: BlogItem[]; workItems: LinkedWorkItem[]; emptyLabel: string }) {

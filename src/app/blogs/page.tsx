@@ -15,6 +15,7 @@ export interface BlogItem {
   requested_by: string | null;
   source_type: string | null;
   source_id: string | null;
+  scheduled_for: string | null;
   published_at: string | null;
   current_url: string | null;
   content_path: string | null;
@@ -40,7 +41,7 @@ export default async function BlogsPage() {
   const [{ data, error }, { data: workItems, error: workError }] = await Promise.all([
     supabaseAdmin
       .from("pipeline_items")
-      .select("id, pipeline_type, title, slug, status, priority, owner_agent, requested_by, source_type, source_id, published_at, current_url, content_path, content_format, metadata, created_at, updated_at")
+      .select("id, pipeline_type, title, slug, status, priority, owner_agent, requested_by, source_type, source_id, scheduled_for, published_at, current_url, content_path, content_format, metadata, created_at, updated_at")
       .eq("pipeline_type", "blog")
       .order("created_at", { ascending: false }),
     supabaseAdmin
