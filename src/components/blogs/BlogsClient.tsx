@@ -9,6 +9,13 @@ import { useRealtimeWorkItems } from "@/hooks/useRealtimeWorkItems";
 type TabKey = "inbox" | "published" | "archived";
 type SectionKey = "drafts" | "review";
 
+type BlogMetadata = {
+  intel?: { enriched_item_id?: string | number };
+  draft_markdown?: string;
+  draft_summary?: string;
+  seo?: { meta_description?: string; primary_keyword?: string; secondary_keywords?: string[] };
+};
+
 const TABS: Array<{ key: TabKey; label: string }> = [
   { key: "inbox", label: "Inbox" },
   { key: "published", label: "Published" },
@@ -29,6 +36,10 @@ const STATUS_STYLES: Record<string, string> = {
 
 function prettyStatus(status: string) {
   return status.replaceAll("_", " ");
+}
+
+function getMetadata(item: BlogItem): BlogMetadata {
+  return (item.metadata || {}) as BlogMetadata;
 }
 
 function getPrimaryWorkItem(itemId: string, workItems: LinkedWorkItem[]) {
@@ -53,6 +64,8 @@ export function BlogsClient({ initialBlogs, initialWorkItems }: { initialBlogs: 
   const blogs = useRealtimeBlogs(initialBlogs);
   const workItems = useRealtimeWorkItems(initialWorkItems);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [reviewId, setReviewId] = useState<string | null>(null);
+  const [reviewNotes, setReviewNotes] = useState("");
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [tab, setTab] = useState<TabKey>("inbox");
 
@@ -65,16 +78,28 @@ export function BlogsClient({ initialBlogs, initialWorkItems }: { initialBlogs: 
     ) as Record<SectionKey, BlogItem[]>;
   }, [blogs]);
 
+  const selectedReviewItem = useMemo(() => blogs.find((item) => item.id === reviewId) || null, [blogs, reviewId]);
   const publishedItems = useMemo(() => blogs.filter((item) => item.status === "live"), [blogs]);
   const archivedItems = useMemo(() => blogs.filter((item) => item.status === "archived"), [blogs]);
 
-  async function runAction(action: string, item: BlogItem) {
+  function openReview(item: BlogItem) {
+    setSelectedId(null);
+    setReviewId(item.id);
+    setReviewNotes("");
+  }
+
+  function closeReview() {
+    setReviewId(null);
+    setReviewNotes("");
+  }
+
+  async function runAction(action: string, item: BlogItem, options?: { reviewNotes?: string }) {
     setBusyAction(`${item.id}:${action}`);
     try {
       const res = await fetch(`/api/blogs/${item.id}/transition`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action }),
+        body: JSON.stringify({ action, reviewNotes: options?.reviewNotes }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -82,10 +107,20 @@ export function BlogsClient({ initialBlogs, initialWorkItems }: { initialBlogs: 
         return;
       }
       setSelectedId(null);
+      closeReview();
       router.refresh();
     } finally {
       setBusyAction(null);
     }
+  }
+
+  async function requestChanges(item: BlogItem) {
+    const notes = reviewNotes.trim();
+    if (!notes) {
+      alert("Add review notes before requesting changes.");
+      return;
+    }
+    await runAction("request_changes", item, { reviewNotes: notes });
   }
 
   return (
@@ -100,6 +135,7 @@ export function BlogsClient({ initialBlogs, initialWorkItems }: { initialBlogs: 
             onClick={() => {
               setTab(t.key);
               setSelectedId(null);
+              closeReview();
             }}
             className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
               tab === t.key ? "bg-[#1a1a24] text-white" : "text-gray-500 hover:text-white"
@@ -125,42 +161,43 @@ export function BlogsClient({ initialBlogs, initialWorkItems }: { initialBlogs: 
                 ) : (
                   <div className="space-y-3">
                     {items.map((item) => {
-                      const intel = (item.metadata as any)?.intel;
+                      const metadata = getMetadata(item);
                       const primaryWorkItem = getPrimaryWorkItem(item.id, workItems);
                       const isSelected = selectedId === item.id;
+                      const isReview = item.status === "ready_for_review";
                       return (
                         <div
                           key={item.id}
-                          onClick={() => setSelectedId(isSelected ? null : item.id)}
-                          className={`cursor-pointer rounded-lg border p-4 transition ${isSelected ? "border-blue-500 bg-blue-500/5" : "border-gray-800 hover:border-gray-700 hover:bg-white/5"}`}
+                          onClick={() => (isReview ? openReview(item) : setSelectedId(isSelected ? null : item.id))}
+                          className={`cursor-pointer rounded-lg border p-4 transition ${isSelected || reviewId === item.id ? "border-blue-500 bg-blue-500/5" : "border-gray-800 hover:border-gray-700 hover:bg-white/5"}`}
                         >
                           <div className="flex items-start justify-between gap-3">
                             <div>
                               <h3 className="font-medium text-white">{item.title}</h3>
                               <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-gray-500">
                                 <span className={`rounded-full px-2 py-0.5 ${STATUS_STYLES[item.status] || "bg-gray-500/20 text-gray-300"}`}>{prettyStatus(item.status)}</span>
-                                {intel?.enriched_item_id && <span>enriched: {intel.enriched_item_id}</span>}
+                                {metadata.intel?.enriched_item_id && <span>enriched: {metadata.intel.enriched_item_id}</span>}
                                 {primaryWorkItem && <span>task: {primaryWorkItem.owner_agent || "unknown"} · {primaryWorkItem.status}</span>}
                               </div>
                             </div>
+                            {isReview && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  openReview(item);
+                                }}
+                                className="rounded-lg bg-white/10 px-3 py-2 text-sm font-medium text-white transition hover:bg-white/15"
+                              >
+                                Review
+                              </button>
+                            )}
                           </div>
 
-                          {isSelected && (
+                          {isSelected && item.status === "draft" && (
                             <div className="mt-4 flex flex-wrap gap-2" onClick={(e) => e.stopPropagation()}>
-                              {item.status === "draft" && (
-                                <>
-                                  <ActionButton label="Promote" busy={busyAction === `${item.id}:promote`} onClick={() => runAction("promote", item)} />
-                                  <ActionButton label="Park" variant="secondary" busy={busyAction === `${item.id}:park`} onClick={() => runAction("park", item)} />
-                                  <ActionButton label="Reject" variant="danger" busy={busyAction === `${item.id}:reject`} onClick={() => runAction("reject", item)} />
-                                </>
-                              )}
-                              {item.status === "ready_for_review" && (
-                                <>
-                                  <ActionButton label="Approve" busy={busyAction === `${item.id}:approve`} onClick={() => runAction("approve", item)} />
-                                  <ActionButton label="Request changes" variant="secondary" busy={busyAction === `${item.id}:request_changes`} onClick={() => runAction("request_changes", item)} />
-                                  <ActionButton label="Reject" variant="danger" busy={busyAction === `${item.id}:reject`} onClick={() => runAction("reject", item)} />
-                                </>
-                              )}
+                              <ActionButton label="Promote" busy={busyAction === `${item.id}:promote`} onClick={() => runAction("promote", item)} />
+                              <ActionButton label="Park" variant="secondary" busy={busyAction === `${item.id}:park`} onClick={() => runAction("park", item)} />
+                              <ActionButton label="Reject" variant="danger" busy={busyAction === `${item.id}:reject`} onClick={() => runAction("reject", item)} />
                             </div>
                           )}
                         </div>
@@ -181,7 +218,109 @@ export function BlogsClient({ initialBlogs, initialWorkItems }: { initialBlogs: 
       {tab === "archived" && (
         <SimpleList title="Archived" items={archivedItems} workItems={workItems} emptyLabel="No archived blogs" />
       )}
+
+      {selectedReviewItem && (
+        <ReviewDrawer
+          item={selectedReviewItem}
+          notes={reviewNotes}
+          busyAction={busyAction}
+          onNotesChange={setReviewNotes}
+          onClose={closeReview}
+          onApprove={() => runAction("approve", selectedReviewItem)}
+          onReject={() => runAction("reject", selectedReviewItem)}
+          onRequestChanges={() => requestChanges(selectedReviewItem)}
+        />
+      )}
     </div>
+  );
+}
+
+function ReviewDrawer({
+  item,
+  notes,
+  busyAction,
+  onNotesChange,
+  onClose,
+  onApprove,
+  onRequestChanges,
+  onReject,
+}: {
+  item: BlogItem;
+  notes: string;
+  busyAction: string | null;
+  onNotesChange: (value: string) => void;
+  onClose: () => void;
+  onApprove: () => void;
+  onRequestChanges: () => void;
+  onReject: () => void;
+}) {
+  const metadata = getMetadata(item);
+  const markdown = metadata.draft_markdown || metadata.draft_summary || "No draft content found on this blog item yet.";
+
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/60" onClick={onClose}>
+      <aside
+        className="flex h-full w-full max-w-4xl flex-col border-l border-gray-800 bg-[#0f0f16] shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="border-b border-gray-800 p-5">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="text-xs font-medium uppercase tracking-wide text-yellow-300">Ready to review</p>
+              <h2 className="mt-1 text-xl font-bold text-white">{item.title}</h2>
+              <div className="mt-3 flex flex-wrap gap-2 text-xs text-gray-500">
+                {item.slug && <span>slug: {item.slug}</span>}
+                {metadata.seo?.primary_keyword && <span>keyword: {metadata.seo.primary_keyword}</span>}
+                {item.content_path && <span>path: {item.content_path}</span>}
+              </div>
+            </div>
+            <button onClick={onClose} className="rounded-lg bg-white/10 px-3 py-2 text-sm text-white hover:bg-white/15">
+              Close
+            </button>
+          </div>
+          {metadata.seo?.meta_description && <p className="mt-4 text-sm text-gray-400">{metadata.seo.meta_description}</p>}
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-6">
+          <MarkdownPreview markdown={markdown} />
+        </div>
+
+        <div className="border-t border-gray-800 bg-[#111118] p-5">
+          <label className="text-sm font-medium text-white" htmlFor="review-notes">Review notes</label>
+          <textarea
+            id="review-notes"
+            value={notes}
+            onChange={(event) => onNotesChange(event.target.value)}
+            placeholder="Required only if you request changes..."
+            className="mt-2 h-24 w-full rounded-lg border border-gray-800 bg-[#0a0a0f] p-3 text-sm text-white outline-none transition placeholder:text-gray-600 focus:border-blue-500"
+          />
+          <div className="mt-4 flex flex-wrap justify-end gap-2">
+            <ActionButton label="Approve" busy={busyAction === `${item.id}:approve`} onClick={onApprove} />
+            <ActionButton label="Request changes" variant="secondary" busy={busyAction === `${item.id}:request_changes`} onClick={onRequestChanges} />
+            <ActionButton label="Reject" variant="danger" busy={busyAction === `${item.id}:reject`} onClick={onReject} />
+          </div>
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+function MarkdownPreview({ markdown }: { markdown: string }) {
+  const body = markdown.replace(/^---[\s\S]*?---\s*/, "").trim();
+  const lines = body.split("\n");
+
+  return (
+    <article className="space-y-4 text-sm leading-7 text-gray-300">
+      {lines.map((line, index) => {
+        const trimmed = line.trim();
+        if (!trimmed) return <div key={index} className="h-2" />;
+        if (trimmed.startsWith("# ")) return <h1 key={index} className="text-3xl font-bold leading-tight text-white">{trimmed.slice(2)}</h1>;
+        if (trimmed.startsWith("## ")) return <h2 key={index} className="pt-4 text-xl font-semibold text-white">{trimmed.slice(3)}</h2>;
+        if (trimmed.startsWith("### ")) return <h3 key={index} className="pt-3 text-lg font-semibold text-white">{trimmed.slice(4)}</h3>;
+        if (trimmed.startsWith("- ")) return <p key={index} className="pl-4 text-gray-300">• {trimmed.slice(2)}</p>;
+        return <p key={index}>{trimmed}</p>;
+      })}
+    </article>
   );
 }
 
