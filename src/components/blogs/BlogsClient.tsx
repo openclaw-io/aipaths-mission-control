@@ -6,7 +6,7 @@ import type { BlogItem, LinkedWorkItem } from "@/app/blogs/page";
 import { useRealtimeBlogs } from "@/hooks/useRealtimeBlogs";
 import { useRealtimeWorkItems } from "@/hooks/useRealtimeWorkItems";
 
-type TabKey = "inbox" | "published" | "archived";
+type TabKey = "inbox" | "scheduled" | "published" | "archived";
 type SectionKey = "drafts" | "review";
 
 type BlogMetadata = {
@@ -18,6 +18,7 @@ type BlogMetadata = {
 
 const TABS: Array<{ key: TabKey; label: string }> = [
   { key: "inbox", label: "Inbox" },
+  { key: "scheduled", label: "Scheduled" },
   { key: "published", label: "Published" },
   { key: "archived", label: "Archived" },
 ];
@@ -30,6 +31,7 @@ const INBOX_SECTIONS: Array<{ key: SectionKey; title: string; statuses: string[]
 const STATUS_STYLES: Record<string, string> = {
   draft: "bg-slate-500/20 text-slate-300",
   ready_for_review: "bg-yellow-500/20 text-yellow-300",
+  scheduled: "bg-purple-500/20 text-purple-300",
   live: "bg-green-500/20 text-green-300",
   archived: "bg-gray-500/20 text-gray-300",
 };
@@ -79,6 +81,7 @@ export function BlogsClient({ initialBlogs, initialWorkItems }: { initialBlogs: 
   }, [blogs]);
 
   const selectedReviewItem = useMemo(() => blogs.find((item) => item.id === reviewId) || null, [blogs, reviewId]);
+  const scheduledItems = useMemo(() => blogs.filter((item) => item.status === "scheduled"), [blogs]);
   const publishedItems = useMemo(() => blogs.filter((item) => item.status === "live"), [blogs]);
   const archivedItems = useMemo(() => blogs.filter((item) => item.status === "archived"), [blogs]);
 
@@ -211,6 +214,10 @@ export function BlogsClient({ initialBlogs, initialWorkItems }: { initialBlogs: 
             );
           })}
         </div>
+      )}
+
+      {tab === "scheduled" && (
+        <SimpleList title="Scheduled" items={scheduledItems} workItems={workItems} emptyLabel="No scheduled blogs" />
       )}
 
       {tab === "published" && (
