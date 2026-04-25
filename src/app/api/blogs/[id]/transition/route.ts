@@ -56,7 +56,7 @@ function createWorkItemTitle(action: string, title: string) {
   }
 }
 
-function createWorkItemInstruction(action: string, item: any, reviewNotes?: string) {
+function createWorkItemInstruction(action: string, item: { title: string }, reviewNotes?: string) {
   switch (action) {
     case "promote":
       return [
@@ -93,7 +93,7 @@ function createWorkItemInstruction(action: string, item: any, reviewNotes?: stri
   }
 }
 
-async function notifyWorkItem(id: string, agent: string, title: string, action: string) {
+async function notifyWorkItem(id: string, agent: string, title: string) {
   const baseUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3001";
   const apiKey = process.env.AGENT_API_KEY;
   if (!apiKey) return;
@@ -203,7 +203,7 @@ export async function POST(
     });
 
     if (workItem?.id) {
-      await notifyWorkItem(workItem.id, owner_agent, item.title, action);
+      void notifyWorkItem(workItem.id, owner_agent, item.title);
     }
   }
 
