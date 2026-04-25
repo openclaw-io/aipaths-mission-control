@@ -117,12 +117,13 @@ async function wakeAgent(agentId: string, workItemId: string, message: string): 
     clearTimeout(timeoutId);
     console.log(`[notify-work-item] ${agentId} wake: HTTP ${res.status}`);
     return res.ok;
-  } catch (err: any) {
-    if (err.name === "AbortError") {
+  } catch (err: unknown) {
+    if (err instanceof Error && err.name === "AbortError") {
       console.error(`[notify-work-item] ${agentId} wake timed out after ${wakeTimeoutMs}ms`);
       return false;
     }
-    console.error(`[notify-work-item] ${agentId} wake failed:`, err.message);
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[notify-work-item] ${agentId} wake failed:`, message);
     return false;
   }
 }
@@ -206,7 +207,23 @@ Fail it:
 ${failCommand}
 \`\`\``;
 
-  const woke = await wakeAgent(routing.agentId, item.id, message);
+  let woke = await wakeAgent(routing.agentId, item.id, message);
+  if (!woke) {
+    const { data: latestItem } = await db
+      .from("work_items")
+      .select("status")
+      .eq("id", item.id)
+      .maybeSingle();
+
+    // A long-running agent can successfully claim the work item before the
+    // gateway request returns. Treat that as a successful wake so the scheduler
+    // does not retry and create duplicate detached sessions.
+    if (latestItem?.status === "in_progress" || latestItem?.status === "done") {
+      console.log(`[notify-work-item] ${agent} wake timed out, but work item is ${latestItem.status}; treating as success`);
+      woke = true;
+    }
+  }
+
   if (!woke) {
     return NextResponse.json({ ok: false, agent, woke, workItemId: item.id }, { status: 503 });
   }
