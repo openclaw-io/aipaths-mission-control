@@ -61,7 +61,7 @@ function getPrimaryWorkItem(itemId: string, workItems: LinkedWorkItem[]) {
 
 export function BlogsClient({ initialBlogs, initialWorkItems }: { initialBlogs: BlogItem[]; initialWorkItems: LinkedWorkItem[] }) {
   const router = useRouter();
-  const blogs = useRealtimeBlogs(initialBlogs);
+  const [blogs, setBlogs] = useRealtimeBlogs(initialBlogs);
   const workItems = useRealtimeWorkItems(initialWorkItems);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [reviewId, setReviewId] = useState<string | null>(null);
@@ -106,6 +106,8 @@ export function BlogsClient({ initialBlogs, initialWorkItems }: { initialBlogs: 
         alert(err.error || "Action failed");
         return;
       }
+      const updatedItem = (await res.json()) as Partial<BlogItem>;
+      setBlogs((prev) => prev.map((blog) => (blog.id === item.id ? { ...blog, ...updatedItem } : blog)));
       setSelectedId(null);
       closeReview();
       router.refresh();
