@@ -294,7 +294,7 @@ function ReviewDrawer({
           )}
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-8">
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-6">
           <MarkdownPreview markdown={markdown} />
         </div>
 
@@ -336,14 +336,14 @@ function MarkdownPreview({ markdown }: { markdown: string }) {
   const lines = body.split("\n");
 
   return (
-    <article className="mx-auto max-w-3xl space-y-4 rounded-2xl border border-gray-800 bg-[#15151d] px-8 py-10 text-[15px] leading-8 text-gray-300 shadow-xl">
+    <article className="mx-auto max-w-4xl space-y-3 rounded-2xl border border-gray-800 bg-[#15151d] px-10 py-10 text-[17px] leading-7 text-gray-300 shadow-xl">
       {lines.map((line, index) => {
         const trimmed = line.trim();
         if (!trimmed) return <div key={index} className="h-2" />;
         if (trimmed === "---") return <hr key={index} className="my-8 border-gray-800" />;
-        if (trimmed.startsWith("# ")) return <h1 key={index} className="mb-6 text-4xl font-bold leading-tight text-white">{renderInline(trimmed.slice(2))}</h1>;
-        if (trimmed.startsWith("## ")) return <h2 key={index} className="border-t border-gray-800 pt-8 text-2xl font-semibold leading-tight text-white">{renderInline(trimmed.slice(3))}</h2>;
-        if (trimmed.startsWith("### ")) return <h3 key={index} className="pt-4 text-xl font-semibold text-white">{renderInline(trimmed.slice(4))}</h3>;
+        if (trimmed.startsWith("# ")) return <h1 key={index} className="mb-5 text-3xl font-bold leading-tight text-white">{renderInline(trimmed.slice(2))}</h1>;
+        if (trimmed.startsWith("## ")) return <h2 key={index} className="border-t border-gray-800 pt-6 text-2xl font-semibold leading-tight text-white">{renderInline(trimmed.slice(3))}</h2>;
+        if (trimmed.startsWith("### ")) return <h3 key={index} className="pt-3 text-xl font-semibold text-white">{renderInline(trimmed.slice(4))}</h3>;
         if (trimmed.startsWith("> ")) return <blockquote key={index} className="border-l-2 border-blue-500 pl-4 italic text-gray-400">{renderInline(trimmed.slice(2))}</blockquote>;
         if (trimmed.startsWith("- ")) return <p key={index} className="pl-4 text-gray-300">• {renderInline(trimmed.slice(2))}</p>;
         return <p key={index}>{renderInline(trimmed)}</p>;
