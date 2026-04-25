@@ -84,8 +84,8 @@ export function BlogsClient({ initialBlogs, initialWorkItems }: { initialBlogs: 
   const scheduledItems = useMemo(() => {
     return blogs
       .filter((item) => item.status === "scheduled")
-      .sort((a, b) => getScheduleTime(a) - getScheduleTime(b));
-  }, [blogs]);
+      .sort((a, b) => getScheduleTime(a, workItems) - getScheduleTime(b, workItems));
+  }, [blogs, workItems]);
   const publishedItems = useMemo(() => blogs.filter((item) => item.status === "live"), [blogs]);
   const archivedItems = useMemo(() => blogs.filter((item) => item.status === "archived"), [blogs]);
 
@@ -221,7 +221,7 @@ export function BlogsClient({ initialBlogs, initialWorkItems }: { initialBlogs: 
       )}
 
       {tab === "scheduled" && (
-        <ScheduledList items={scheduledItems} />
+        <ScheduledList items={scheduledItems} workItems={workItems} />
       )}
 
       {tab === "published" && (
@@ -376,8 +376,20 @@ function renderInline(text: string) {
   });
 }
 
-function getScheduleTime(item: BlogItem) {
-  return item.scheduled_for ? new Date(item.scheduled_for).getTime() : Number.MAX_SAFE_INTEGER;
+function getPublishWorkItem(item: BlogItem, workItems: LinkedWorkItem[]) {
+  return workItems.find((workItem) => {
+    const payload = workItem.payload || {};
+    return payload.action === "publish_blog" && payload.pipeline_item_id === item.id;
+  });
+}
+
+function getPublishSchedule(item: BlogItem, workItems: LinkedWorkItem[]) {
+  return getPublishWorkItem(item, workItems)?.scheduled_for || item.scheduled_for;
+}
+
+function getScheduleTime(item: BlogItem, workItems: LinkedWorkItem[]) {
+  const scheduledFor = getPublishSchedule(item, workItems);
+  return scheduledFor ? new Date(scheduledFor).getTime() : Number.MAX_SAFE_INTEGER;
 }
 
 function formatScheduledDate(value: string | null) {
@@ -393,7 +405,7 @@ function formatScheduledDate(value: string | null) {
   return formatted.charAt(0).toUpperCase() + formatted.slice(1);
 }
 
-function ScheduledList({ items }: { items: BlogItem[] }) {
+function ScheduledList({ items, workItems }: { items: BlogItem[]; workItems: LinkedWorkItem[] }) {
   return (
     <section className="mt-6 rounded-xl border border-gray-800 bg-[#111118] p-4">
       <div className="mb-4 flex items-center justify-between">
@@ -406,7 +418,7 @@ function ScheduledList({ items }: { items: BlogItem[] }) {
         <div className="divide-y divide-gray-800">
           {items.map((item) => (
             <div key={item.id} className="py-4 first:pt-0 last:pb-0">
-              <p className="text-sm font-medium text-purple-300">{formatScheduledDate(item.scheduled_for)}</p>
+              <p className="text-sm font-medium text-purple-300">{formatScheduledDate(getPublishSchedule(item, workItems))}</p>
               <h3 className="mt-1 text-base font-semibold text-white">{item.title}</h3>
             </div>
           ))}

@@ -33,6 +33,7 @@ export interface LinkedWorkItem {
   owner_agent: string | null;
   target_agent_id?: string | null;
   created_at: string;
+  scheduled_for: string | null;
   payload: Record<string, unknown> | null;
 }
 
@@ -45,7 +46,7 @@ export default async function BlogsPage() {
       .order("created_at", { ascending: false }),
     supabaseAdmin
       .from("work_items")
-      .select("id, source_id, source_type, title, status, owner_agent, target_agent_id, created_at, payload")
+      .select("id, source_id, source_type, title, status, owner_agent, target_agent_id, created_at, scheduled_for, payload")
       .eq("source_type", "service")
       .order("created_at", { ascending: false }),
   ]);
