@@ -125,13 +125,6 @@ function getTabDate(item: CommunityItem, tab: TabKey, workItems: LinkedWorkItem[
   return null;
 }
 
-function tabAccent(tab: TabKey) {
-  if (tab === "review") return "yellow";
-  if (tab === "scheduled") return "blue";
-  if (tab === "published") return "green";
-  return "slate";
-}
-
 function tabCardLabel(tab: TabKey) {
   if (tab === "review") return "Review";
   if (tab === "scheduled") return "Publish";
@@ -425,14 +418,7 @@ function CommunityQueueCard({
   const taskStatus = publishWorkItem?.status || workItem?.status || item.status;
   const suppressPreviews = publishWorkItem?.payload?.suppress_link_previews === true;
   const copy = getCopy(metadata).trim();
-  const accent = tabAccent(tab);
   const borderClass = expanded ? "border-blue-500 bg-blue-500/5" : "border-gray-800 bg-black/10 hover:border-gray-700";
-  const accentClasses = {
-    yellow: "bg-yellow-500/15 text-yellow-300",
-    blue: "bg-blue-500/15 text-blue-300",
-    green: "bg-green-500/15 text-green-300",
-    slate: "bg-slate-500/15 text-slate-300",
-  } as const;
 
   return (
     <article className={`rounded-lg border p-4 transition ${borderClass}`}>
@@ -444,14 +430,8 @@ function CommunityQueueCard({
 
         <div className="min-w-0">
           <h3 className="truncate font-medium text-white">{item.title}</h3>
+          <p className="mt-1 truncate text-sm font-medium text-sky-300">Canal: {channel}</p>
           <p className="mt-1 truncate text-sm text-gray-500">{getOneLineCopyPreview(metadata)}</p>
-          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-            <span className={`rounded-full px-2 py-0.5 font-medium ${accentClasses[accent]}`}>{tabCardLabel(tab)}</span>
-            <span className="rounded-full bg-sky-500/15 px-2 py-0.5 font-medium text-sky-300">{channel}</span>
-            <span className={`rounded-full px-2 py-0.5 ${STATUS_STYLES[taskStatus] || "bg-gray-500/20 text-gray-300"}`}>task: {taskStatus}</span>
-            {copy && <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-emerald-300">has copy</span>}
-            {suppressPreviews && <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-emerald-300">no previews</span>}
-          </div>
         </div>
 
         <div className="flex flex-wrap justify-start gap-2 lg:justify-end" onClick={(event) => event.stopPropagation()}>
@@ -486,8 +466,9 @@ function CommunityQueueCard({
           <p className="text-xs font-medium uppercase tracking-wide text-gray-500">{tab === "published" ? "Published copy" : tab === "review" ? "Draft copy" : "Approved copy"}</p>
           {copy ? <CopyPreview copy={copy} /> : <p className="mt-3 text-sm text-gray-500">No copy saved yet.</p>}
           <div className="mt-4 flex flex-wrap gap-3 text-sm">
-            {publishWorkItem && <span className="text-gray-500">Publish task: <span className="text-gray-300">{publishWorkItem.id}</span></span>}
-            {workItem && <span className="text-gray-500">Latest task: <span className="text-gray-300">{workItem.status}</span></span>}
+            <span className="text-gray-500">Canal: <span className="text-sky-300">{channel}</span></span>
+            <span className="text-gray-500">Estado task: <span className="text-gray-300">{taskStatus}</span></span>
+            {suppressPreviews && <span className="text-emerald-300">No link previews</span>}
             {metadata.review?.notes && <span className="text-orange-300">Review notes saved</span>}
           </div>
         </div>
