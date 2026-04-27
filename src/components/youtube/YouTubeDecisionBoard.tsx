@@ -8,22 +8,26 @@ import { useRealtimeYouTube } from "@/hooks/useRealtimeYouTube";
 import {
   YOUTUBE_GATE_META,
   YOUTUBE_GATE_ORDER,
-  YOUTUBE_GATE_STATUSES,
   type JsonRecord,
+  type YouTubeBoardBucketKey,
+  type YouTubeGateEntry,
   type YouTubeGateKey,
-  type YouTubeGateStatus,
+  type YouTubeResponsibility,
   derivePipelineItemStatus,
+  deriveYouTubeResponsibility,
+  gateNeedsHumanReview,
+  getAgentDeliverableLabel,
   getGateEntry,
   getGateStatus,
-  getNextDecision,
+  getHumanDecisionLabel,
+  getHumanReviewReason,
+  getPrimaryGateWorkItem,
   getScores,
   getTopLevelNextAction,
   getYouTubeMetadata,
 } from "@/lib/youtube-pipeline";
 
-type DecisionGroupKey = YouTubeGateKey | "killed" | "completed";
-
-const STATUS_STYLES: Record<YouTubeGateStatus, string> = {
+const GATE_STATUS_STYLES: Record<string, string> = {
   not_started: "bg-slate-500/20 text-slate-300",
   in_progress: "bg-sky-500/20 text-sky-300",
   pass: "bg-emerald-500/20 text-emerald-300",
@@ -45,27 +49,42 @@ const ITEM_STATUS_STYLES: Record<string, string> = {
   parked: "bg-slate-500/20 text-slate-300",
 };
 
-const DECISION_GROUPS: Array<{ key: DecisionGroupKey; title: string; description: string }> = [
-  { key: "strategic_fit", title: "Strategic Fit", description: "Should this video exist in AIPaths?" },
-  { key: "demand_validation", title: "Demand Validation", description: "Is there evidence people already want this?" },
-  { key: "supply_gap", title: "Supply Gap", description: "Do we have a real angle or differentiated gap?" },
-  { key: "promise", title: "Promise", description: "Can the viewer outcome be stated clearly and proven?" },
-  { key: "packaging", title: "Packaging", description: "Do title, thumbnail, and hook create a click reason?" },
-  { key: "retention_design", title: "Retention Design", description: "Will the viewer stay once they click?" },
-  { key: "conversion_fit", title: "Conversion Fit", description: "Does the video connect naturally to the business?" },
-  { key: "film_ready", title: "Film Ready", description: "Is production prepared enough to record?" },
-  { key: "postmortem", title: "Post-mortem", description: "Compare prediction vs reality and close the loop." },
-  { key: "killed", title: "Killed", description: "Ideas that failed a gate and should not continue." },
-  { key: "completed", title: "Completed", description: "Videos that passed the learning loop." },
+const RESPONSIBILITY_BADGES: Record<YouTubeBoardBucketKey, { label: string; className: string }> = {
+  needs_gonza: { label: "Needs Gonza", className: "border-indigo-500/30 bg-indigo-500/10 text-indigo-300" },
+  agent_working: { label: "Agent work", className: "border-sky-500/30 bg-sky-500/10 text-sky-300" },
+  agent_next: { label: "Agent next", className: "border-cyan-500/30 bg-cyan-500/10 text-cyan-300" },
+  ready_for_gonza_review: { label: "Ready for review", className: "border-purple-500/30 bg-purple-500/10 text-purple-300" },
+  ready_to_record: { label: "Ready to record", className: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300" },
+  learning_published: { label: "Learning", className: "border-lime-500/30 bg-lime-500/10 text-lime-300" },
+  killed_archived: { label: "Killed / archived", className: "border-gray-500/30 bg-gray-500/10 text-gray-300" },
+};
+
+const BOARD_GROUPS: Array<{ key: YouTubeBoardBucketKey; title: string; description: string }> = [
+  { key: "needs_gonza", title: "Needs Gonza", description: "Explicit human calls requested by the agent." },
+  { key: "agent_working", title: "Agent Working", description: "The YouTube Director already has an open task on these." },
+  { key: "agent_next", title: "Agent Next", description: "Automation should move these forward next; no questionnaire needed from Gonza." },
+  { key: "ready_for_gonza_review", title: "Ready for Gonza Review", description: "Agent output is ready: recommendation, evidence, and next decision." },
+  { key: "ready_to_record", title: "Ready to Record / Approved", description: "Pre-production is strong enough to move into filming or recording." },
+  { key: "learning_published", title: "Learning / Published", description: "Published items and postmortem review." },
+  { key: "killed_archived", title: "Killed / Archived", description: "Ideas that were killed or fully archived." },
 ];
 
-type TransitionFormState = {
+type QuickAction = "approve" | "request_rework" | "kill" | "send_to_agent";
+
+type DrawerState = {
   gateKey: YouTubeGateKey;
-  gateStatus: YouTubeGateStatus;
-  reason: string;
-  evidenceSummary: string;
-  nextAction: string;
+  note: string;
   workItemRelationType: string;
+};
+
+type BoardItemModel = {
+  item: VideoPipelineItem;
+  metadata: ReturnType<typeof getYouTubeMetadata>;
+  responsibility: YouTubeResponsibility;
+  currentGateKey: YouTubeGateKey;
+  currentGate: YouTubeGateEntry;
+  openWorkItem: YouTubeResponsibility["openWorkItem"];
+  scores: ReturnType<typeof getScores>;
 };
 
 export function YouTubeDecisionBoard({ initialItems, initialWorkItems }: { initialItems: VideoPipelineItem[]; initialWorkItems: LinkedWorkItem[] }) {
@@ -74,96 +93,80 @@ export function YouTubeDecisionBoard({ initialItems, initialWorkItems }: { initi
   const workItems = useRealtimeWorkItems(initialWorkItems);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
-  const [transitionForm, setTransitionForm] = useState<TransitionFormState | null>(null);
+  const [drawerState, setDrawerState] = useState<DrawerState | null>(null);
 
-  const selectedItem = useMemo(() => items.find((item) => item.id === selectedId) || null, [items, selectedId]);
+  const boardItems = useMemo(() => (
+    items.map((item) => {
+      const metadata = getYouTubeMetadata(item.metadata);
+      const responsibility = deriveYouTubeResponsibility({
+        itemId: item.id,
+        metadata,
+        status: item.status,
+        publishedAt: item.published_at,
+        workItems,
+      });
+      const currentGateKey = responsibility.currentGateKey;
+      const currentGate = getGateEntry(metadata, currentGateKey);
+      const openWorkItem = responsibility.openWorkItem || getPrimaryGateWorkItem(item.id, currentGateKey, workItems, { openOnly: true });
+      return {
+        item,
+        metadata,
+        responsibility,
+        currentGateKey,
+        currentGate,
+        openWorkItem,
+        scores: getScores(metadata),
+      };
+    })
+  ), [items, workItems]);
 
   const groupedItems = useMemo(() => {
-    const groups = Object.fromEntries(DECISION_GROUPS.map((group) => [group.key, [] as VideoPipelineItem[]])) as Record<DecisionGroupKey, VideoPipelineItem[]>;
+    const groups = Object.fromEntries(BOARD_GROUPS.map((group) => [group.key, [] as BoardItemModel[]])) as Record<YouTubeBoardBucketKey, BoardItemModel[]>;
 
-    for (const item of items) {
-      const metadata = getYouTubeMetadata(item.metadata);
-      const nextDecision = getNextDecision(metadata);
-
-      if (nextDecision.type === "killed") {
-        groups.killed.push(item);
-      } else if (nextDecision.type === "completed") {
-        groups.completed.push(item);
-      } else {
-        groups[nextDecision.gateKey].push(item);
-      }
+    for (const model of boardItems) {
+      groups[model.responsibility.bucket].push(model);
     }
 
-    for (const group of DECISION_GROUPS) {
+    for (const group of BOARD_GROUPS) {
       groups[group.key].sort((a, b) => {
-        const scoreDiff = getScores(getYouTubeMetadata(b.metadata)).priority - getScores(getYouTubeMetadata(a.metadata)).priority;
-        if (scoreDiff !== 0) return scoreDiff;
-        return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
+        const priorityDiff = b.scores.priority - a.scores.priority;
+        if (priorityDiff !== 0) return priorityDiff;
+        return new Date(b.item.updated_at).getTime() - new Date(a.item.updated_at).getTime();
       });
     }
 
     return groups;
-  }, [items]);
+  }, [boardItems]);
+
+  const selectedItem = useMemo(() => boardItems.find((item) => item.item.id === selectedId) || null, [boardItems, selectedId]);
 
   useEffect(() => {
     if (!selectedItem) {
-      setTransitionForm(null);
+      setDrawerState(null);
       return;
     }
 
-    const metadata = getYouTubeMetadata(selectedItem.metadata);
-    const currentDecision = getNextDecision(metadata);
-    const defaultGateKey = currentDecision.gateKey;
-    const gateEntry = getGateEntry(metadata, defaultGateKey);
-
-    setTransitionForm({
-      gateKey: defaultGateKey,
-      gateStatus: getGateStatus(metadata, defaultGateKey),
-      reason: gateEntry.reason || "",
-      evidenceSummary: gateEntry.evidence_summary || "",
-      nextAction: gateEntry.next_action || metadata.next_action || "",
-      workItemRelationType: defaultGateKey,
+    setDrawerState({
+      gateKey: selectedItem.currentGateKey,
+      note: "",
+      workItemRelationType: selectedItem.currentGateKey,
     });
   }, [selectedItem]);
 
-  function selectItem(item: VideoPipelineItem) {
-    setSelectedId(item.id);
-  }
+  async function submitQuickAction(model: BoardItemModel, action: QuickAction) {
+    if (!drawerState) return;
 
-  function patchTransitionForm(patch: Partial<TransitionFormState>) {
-    setTransitionForm((current) => (current ? { ...current, ...patch } : current));
-  }
-
-  function handleGateChange(item: VideoPipelineItem, gateKey: YouTubeGateKey) {
-    const metadata = getYouTubeMetadata(item.metadata);
-    const gateEntry = getGateEntry(metadata, gateKey);
-    patchTransitionForm({
-      gateKey,
-      gateStatus: getGateStatus(metadata, gateKey),
-      reason: gateEntry.reason || "",
-      evidenceSummary: gateEntry.evidence_summary || "",
-      nextAction: gateEntry.next_action || metadata.next_action || "",
-      workItemRelationType: gateKey,
-    });
-  }
-
-  async function submitTransition(item: VideoPipelineItem, options?: { createWorkItem?: boolean }) {
-    if (!transitionForm) return;
-
-    const actionKey = options?.createWorkItem ? "save_and_create_task" : "save_gate";
-    setBusyAction(`${item.id}:${actionKey}`);
+    setBusyAction(`${model.item.id}:${action}`);
     try {
-      const response = await fetch(`/api/youtube/${item.id}/transition`, {
+      const response = await fetch(`/api/youtube/${model.item.id}/transition`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          gateKey: transitionForm.gateKey,
-          gateStatus: transitionForm.gateStatus,
-          reason: transitionForm.reason,
-          evidenceSummary: transitionForm.evidenceSummary,
-          nextAction: transitionForm.nextAction,
-          createWorkItem: options?.createWorkItem === true,
-          workItemRelationType: transitionForm.workItemRelationType,
+          action,
+          gateKey: drawerState.gateKey,
+          note: drawerState.note,
+          workItemRelationType: drawerState.workItemRelationType,
+          createWorkItem: action === "request_rework" || action === "send_to_agent",
         }),
       });
 
@@ -174,34 +177,39 @@ export function YouTubeDecisionBoard({ initialItems, initialWorkItems }: { initi
       }
 
       const payload = (await response.json()) as { item: VideoPipelineItem };
-      setItems((current) => current.map((existing) => (existing.id === item.id ? payload.item : existing)));
+      setItems((current) => current.map((existing) => (existing.id === model.item.id ? payload.item : existing)));
       router.refresh();
     } finally {
       setBusyAction(null);
     }
   }
 
-  const counts = useMemo(() => Object.fromEntries(DECISION_GROUPS.map((group) => [group.key, groupedItems[group.key].length])) as Record<DecisionGroupKey, number>, [groupedItems]);
+  const counts = useMemo(
+    () => Object.fromEntries(BOARD_GROUPS.map((group) => [group.key, groupedItems[group.key].length])) as Record<YouTubeBoardBucketKey, number>,
+    [groupedItems],
+  );
   const activeItems = items.filter((item) => !["rejected", "archived"].includes(item.status)).length;
 
   return (
     <div>
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-white">🎬 YouTube</h1>
+          <h1 className="text-2xl font-bold text-white">YouTube</h1>
           <p className="mt-1 max-w-3xl text-sm text-gray-500">
-            Decision board for video ideas. Each card is grouped by the next unanswered gate, so the board shows what must be decided next instead of where production happens to be.
+            Human decisions, agent work, and ready-to-record items are separated so Gonza only sees the calls that actually need human judgment.
           </p>
         </div>
         <div className="flex flex-wrap gap-3 text-sm text-gray-400">
           <StatCard label="Open videos" value={String(activeItems)} />
-          <StatCard label="Killed" value={String(counts.killed || 0)} />
-          <StatCard label="Completed" value={String(counts.completed || 0)} />
+          <StatCard label="Needs Gonza" value={String(counts.needs_gonza || 0)} />
+          <StatCard label="Agent Working" value={String(counts.agent_working || 0)} />
+          <StatCard label="Agent Next" value={String(counts.agent_next || 0)} />
+          <StatCard label="Review" value={String(counts.ready_for_gonza_review || 0)} />
         </div>
       </div>
 
       <div className="mt-6 grid gap-4 xl:grid-cols-2">
-        {DECISION_GROUPS.map((group) => {
+        {BOARD_GROUPS.map((group) => {
           const groupItems = groupedItems[group.key];
           return (
             <section key={group.key} className="rounded-2xl border border-gray-800 bg-[#111118] p-4 shadow-[0_10px_35px_rgba(0,0,0,0.18)]">
@@ -214,56 +222,17 @@ export function YouTubeDecisionBoard({ initialItems, initialWorkItems }: { initi
               </div>
 
               {groupItems.length === 0 ? (
-                <p className="mt-4 rounded-xl border border-dashed border-gray-800 bg-black/10 px-4 py-6 text-sm text-gray-600">No videos in this decision bucket.</p>
+                <p className="mt-4 rounded-xl border border-dashed border-gray-800 bg-black/10 px-4 py-6 text-sm text-gray-600">Nothing in this queue.</p>
               ) : (
                 <div className="mt-4 space-y-3">
-                  {groupItems.map((item) => {
-                    const metadata = getYouTubeMetadata(item.metadata);
-                    const scores = getScores(metadata);
-                    const currentDecision = getNextDecision(metadata);
-                    const currentGateKey = currentDecision.gateKey;
-                    const currentGate = getGateEntry(metadata, currentGateKey);
-                    const gateWorkItem = getPrimaryGateWorkItem(item.id, currentGateKey, workItems);
-                    return (
-                      <button
-                        key={item.id}
-                        type="button"
-                        onClick={() => selectItem(item)}
-                        className={`w-full rounded-2xl border p-4 text-left transition ${
-                          selectedId === item.id ? "border-blue-500 bg-blue-500/5" : "border-gray-800 bg-black/15 hover:border-gray-700 hover:bg-white/5"
-                        }`}
-                      >
-                        <div className="flex items-start justify-between gap-4">
-                          <div className="min-w-0">
-                            <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
-                              {metadata.pillar && <span>{metadata.pillar}</span>}
-                              <span className={`rounded-full px-2 py-0.5 ${STATUS_STYLES[currentDecision.status]}`}>{formatGateStatus(currentDecision.status)}</span>
-                              <span className={`rounded-full px-2 py-0.5 ${ITEM_STATUS_STYLES[item.status] || "bg-gray-500/20 text-gray-300"}`}>{formatItemStatus(item.status)}</span>
-                            </div>
-                            <h3 className="mt-2 text-base font-semibold text-white">{item.title}</h3>
-                            <p className="mt-2 text-sm text-gray-400">Current gate: {YOUTUBE_GATE_META[currentGateKey].label}</p>
-                          </div>
-                          <div className="shrink-0 text-right text-xs text-gray-500">
-                            <div>{formatDate(item.updated_at)}</div>
-                            {gateWorkItem && <div className="mt-2 text-sky-300">task: {gateWorkItem.status}</div>}
-                          </div>
-                        </div>
-
-                        <div className="mt-4 grid gap-2 sm:grid-cols-5">
-                          <ScorePill label="Reach" value={scores.reach} />
-                          <ScorePill label="Retention" value={scores.retention} />
-                          <ScorePill label="Conversion" value={scores.conversion} />
-                          <ScorePill label="Confidence" value={scores.confidence} />
-                          <ScorePill label="Priority" value={scores.priority} highlight />
-                        </div>
-
-                        <div className="mt-4 rounded-xl border border-gray-800 bg-black/20 p-3">
-                          <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Next action</p>
-                          <p className="mt-1 text-sm text-gray-300">{currentGate.next_action || getTopLevelNextAction(metadata)}</p>
-                        </div>
-                      </button>
-                    );
-                  })}
+                  {groupItems.map((model) => (
+                    <CardButton
+                      key={model.item.id}
+                      model={model}
+                      selected={selectedId === model.item.id}
+                      onSelect={() => setSelectedId(model.item.id)}
+                    />
+                  ))}
                 </div>
               )}
             </section>
@@ -271,49 +240,95 @@ export function YouTubeDecisionBoard({ initialItems, initialWorkItems }: { initi
         })}
       </div>
 
-      {selectedItem && transitionForm && (
+      {selectedItem && drawerState && (
         <DetailDrawer
-          item={selectedItem}
+          model={selectedItem}
           workItems={workItems}
-          form={transitionForm}
+          state={drawerState}
           busyAction={busyAction}
           onClose={() => setSelectedId(null)}
-          onFormChange={patchTransitionForm}
-          onGateChange={(gateKey) => handleGateChange(selectedItem, gateKey)}
-          onSave={() => submitTransition(selectedItem)}
-          onSaveAndCreateTask={() => submitTransition(selectedItem, { createWorkItem: true })}
+          onStateChange={(patch) => setDrawerState((current) => (current ? { ...current, ...patch } : current))}
+          onQuickAction={(action) => submitQuickAction(selectedItem, action)}
         />
       )}
     </div>
   );
 }
 
+function CardButton({ model, selected, onSelect }: { model: BoardItemModel; selected: boolean; onSelect: () => void }) {
+  const { item, metadata, responsibility, currentGateKey, currentGate, openWorkItem, scores } = model;
+  const badge = RESPONSIBILITY_BADGES[responsibility.bucket];
+
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      className={`w-full rounded-2xl border p-4 text-left transition ${
+        selected ? "border-blue-500 bg-blue-500/5" : "border-gray-800 bg-black/15 hover:border-gray-700 hover:bg-white/5"
+      }`}
+    >
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
+            {metadata.pillar && <span>{metadata.pillar}</span>}
+            <span className={`rounded-full border px-2 py-0.5 ${badge.className}`}>{badge.label}</span>
+            <span className={`rounded-full px-2 py-0.5 ${GATE_STATUS_STYLES[getGateStatus(metadata, currentGateKey)]}`}>{formatGateStatus(getGateStatus(metadata, currentGateKey))}</span>
+            <span className={`rounded-full px-2 py-0.5 ${ITEM_STATUS_STYLES[item.status] || "bg-gray-500/20 text-gray-300"}`}>{formatItemStatus(item.status)}</span>
+          </div>
+          <h3 className="mt-2 text-base font-semibold text-white">{item.title}</h3>
+          <p className="mt-2 text-sm text-gray-400">Current gate: {YOUTUBE_GATE_META[currentGateKey].label}</p>
+        </div>
+        <div className="shrink-0 text-right text-xs text-gray-500">
+          <div>{formatDate(item.updated_at)}</div>
+          {openWorkItem && <div className="mt-2 text-sky-300">open work: {openWorkItem.status}</div>}
+        </div>
+      </div>
+
+      <div className="mt-4 grid gap-2 sm:grid-cols-5">
+        <ScorePill label="Reach" value={scores.reach} />
+        <ScorePill label="Retention" value={scores.retention} />
+        <ScorePill label="Conversion" value={scores.conversion} />
+        <ScorePill label="Confidence" value={scores.confidence} />
+        <ScorePill label="Priority" value={scores.priority} highlight />
+      </div>
+
+      <div className="mt-4 rounded-xl border border-gray-800 bg-black/20 p-3">
+        <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">What&apos;s needed</p>
+        <div className="mt-3 grid gap-3 md:grid-cols-2">
+          {getCardNeedRows(model).map((row) => (
+            <NeedRow key={row.label} label={row.label} value={row.value} />
+          ))}
+          {!currentGate.reason && !currentGate.evidence_summary && responsibility.bucket === "killed_archived" && (
+            <NeedRow label="Outcome" value="This idea is no longer active." />
+          )}
+        </div>
+      </div>
+    </button>
+  );
+}
+
 function DetailDrawer({
-  item,
+  model,
   workItems,
-  form,
+  state,
   busyAction,
   onClose,
-  onFormChange,
-  onGateChange,
-  onSave,
-  onSaveAndCreateTask,
+  onStateChange,
+  onQuickAction,
 }: {
-  item: VideoPipelineItem;
+  model: BoardItemModel;
   workItems: LinkedWorkItem[];
-  form: TransitionFormState;
+  state: DrawerState;
   busyAction: string | null;
   onClose: () => void;
-  onFormChange: (patch: Partial<TransitionFormState>) => void;
-  onGateChange: (gateKey: YouTubeGateKey) => void;
-  onSave: () => void;
-  onSaveAndCreateTask: () => void;
+  onStateChange: (patch: Partial<DrawerState>) => void;
+  onQuickAction: (action: QuickAction) => void;
 }) {
-  const metadata = getYouTubeMetadata(item.metadata);
-  const scores = getScores(metadata);
-  const nextDecision = getNextDecision(metadata);
-  const selectedGateEntry = getGateEntry(metadata, form.gateKey);
-  const primaryWorkItem = getPrimaryGateWorkItem(item.id, form.gateKey, workItems);
+  const { item, metadata, responsibility, currentGateKey, scores } = model;
+  const selectedGate = getGateEntry(metadata, state.gateKey);
+  const selectedGateStatus = getGateStatus(metadata, state.gateKey);
+  const selectedGateWorkItem = getPrimaryGateWorkItem(item.id, state.gateKey, workItems, { openOnly: true });
+  const badge = RESPONSIBILITY_BADGES[responsibility.bucket];
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-black/70 backdrop-blur-sm" onClick={onClose}>
@@ -324,11 +339,12 @@ function DetailDrawer({
               <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
                 {metadata.pillar && <span>{metadata.pillar}</span>}
                 {metadata.target_viewer && <span>{metadata.target_viewer}</span>}
-                <span className={`rounded-full px-2 py-0.5 ${STATUS_STYLES[nextDecision.status]}`}>{formatGateStatus(nextDecision.status)}</span>
+                <span className={`rounded-full border px-2 py-0.5 ${badge.className}`}>{badge.label}</span>
+                <span className={`rounded-full px-2 py-0.5 ${GATE_STATUS_STYLES[selectedGateStatus]}`}>{formatGateStatus(selectedGateStatus)}</span>
                 <span className={`rounded-full px-2 py-0.5 ${ITEM_STATUS_STYLES[item.status] || "bg-gray-500/20 text-gray-300"}`}>{formatItemStatus(item.status)}</span>
               </div>
               <h2 className="mt-3 text-2xl font-bold leading-tight text-white">{item.title}</h2>
-              <p className="mt-2 text-sm text-gray-400">Current decision: {nextDecision.label}</p>
+              <p className="mt-2 text-sm text-gray-400">Current gate: {YOUTUBE_GATE_META[currentGateKey].label}</p>
             </div>
             <button onClick={onClose} className="rounded-lg bg-white/10 px-3 py-2 text-sm text-white transition hover:bg-white/15">
               Close
@@ -345,106 +361,108 @@ function DetailDrawer({
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-6">
-          <section className="rounded-2xl border border-gray-800 bg-[#14141c] p-5">
-            <div className="flex flex-wrap items-start justify-between gap-4">
-              <div>
-                <h3 className="text-lg font-semibold text-white">Gate decision</h3>
-                <p className="mt-1 text-sm text-gray-500">Update the current gate verdict, save the reason, and optionally spawn a YouTube task for this gate.</p>
+          <SectionCard title="What's Needed">
+            <div className="grid gap-3 md:grid-cols-2">
+              {getCardNeedRows(model).map((row) => (
+                <NeedRow key={row.label} label={row.label} value={row.value} />
+              ))}
+            </div>
+          </SectionCard>
+
+          <div className="mt-6 grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
+            <SectionCard title="Quick Actions">
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div>
+                  <p className="text-sm text-gray-400">Use one action. Notes are optional and mainly useful for history or extra agent context.</p>
+                </div>
+                {selectedGateWorkItem && (
+                  <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-3 py-1 text-xs text-sky-300">
+                    open work: {selectedGateWorkItem.title || "YouTube task"} · {selectedGateWorkItem.status}
+                  </span>
+                )}
               </div>
-              {primaryWorkItem && (
-                <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-3 py-1 text-xs text-sky-300">
-                  open task: {primaryWorkItem.title} · {primaryWorkItem.status}
-                </span>
+
+              <div className="mt-4 grid gap-4 md:grid-cols-2">
+                <Field label="Action focus">
+                  <select
+                    value={state.gateKey}
+                    onChange={(event) => {
+                      const gateKey = event.target.value as YouTubeGateKey;
+                      onStateChange({
+                        gateKey,
+                        workItemRelationType: state.workItemRelationType === "investigate" ? "investigate" : gateKey,
+                      });
+                    }}
+                    className="w-full rounded-xl border border-gray-800 bg-[#0a0a0f] px-3 py-2 text-sm text-white outline-none transition focus:border-blue-500"
+                  >
+                    {YOUTUBE_GATE_ORDER.map((gateKey) => (
+                      <option key={gateKey} value={gateKey}>
+                        {YOUTUBE_GATE_META[gateKey].label}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+
+                <Field label="Send to Agent as">
+                  <select
+                    value={state.workItemRelationType}
+                    onChange={(event) => onStateChange({ workItemRelationType: event.target.value })}
+                    className="w-full rounded-xl border border-gray-800 bg-[#0a0a0f] px-3 py-2 text-sm text-white outline-none transition focus:border-blue-500"
+                  >
+                    <option value={state.gateKey}>Current gate task</option>
+                    <option value="investigate">Investigation</option>
+                  </select>
+                </Field>
+              </div>
+
+              <div className="mt-4">
+                <Field label="Optional note">
+                  <textarea
+                    value={state.note}
+                    onChange={(event) => onStateChange({ note: event.target.value })}
+                    placeholder="Small note for the decision history or agent context."
+                    className="h-24 w-full rounded-xl border border-gray-800 bg-[#0a0a0f] p-3 text-sm text-white outline-none transition placeholder:text-gray-600 focus:border-blue-500"
+                  />
+                </Field>
+              </div>
+
+              <div className="mt-5 flex flex-wrap gap-2">
+                <ActionButton label="Approve" variant="success" busy={busyAction === `${item.id}:approve`} onClick={() => onQuickAction("approve")} />
+                <ActionButton
+                  label="Request Rework"
+                  variant="warning"
+                  busy={busyAction === `${item.id}:request_rework`}
+                  onClick={() => onQuickAction("request_rework")}
+                />
+                <ActionButton label="Kill" variant="danger" busy={busyAction === `${item.id}:kill`} onClick={() => onQuickAction("kill")} />
+                <ActionButton
+                  label="Send to Agent"
+                  variant="primary"
+                  busy={busyAction === `${item.id}:send_to_agent`}
+                  onClick={() => onQuickAction("send_to_agent")}
+                />
+              </div>
+
+              {(selectedGate.reason || selectedGate.evidence_summary || selectedGate.next_action) && (
+                <div className="mt-5 rounded-xl border border-gray-800 bg-black/20 p-4 text-sm text-gray-300">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Saved on this gate</p>
+                  {selectedGate.reason && <p className="mt-2"><span className="text-gray-500">Recommendation:</span> {selectedGate.reason}</p>}
+                  {selectedGate.evidence_summary && <p className="mt-2"><span className="text-gray-500">Evidence:</span> {selectedGate.evidence_summary}</p>}
+                  {selectedGate.next_action && <p className="mt-2"><span className="text-gray-500">Next action:</span> {selectedGate.next_action}</p>}
+                </div>
               )}
-            </div>
+            </SectionCard>
 
-            <div className="mt-4 grid gap-4 md:grid-cols-2">
-              <Field label="Gate">
-                <select
-                  value={form.gateKey}
-                  onChange={(event) => onGateChange(event.target.value as YouTubeGateKey)}
-                  className="w-full rounded-xl border border-gray-800 bg-[#0a0a0f] px-3 py-2 text-sm text-white outline-none transition focus:border-blue-500"
-                >
-                  {YOUTUBE_GATE_ORDER.map((gateKey) => (
-                    <option key={gateKey} value={gateKey}>
-                      {YOUTUBE_GATE_META[gateKey].label}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-
-              <Field label="Decision">
-                <select
-                  value={form.gateStatus}
-                  onChange={(event) => onFormChange({ gateStatus: event.target.value as YouTubeGateStatus })}
-                  className="w-full rounded-xl border border-gray-800 bg-[#0a0a0f] px-3 py-2 text-sm text-white outline-none transition focus:border-blue-500"
-                >
-                  {YOUTUBE_GATE_STATUSES.map((status) => (
-                    <option key={status} value={status}>
-                      {formatGateStatus(status)}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-
-              <Field label="Next action">
-                <input
-                  value={form.nextAction}
-                  onChange={(event) => onFormChange({ nextAction: event.target.value })}
-                  placeholder="What should happen next?"
-                  className="w-full rounded-xl border border-gray-800 bg-[#0a0a0f] px-3 py-2 text-sm text-white outline-none transition placeholder:text-gray-600 focus:border-blue-500"
-                />
-              </Field>
-
-              <Field label="Task relation">
-                <select
-                  value={form.workItemRelationType}
-                  onChange={(event) => onFormChange({ workItemRelationType: event.target.value })}
-                  className="w-full rounded-xl border border-gray-800 bg-[#0a0a0f] px-3 py-2 text-sm text-white outline-none transition focus:border-blue-500"
-                >
-                  <option value={form.gateKey}>Gate task ({YOUTUBE_GATE_META[form.gateKey].shortLabel})</option>
-                  <option value="investigate">Investigation</option>
-                </select>
-              </Field>
-            </div>
-
-            <div className="mt-4 grid gap-4">
-              <Field label="Reason">
-                <textarea
-                  value={form.reason}
-                  onChange={(event) => onFormChange({ reason: event.target.value })}
-                  placeholder="Why is this gate in this state?"
-                  className="h-24 w-full rounded-xl border border-gray-800 bg-[#0a0a0f] p-3 text-sm text-white outline-none transition placeholder:text-gray-600 focus:border-blue-500"
-                />
-              </Field>
-              <Field label="Evidence summary">
-                <textarea
-                  value={form.evidenceSummary}
-                  onChange={(event) => onFormChange({ evidenceSummary: event.target.value })}
-                  placeholder="What evidence supports this call?"
-                  className="h-24 w-full rounded-xl border border-gray-800 bg-[#0a0a0f] p-3 text-sm text-white outline-none transition placeholder:text-gray-600 focus:border-blue-500"
-                />
-              </Field>
-            </div>
-
-            {(selectedGateEntry.reason || selectedGateEntry.evidence_summary) && (
-              <div className="mt-4 rounded-xl border border-gray-800 bg-black/20 p-4 text-sm text-gray-300">
-                <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">Saved on this gate</p>
-                {selectedGateEntry.reason && <p className="mt-2"><span className="text-gray-500">Reason:</span> {selectedGateEntry.reason}</p>}
-                {selectedGateEntry.evidence_summary && <p className="mt-2"><span className="text-gray-500">Evidence:</span> {selectedGateEntry.evidence_summary}</p>}
-              </div>
-            )}
-
-            <div className="mt-5 flex flex-wrap justify-end gap-2">
-              <ActionButton label="Save decision" busy={busyAction === `${item.id}:save_gate`} onClick={onSave} />
-              <ActionButton
-                label="Save + create task"
-                variant="secondary"
-                busy={busyAction === `${item.id}:save_and_create_task`}
-                onClick={onSaveAndCreateTask}
-              />
-            </div>
-          </section>
+            <SectionCard title="Gate Snapshot">
+              <SectionGrid>
+                <Detail label="Focus gate" value={YOUTUBE_GATE_META[state.gateKey].label} />
+                <Detail label="Gate status" value={formatGateStatus(selectedGateStatus)} />
+                <Detail label="Human review" value={gateNeedsHumanReview(metadata, state.gateKey) ? "Required" : "Not required by default"} />
+                <Detail label="Agent deliverable" value={getAgentDeliverableLabel(state.gateKey)} />
+              </SectionGrid>
+              <LongText label="Suggested action" value={selectedGate.next_action || getTopLevelNextAction(metadata)} />
+            </SectionCard>
+          </div>
 
           <div className="mt-6 space-y-4">
             <SectionCard title="Overview">
@@ -455,21 +473,23 @@ function DetailDrawer({
                 <Detail label="Pipeline status" value={formatItemStatus(derivePipelineItemStatus(metadata, { currentStatus: item.status, publishedAt: item.published_at }))} />
               </SectionGrid>
               <LongText label="Decision summary" value={stringOrFallback(metadata.decision_summary)} />
-              <LongText label="Next action" value={getTopLevelNextAction(metadata)} />
+              <LongText label="Top-level next action" value={getTopLevelNextAction(metadata)} />
             </SectionCard>
 
             <SectionCard title="Gates / Scores">
               <div className="grid gap-3 md:grid-cols-2">
                 {YOUTUBE_GATE_ORDER.map((gateKey) => {
                   const gate = getGateEntry(metadata, gateKey);
+                  const gateWorkItem = getPrimaryGateWorkItem(item.id, gateKey, workItems, { openOnly: true });
                   return (
                     <div key={gateKey} className="rounded-xl border border-gray-800 bg-black/20 p-3">
                       <div className="flex items-center justify-between gap-3">
                         <p className="font-medium text-white">{YOUTUBE_GATE_META[gateKey].label}</p>
-                        <span className={`rounded-full px-2 py-0.5 text-xs ${STATUS_STYLES[getGateStatus(metadata, gateKey)]}`}>{formatGateStatus(getGateStatus(metadata, gateKey))}</span>
+                        <span className={`rounded-full px-2 py-0.5 text-xs ${GATE_STATUS_STYLES[getGateStatus(metadata, gateKey)]}`}>{formatGateStatus(getGateStatus(metadata, gateKey))}</span>
                       </div>
                       {gate.reason && <p className="mt-2 text-sm text-gray-300">{gate.reason}</p>}
                       {gate.next_action && <p className="mt-2 text-sm text-gray-500">Next: {gate.next_action}</p>}
+                      {gateWorkItem && <p className="mt-2 text-xs text-sky-300">Open work: {gateWorkItem.status}</p>}
                     </div>
                   );
                 })}
@@ -499,8 +519,8 @@ function DetailDrawer({
               <StructuredValue value={metadata.production} emptyLabel="No production notes saved yet." />
             </SectionCard>
 
-            <SectionCard title="Post-mortem">
-              <StructuredValue value={metadata.postmortem} emptyLabel="No post-mortem data saved yet." />
+            <SectionCard title="Postmortem">
+              <StructuredValue value={metadata.postmortem} emptyLabel="No postmortem data saved yet." />
             </SectionCard>
           </div>
         </div>
@@ -509,18 +529,67 @@ function DetailDrawer({
   );
 }
 
-function getPrimaryGateWorkItem(itemId: string, gateKey: YouTubeGateKey, workItems: LinkedWorkItem[]) {
-  const candidates = workItems.filter((workItem) => {
-    const payload = workItem.payload || {};
-    const linked = workItem.source_id === itemId || payload.pipeline_item_id === itemId;
-    const relationType = payload.relation_type;
-    return linked && (relationType === gateKey || relationType === "investigate");
-  });
+function getCardNeedRows(model: BoardItemModel) {
+  const { metadata, responsibility, currentGate, currentGateKey, item, openWorkItem } = model;
+  const recommendation = currentGate.reason || stringOrNull(metadata.decision_summary) || "No agent recommendation saved yet.";
+  const evidence = currentGate.evidence_summary || "No evidence summary saved yet.";
+  const suggestedAction = currentGate.next_action || getTopLevelNextAction(metadata);
 
-  return [...candidates].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0] || null;
+  switch (responsibility.bucket) {
+    case "needs_gonza":
+      return [
+        { label: "Decision needed", value: getHumanDecisionLabel(currentGateKey) },
+        { label: "Why human is needed", value: getHumanReviewReason(currentGateKey, responsibility.humanReviewRequested) },
+        { label: "Agent recommendation", value: recommendation },
+        { label: "Evidence summary", value: evidence },
+        { label: "Suggested action", value: suggestedAction },
+      ];
+    case "agent_working":
+      return [
+        { label: "Agent work", value: `Advance ${YOUTUBE_GATE_META[currentGateKey].label.toLowerCase()}.` },
+        { label: "Artefact needed", value: getAgentDeliverableLabel(currentGateKey) },
+        { label: "Open work item", value: openWorkItem ? `${openWorkItem.title || "YouTube task"} · ${openWorkItem.status}` : "Task is in progress." },
+        { label: "Suggested action", value: suggestedAction },
+      ];
+    case "agent_next":
+      return [
+        { label: "Agent work", value: `Start ${YOUTUBE_GATE_META[currentGateKey].label.toLowerCase()}.` },
+        { label: "Artefact needed", value: getAgentDeliverableLabel(currentGateKey) },
+        { label: "Work item status", value: "No open work item yet." },
+        { label: "Suggested action", value: suggestedAction },
+      ];
+    case "ready_for_gonza_review":
+      return [
+        { label: "Review needed", value: getHumanDecisionLabel(currentGateKey) },
+        { label: "Agent recommendation", value: recommendation },
+        { label: "Evidence summary", value: evidence },
+        { label: "Suggested action", value: suggestedAction },
+      ];
+    case "ready_to_record":
+      return [
+        { label: "Status", value: currentGateKey === "film_ready" ? "Pre-production is assembled and ready for the final recording call." : "This item is ready to move through recording, publishing, or closeout." },
+        { label: "Current focus", value: currentGateKey === "film_ready" ? "Final filming package and record." : "Record, publish, or keep momentum into postmortem." },
+        { label: "Agent recommendation", value: recommendation },
+        { label: "Suggested action", value: suggestedAction },
+      ];
+    case "learning_published":
+      return [
+        { label: "Status", value: item.status === "published" ? "Published and waiting for learning review." : "In the learning loop." },
+        { label: "Current focus", value: currentGateKey === "postmortem" ? "Review what worked, what missed, and what changes next." : "Carry forward the learning." },
+        { label: "Evidence summary", value: evidence },
+        { label: "Suggested action", value: suggestedAction },
+      ];
+    case "killed_archived":
+      return [
+        { label: "Outcome", value: item.status === "archived" ? "Archived." : "Killed or rejected." },
+        { label: "Last gate", value: YOUTUBE_GATE_META[currentGateKey].label },
+        { label: "Reason", value: currentGate.reason || "No reason saved." },
+        { label: "Suggested action", value: suggestedAction },
+      ];
+  }
 }
 
-function formatGateStatus(status: YouTubeGateStatus) {
+function formatGateStatus(status: string) {
   return status.replaceAll("_", " ");
 }
 
@@ -536,6 +605,20 @@ function formatDate(value: string | null) {
 function stringOrFallback(value: unknown, fallback = "—") {
   if (typeof value === "string" && value.trim()) return value.trim();
   return fallback;
+}
+
+function stringOrNull(value: unknown) {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  return null;
+}
+
+function NeedRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-xl border border-gray-800 bg-[#101018] p-3">
+      <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">{label}</p>
+      <p className="mt-2 text-sm leading-6 text-gray-300">{value}</p>
+    </div>
+  );
 }
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
@@ -565,10 +648,22 @@ function ScorePill({ label, value, highlight = false }: { label: string; value: 
   );
 }
 
-function ActionButton({ label, onClick, variant = "primary", busy }: { label: string; onClick: () => void; variant?: "primary" | "secondary"; busy?: boolean }) {
+function ActionButton({
+  label,
+  onClick,
+  variant = "primary",
+  busy,
+}: {
+  label: string;
+  onClick: () => void;
+  variant?: "primary" | "success" | "warning" | "danger";
+  busy?: boolean;
+}) {
   const styles = {
     primary: "bg-blue-600 text-white hover:bg-blue-500",
-    secondary: "bg-white/10 text-white hover:bg-white/15",
+    success: "bg-emerald-600 text-white hover:bg-emerald-500",
+    warning: "bg-amber-500 text-black hover:bg-amber-400",
+    danger: "bg-red-600 text-white hover:bg-red-500",
   } as const;
 
   return (

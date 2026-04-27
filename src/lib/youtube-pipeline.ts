@@ -49,6 +49,8 @@ export type YouTubeGateEntry = {
   reason?: string;
   evidence_summary?: string;
   next_action?: string;
+  review_required?: unknown;
+  human_review_requested?: unknown;
   decided_at?: string;
   decided_by?: string;
   updated_at?: string;
@@ -62,6 +64,8 @@ export type YouTubePipelineMetadata = {
   target_viewer?: string;
   decision_summary?: string;
   next_action?: string;
+  review_required?: unknown;
+  human_review_requested?: unknown;
   overview?: JsonRecord;
   scores?: Partial<Record<YouTubeScoreKey, number>>;
   gates?: Partial<Record<YouTubeGateKey, YouTubeGateEntry>>;
@@ -88,6 +92,37 @@ export const YOUTUBE_GATE_META: Record<YouTubeGateKey, { label: string; shortLab
 };
 
 const GATE_PROGRESS_STATUSES = new Set<YouTubeGateStatus>(["pass", "experiment"]);
+const OPEN_YOUTUBE_WORK_STATUSES = new Set(["draft", "ready", "blocked", "in_progress"]);
+const HUMAN_REVIEW_GATES = new Set<YouTubeGateKey>(["strategic_fit", "promise", "packaging", "film_ready", "postmortem"]);
+
+export type YouTubeBoardBucketKey =
+  | "needs_gonza"
+  | "agent_working"
+  | "agent_next"
+  | "ready_for_gonza_review"
+  | "ready_to_record"
+  | "learning_published"
+  | "killed_archived";
+
+export type YouTubeLinkedWorkItem = {
+  id: string;
+  source_id: string;
+  status: string;
+  title?: string | null;
+  owner_agent?: string | null;
+  target_agent_id?: string | null;
+  created_at: string;
+  payload?: JsonRecord | null;
+};
+
+export type YouTubeResponsibility = {
+  bucket: YouTubeBoardBucketKey;
+  currentGateKey: YouTubeGateKey;
+  currentGateStatus: YouTubeGateStatus;
+  reviewRequired: boolean;
+  humanReviewRequested: boolean;
+  openWorkItem: YouTubeLinkedWorkItem | null;
+};
 
 function toRecord(value: unknown): JsonRecord {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonRecord) : {};
@@ -117,6 +152,10 @@ export function getGateStatus(metadata: YouTubePipelineMetadata, gateKey: YouTub
   return YOUTUBE_GATE_STATUSES.includes(status as YouTubeGateStatus) ? (status as YouTubeGateStatus) : "not_started";
 }
 
+export function isOpenYouTubeWorkItemStatus(status: string | null | undefined) {
+  return typeof status === "string" && OPEN_YOUTUBE_WORK_STATUSES.has(status);
+}
+
 export function getScores(metadata: YouTubePipelineMetadata): YouTubeScores {
   const scores = toRecord(metadata.scores);
   const reach = toNumber(scores.reach);
@@ -138,6 +177,19 @@ export function findTerminalKillGate(metadata: YouTubePipelineMetadata): YouTube
     if (getGateStatus(metadata, gateKey) === "kill") return gateKey;
   }
   return null;
+}
+
+export function havePriorGatesPassed(metadata: YouTubePipelineMetadata, gateKey: YouTubeGateKey) {
+  const targetIndex = YOUTUBE_GATE_ORDER.indexOf(gateKey);
+  if (targetIndex <= 0) return true;
+
+  for (const priorGate of YOUTUBE_GATE_ORDER.slice(0, targetIndex)) {
+    if (!GATE_PROGRESS_STATUSES.has(getGateStatus(metadata, priorGate))) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 export function getNextDecision(metadata: YouTubePipelineMetadata) {
@@ -206,6 +258,199 @@ export function getTopLevelNextAction(metadata: YouTubePipelineMetadata) {
 
   const gateEntry = getGateEntry(metadata, nextDecision.gateKey);
   return gateEntry.next_action || metadata.next_action || `Decide ${YOUTUBE_GATE_META[nextDecision.gateKey].label.toLowerCase()}.`;
+}
+
+function reviewFlagApplies(value: unknown, gateKey: YouTubeGateKey): boolean {
+  if (value === true) return true;
+  if (typeof value === "string") return value === gateKey || value === "all";
+  if (Array.isArray(value)) return value.some((entry) => reviewFlagApplies(entry, gateKey));
+  if (value && typeof value === "object") {
+    const record = toRecord(value);
+    return Boolean(record.all || record[gateKey]);
+  }
+  return false;
+}
+
+export function hasExplicitHumanReviewRequest(metadata: YouTubePipelineMetadata, gateKey: YouTubeGateKey) {
+  const gate = getGateEntry(metadata, gateKey);
+  return reviewFlagApplies(metadata.review_required, gateKey)
+    || reviewFlagApplies(metadata.human_review_requested, gateKey)
+    || reviewFlagApplies(gate.review_required, gateKey)
+    || reviewFlagApplies(gate.human_review_requested, gateKey);
+}
+
+export function gateNeedsHumanReview(metadata: YouTubePipelineMetadata, gateKey: YouTubeGateKey) {
+  return HUMAN_REVIEW_GATES.has(gateKey) || hasExplicitHumanReviewRequest(metadata, gateKey);
+}
+
+export function getPrimaryGateWorkItem(
+  itemId: string,
+  gateKey: YouTubeGateKey,
+  workItems: YouTubeLinkedWorkItem[],
+  options?: { openOnly?: boolean },
+) {
+  const candidates = workItems.filter((workItem) => {
+    const payload = toRecord(workItem.payload);
+    const linked = workItem.source_id === itemId || payload.pipeline_item_id === itemId;
+    const relationType = payload.relation_type;
+    if (!linked) return false;
+    if (options?.openOnly && !isOpenYouTubeWorkItemStatus(workItem.status)) return false;
+    return relationType === gateKey || relationType === "investigate";
+  });
+
+  return [...candidates].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0] || null;
+}
+
+export function getHumanDecisionLabel(gateKey: YouTubeGateKey) {
+  switch (gateKey) {
+    case "strategic_fit":
+      return "Approve or reject the strategic bet.";
+    case "promise":
+      return "Approve the promised viewer outcome.";
+    case "packaging":
+      return "Approve the title, thumbnail, and hook direction.";
+    case "film_ready":
+      return "Approve the plan for recording.";
+    case "postmortem":
+      return "Review the postmortem and decide what to keep learning from.";
+    default:
+      return `Review ${YOUTUBE_GATE_META[gateKey].label.toLowerCase()}.`;
+  }
+}
+
+export function getHumanReviewReason(gateKey: YouTubeGateKey, hasExplicitRequest = false) {
+  if (hasExplicitRequest) return "Human review was explicitly requested on this gate.";
+
+  switch (gateKey) {
+    case "strategic_fit":
+      return "This is a portfolio-level call on whether the idea deserves more investment.";
+    case "promise":
+      return "The core promise affects positioning and must be signed off by a human.";
+    case "packaging":
+      return "Packaging is a human quality bar for click-worthiness and brand fit.";
+    case "film_ready":
+      return "Recording should only start after a human confirms the plan is strong enough.";
+    case "postmortem":
+      return "Learning needs a human judgement about what changes the playbook.";
+    default:
+      return "This item needs a human call before the pipeline should advance.";
+  }
+}
+
+export function getAgentDeliverableLabel(gateKey: YouTubeGateKey) {
+  switch (gateKey) {
+    case "strategic_fit":
+      return "Strategic brief with recommendation";
+    case "demand_validation":
+      return "Demand evidence and search signals";
+    case "supply_gap":
+      return "Competitive gap analysis";
+    case "promise":
+      return "Promise options with proof";
+    case "packaging":
+      return "Title, thumbnail, and hook options";
+    case "retention_design":
+      return "Retention plan and structure";
+    case "conversion_fit":
+      return "Offer/funnel fit notes";
+    case "film_ready":
+      return "Production brief and filming checklist";
+    case "postmortem":
+      return "Performance readout and learning memo";
+  }
+}
+
+export function deriveYouTubeResponsibility(input: {
+  status: string | null | undefined;
+  metadata: YouTubePipelineMetadata;
+  publishedAt?: string | null;
+  workItems: YouTubeLinkedWorkItem[];
+  itemId: string;
+}): YouTubeResponsibility {
+  const nextDecision = getNextDecision(input.metadata);
+  const currentGateKey = nextDecision.gateKey;
+  const currentGateStatus = getGateStatus(input.metadata, currentGateKey);
+  const openWorkItem = getPrimaryGateWorkItem(input.itemId, currentGateKey, input.workItems, { openOnly: true });
+  const humanReviewRequested = hasExplicitHumanReviewRequest(input.metadata, currentGateKey);
+  const reviewRequired = gateNeedsHumanReview(input.metadata, currentGateKey);
+
+  if (input.status === "archived" || input.status === "rejected" || nextDecision.type === "killed") {
+    return {
+      bucket: "killed_archived",
+      currentGateKey,
+      currentGateStatus,
+      reviewRequired,
+      humanReviewRequested,
+      openWorkItem,
+    };
+  }
+
+  if (input.status === "published" || (nextDecision.gateKey === "postmortem" && havePriorGatesPassed(input.metadata, "postmortem"))) {
+    return {
+      bucket: "learning_published",
+      currentGateKey,
+      currentGateStatus,
+      reviewRequired,
+      humanReviewRequested,
+      openWorkItem,
+    };
+  }
+
+  if (nextDecision.type === "completed" || (nextDecision.gateKey === "film_ready" && havePriorGatesPassed(input.metadata, "film_ready"))) {
+    return {
+      bucket: "ready_to_record",
+      currentGateKey,
+      currentGateStatus,
+      reviewRequired,
+      humanReviewRequested,
+      openWorkItem,
+    };
+  }
+
+  if (openWorkItem) {
+    return {
+      bucket: "agent_working",
+      currentGateKey,
+      currentGateStatus,
+      reviewRequired,
+      humanReviewRequested,
+      openWorkItem,
+    };
+  }
+
+  if (currentGateStatus === "in_progress" || currentGateStatus === "blocked") {
+    return {
+      bucket: "agent_next",
+      currentGateKey,
+      currentGateStatus,
+      reviewRequired,
+      humanReviewRequested,
+      openWorkItem,
+    };
+  }
+
+  const currentGate = getGateEntry(input.metadata, currentGateKey);
+  const hasAgentOutput = Boolean(currentGate.reason || currentGate.evidence_summary || currentGate.next_action);
+
+  if (reviewRequired && (humanReviewRequested || hasAgentOutput)) {
+    return {
+      bucket: humanReviewRequested ? "needs_gonza" : "ready_for_gonza_review",
+      currentGateKey,
+      currentGateStatus,
+      reviewRequired,
+      humanReviewRequested,
+      openWorkItem,
+    };
+  }
+
+  return {
+    bucket: "agent_next",
+    currentGateKey,
+    currentGateStatus,
+    reviewRequired,
+    humanReviewRequested,
+    openWorkItem,
+  };
 }
 
 export function buildGateHistoryEntry(input: {
