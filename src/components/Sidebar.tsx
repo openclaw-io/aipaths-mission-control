@@ -10,6 +10,7 @@ const NAV_ITEMS = [
   { href: "/office", label: "Office", emoji: "🏢" },
   { href: "/agents", label: "Agents", emoji: "🤖" },
   { href: "/work-items", label: "Work Queue", emoji: "⚙️" },
+  { href: "/suggestions", label: "Suggestions", emoji: "💡" },
   { href: "/projects", label: "Projects", emoji: "📐" },
   { href: "/email-campaigns", label: "Email Campaigns", emoji: "📧" },
   { href: "/blogs", label: "Blogs", emoji: "✍️" },
