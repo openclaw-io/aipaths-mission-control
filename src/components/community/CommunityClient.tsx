@@ -119,6 +119,26 @@ function dateGroupLabel(value: string | null) {
   return new Intl.DateTimeFormat("en-GB", { weekday: "long", day: "numeric", month: "short", timeZone: "Europe/London" }).format(date);
 }
 
+function getTabDate(item: CommunityItem, tab: TabKey, workItems: LinkedWorkItem[]) {
+  if (tab === "scheduled") return getScheduledDate(item, workItems);
+  if (tab === "published") return item.published_at;
+  return null;
+}
+
+function tabAccent(tab: TabKey) {
+  if (tab === "review") return "yellow";
+  if (tab === "scheduled") return "blue";
+  if (tab === "published") return "green";
+  return "slate";
+}
+
+function tabCardLabel(tab: TabKey) {
+  if (tab === "review") return "Review";
+  if (tab === "scheduled") return "Publish";
+  if (tab === "published") return "Published";
+  return "Parked";
+}
+
 function formatDate(value: string | null) {
   if (!value) return "—";
   return new Intl.DateTimeFormat("en-GB", {
@@ -238,62 +258,24 @@ export function CommunityClient({ initialItems, initialWorkItems }: { initialIte
               const primaryWorkItem = getPrimaryWorkItem(item.id, workItems);
               const publishWorkItem = getPublishWorkItem(item.id, workItems);
               const isSelected = selectedId === item.id;
-              const isReview = item.status === "ready_for_review";
-              const scheduledDate = getScheduledDate(item, workItems);
-              const group = dateGroupLabel(scheduledDate);
-              const previousGroup = index > 0 ? dateGroupLabel(getScheduledDate(visibleItems[index - 1], workItems)) : null;
-
-              if (tab === "scheduled") {
-                return (
-                  <div key={item.id}>
-                    {group !== previousGroup && <p className="pb-1 pt-3 text-xs font-semibold uppercase tracking-wide text-gray-500 first:pt-0">{group}</p>}
-                    <ScheduledCommunityCard
-                      item={item}
-                      workItem={primaryWorkItem}
-                      publishWorkItem={publishWorkItem}
-                      expanded={isSelected}
-                      onToggle={() => setSelectedId(isSelected ? null : item.id)}
-                    />
-                  </div>
-                );
-              }
+              const displayDate = getTabDate(item, tab, workItems);
+              const group = dateGroupLabel(displayDate);
+              const previousGroup = index > 0 ? dateGroupLabel(getTabDate(visibleItems[index - 1], tab, workItems)) : null;
+              const shouldGroup = tab === "scheduled" || tab === "published";
 
               return (
-                <article
-                  key={item.id}
-                  onClick={() => (isReview ? openReview(item) : setSelectedId(isSelected ? null : item.id))}
-                  className={`cursor-pointer rounded-lg border p-4 transition ${isSelected || reviewId === item.id ? "border-blue-500 bg-blue-500/5" : "border-gray-800 hover:border-gray-700 hover:bg-white/5"}`}
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <h3 className="font-medium text-white">{item.title}</h3>
-                      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-gray-500">
-                        <span className={`rounded-full px-2 py-0.5 ${STATUS_STYLES[item.status] || "bg-gray-500/20 text-gray-300"}`}>{prettyStatus(item.status)}</span>
-                        <span>{prettyKind(metadata.kind)}</span>
-                        <span>{getChannelLabel(metadata)}</span>
-                        {primaryWorkItem && <span>task: {primaryWorkItem.owner_agent || "unknown"} · {primaryWorkItem.status}</span>}
-                      </div>
-                    </div>
-                    <div className="shrink-0 text-right text-xs text-gray-500">
-                      {isReview && (
-                        <button
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            openReview(item);
-                          }}
-                          className="rounded-lg bg-white/10 px-3 py-2 text-sm font-medium text-white transition hover:bg-white/15"
-                        >
-                          Review
-                        </button>
-                      )}
-                      {tab === "published" && <div>{formatDate(item.published_at)}</div>}
-                    </div>
-                  </div>
-
-                  <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-gray-400">{getCopyPreview(metadata)}</p>
-
-                  {isSelected && !isReview && <CommunityDetails item={item} workItem={primaryWorkItem} publishWorkItem={publishWorkItem} />}
-                </article>
+                <div key={item.id}>
+                  {shouldGroup && group !== previousGroup && <p className="pb-1 pt-3 text-xs font-semibold uppercase tracking-wide text-gray-500 first:pt-0">{group}</p>}
+                  <CommunityQueueCard
+                    tab={tab}
+                    item={item}
+                    workItem={primaryWorkItem}
+                    publishWorkItem={publishWorkItem}
+                    expanded={isSelected}
+                    onToggle={() => setSelectedId(isSelected ? null : item.id)}
+                    onReview={() => openReview(item)}
+                  />
+                </div>
               );
             })}
           </div>
@@ -420,54 +402,80 @@ function ReviewDrawer({
   );
 }
 
-function ScheduledCommunityCard({
+function CommunityQueueCard({
+  tab,
   item,
   workItem,
   publishWorkItem,
   expanded,
   onToggle,
+  onReview,
 }: {
+  tab: TabKey;
   item: CommunityItem;
   workItem: LinkedWorkItem | null;
   publishWorkItem: LinkedWorkItem | null;
   expanded: boolean;
   onToggle: () => void;
+  onReview: () => void;
 }) {
   const metadata = getMetadata(item);
   const channel = getPublishChannelLabel(publishWorkItem, metadata);
-  const scheduledFor = publishWorkItem?.scheduled_for || null;
-  const taskStatus = publishWorkItem?.status || workItem?.status || "missing task";
+  const displayDate = tab === "scheduled" ? publishWorkItem?.scheduled_for || null : tab === "published" ? item.published_at : null;
+  const taskStatus = publishWorkItem?.status || workItem?.status || item.status;
   const suppressPreviews = publishWorkItem?.payload?.suppress_link_previews === true;
   const copy = getCopy(metadata).trim();
+  const accent = tabAccent(tab);
+  const borderClass = expanded ? "border-blue-500 bg-blue-500/5" : "border-gray-800 bg-black/10 hover:border-gray-700";
+  const accentClasses = {
+    yellow: "bg-yellow-500/15 text-yellow-300",
+    blue: "bg-blue-500/15 text-blue-300",
+    green: "bg-green-500/15 text-green-300",
+    slate: "bg-slate-500/15 text-slate-300",
+  } as const;
 
   return (
-    <article className={`rounded-lg border p-4 transition ${expanded ? "border-blue-500 bg-blue-500/5" : "border-gray-800 bg-black/10 hover:border-gray-700"}`}>
+    <article className={`rounded-lg border p-4 transition ${borderClass}`}>
       <div className="grid gap-4 lg:grid-cols-[88px_1fr_auto] lg:items-center">
         <div className="rounded-xl border border-gray-800 bg-[#0a0a0f] px-3 py-2 text-center">
-          <p className="text-lg font-semibold text-white">{formatTime(scheduledFor)}</p>
-          <p className="mt-0.5 text-[11px] uppercase tracking-wide text-gray-600">London</p>
+          <p className="text-lg font-semibold text-white">{displayDate ? formatTime(displayDate) : tabCardLabel(tab)}</p>
+          <p className="mt-0.5 text-[11px] uppercase tracking-wide text-gray-600">{displayDate ? "London" : prettyStatus(item.status)}</p>
         </div>
 
         <div className="min-w-0">
           <h3 className="truncate font-medium text-white">{item.title}</h3>
           <p className="mt-1 truncate text-sm text-gray-500">{getOneLineCopyPreview(metadata)}</p>
           <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+            <span className={`rounded-full px-2 py-0.5 font-medium ${accentClasses[accent]}`}>{tabCardLabel(tab)}</span>
             <span className="rounded-full bg-sky-500/15 px-2 py-0.5 font-medium text-sky-300">{channel}</span>
             <span className={`rounded-full px-2 py-0.5 ${STATUS_STYLES[taskStatus] || "bg-gray-500/20 text-gray-300"}`}>task: {taskStatus}</span>
+            {copy && <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-emerald-300">has copy</span>}
             {suppressPreviews && <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-emerald-300">no previews</span>}
           </div>
         </div>
 
         <div className="flex flex-wrap justify-start gap-2 lg:justify-end" onClick={(event) => event.stopPropagation()}>
+          {tab === "review" && (
+            <button onClick={onReview} className="rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-blue-500">
+              Review
+            </button>
+          )}
           <button onClick={onToggle} className="rounded-lg bg-white/10 px-3 py-2 text-sm font-medium text-white transition hover:bg-white/15">
             {expanded ? "Hide copy" : "View copy"}
           </button>
-          <a href="/work-items" className="rounded-lg bg-white/10 px-3 py-2 text-sm font-medium text-white transition hover:bg-white/15">
-            Work Queue
-          </a>
+          {(tab === "scheduled" || tab === "review") && (
+            <a href="/work-items" className="rounded-lg bg-white/10 px-3 py-2 text-sm font-medium text-white transition hover:bg-white/15">
+              Work Queue
+            </a>
+          )}
           {metadata.source?.url && (
             <a href={metadata.source.url} target="_blank" rel="noreferrer" className="rounded-lg bg-white/10 px-3 py-2 text-sm font-medium text-white transition hover:bg-white/15">
               Source
+            </a>
+          )}
+          {item.current_url && (
+            <a href={item.current_url} target="_blank" rel="noreferrer" className="rounded-lg bg-white/10 px-3 py-2 text-sm font-medium text-white transition hover:bg-white/15">
+              Post
             </a>
           )}
         </div>
@@ -475,15 +483,12 @@ function ScheduledCommunityCard({
 
       {expanded && (
         <div className="mt-4 rounded-xl border border-gray-800 bg-black/20 p-4">
-          <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Approved copy</p>
+          <p className="text-xs font-medium uppercase tracking-wide text-gray-500">{tab === "published" ? "Published copy" : tab === "review" ? "Draft copy" : "Approved copy"}</p>
           {copy ? <CopyPreview copy={copy} /> : <p className="mt-3 text-sm text-gray-500">No copy saved yet.</p>}
           <div className="mt-4 flex flex-wrap gap-3 text-sm">
             {publishWorkItem && <span className="text-gray-500">Publish task: <span className="text-gray-300">{publishWorkItem.id}</span></span>}
-            {item.current_url && (
-              <a href={item.current_url} target="_blank" rel="noreferrer" className="text-blue-400 hover:text-blue-300">
-                Open post →
-              </a>
-            )}
+            {workItem && <span className="text-gray-500">Latest task: <span className="text-gray-300">{workItem.status}</span></span>}
+            {metadata.review?.notes && <span className="text-orange-300">Review notes saved</span>}
           </div>
         </div>
       )}
