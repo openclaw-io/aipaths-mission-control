@@ -41,7 +41,7 @@ export default function Sidebar() {
   }
 
   return (
-    <aside className="fixed left-0 top-0 flex h-screen w-64 flex-col border-r border-white/10 bg-[#111118]">
+    <aside className="fixed left-0 top-0 z-40 flex h-screen w-64 flex-col border-r border-white/10 bg-[#111118]">
       {/* Header */}
       <div className="border-b border-white/10 px-6 py-5">
         <h1 className="text-lg font-bold text-white">🛰️ Mission Control</h1>
