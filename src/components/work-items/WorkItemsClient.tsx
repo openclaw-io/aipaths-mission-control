@@ -242,30 +242,56 @@ function LiveBoardTab({
 }) {
   return (
     <div className="mt-6 space-y-4">
+      <WorkQueueSummary inProgress={inProgress.length} ready={readyNow.length} blocked={blocked.length} failed={failed.length} />
       <ProgressTab items={inProgress} events={events} onOpen={onOpen} />
-      <QueueColumn title="Next up" subtitle="ready now · scheduler can pick these" items={readyNow} onOpen={onOpen} />
-      <QueueColumn title="Blocked" subtitle="waiting dependencies before this can run" items={blocked} onOpen={onOpen} />
-      <FailedColumn items={failed} onOpen={onOpen} onRequeue={onRequeue} />
+      <div className="grid gap-4 xl:grid-cols-3">
+        <QueueColumn title="Next up" subtitle="Ready now" items={readyNow} onOpen={onOpen} />
+        <QueueColumn title="Blocked" subtitle="Waiting dependencies" items={blocked} onOpen={onOpen} />
+        <FailedColumn items={failed} onOpen={onOpen} onRequeue={onRequeue} />
+      </div>
+    </div>
+  );
+}
+
+function WorkQueueSummary({ inProgress, ready, blocked, failed }: { inProgress: number; ready: number; blocked: number; failed: number }) {
+  const cards = [
+    { label: "Running", value: inProgress, tone: "border-purple-500/30 bg-purple-500/10 text-purple-200" },
+    { label: "Ready now", value: ready, tone: "border-blue-500/30 bg-blue-500/10 text-blue-200" },
+    { label: "Blocked", value: blocked, tone: "border-yellow-500/30 bg-yellow-500/10 text-yellow-200" },
+    { label: "Failed", value: failed, tone: failed > 0 ? "border-red-500/30 bg-red-500/10 text-red-200" : "border-gray-800 bg-[#111118] text-gray-400" },
+  ];
+
+  return (
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      {cards.map((card) => (
+        <div key={card.label} className={`rounded-xl border px-4 py-3 ${card.tone}`}>
+          <div className="text-[11px] font-medium uppercase tracking-wide opacity-70">{card.label}</div>
+          <div className="mt-1 text-2xl font-semibold text-white">{card.value}</div>
+        </div>
+      ))}
     </div>
   );
 }
 
 function ProgressTab({ items, events, onOpen }: { items: WorkItem[]; events: WorkEvent[]; onOpen: (id: string) => void }) {
   return (
-    <section className="mt-6 rounded-xl border border-gray-800 bg-[#111118] p-4">
+    <section className="rounded-2xl border border-purple-500/20 bg-gradient-to-br from-purple-500/10 via-[#111118] to-[#111118] p-4 shadow-[0_0_40px_rgba(168,85,247,0.06)]">
       <div className="mb-4 flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-white">Running now</h2>
-        <span className="text-xs text-gray-500">{items.length} active</span>
+        <div>
+          <h2 className="text-lg font-semibold text-white">Running now</h2>
+          <p className="text-xs text-purple-200/50">Active work currently owned by agents</p>
+        </div>
+        <span className="rounded-full border border-purple-400/20 bg-purple-500/10 px-2.5 py-1 text-xs font-medium text-purple-100">{items.length} active</span>
       </div>
       {items.length === 0 ? (
-        <p className="py-8 text-center text-sm text-gray-600">No work items in progress.</p>
+        <div className="rounded-xl border border-dashed border-purple-500/20 bg-black/10 px-4 py-4 text-center text-sm text-purple-100/40">No work items in progress.</div>
       ) : (
         <div className="grid gap-3 lg:grid-cols-2">
           {items.map((item) => {
             const lastEvent = events.find((event) => event.entity_id === item.id);
             const mins = minutesSince(item.started_at);
             return (
-              <button key={item.id} type="button" onClick={() => onOpen(item.id)} className="w-full rounded-xl border border-purple-500/20 bg-purple-500/5 p-4 text-left transition hover:border-purple-400/40 hover:bg-purple-500/10">
+              <button key={item.id} type="button" onClick={() => onOpen(item.id)} className="w-full rounded-xl border border-purple-400/30 bg-[#15111f] p-4 text-left shadow-lg shadow-purple-950/10 transition hover:border-purple-300/50 hover:bg-[#1a1328]">
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <div className="text-sm font-semibold text-white">{item.title}</div>
@@ -279,7 +305,7 @@ function ProgressTab({ items, events, onOpen }: { items: WorkItem[]; events: Wor
                   <Metric label="Dispatch" value={payloadString(item.payload, "dispatch_state") || "—"} />
                 </div>
                 {lastEvent && (
-                  <div className="mt-3 rounded-lg bg-black/20 px-3 py-2 text-xs text-gray-400">
+                  <div className="mt-3 rounded-lg border border-purple-500/10 bg-black/20 px-3 py-2 text-xs text-gray-400">
                     Last event: <span className="text-gray-200">{pretty(lastEvent.event_type)}</span> · {formatDate(lastEvent.created_at)}
                   </div>
                 )}
@@ -418,16 +444,16 @@ function LogsTab({ events, items, onOpen }: { events: WorkEvent[]; items: WorkIt
 
 function QueueColumn({ title, subtitle, items, onOpen }: { title: string; subtitle: string; items: WorkItem[]; onOpen: (id: string) => void }) {
   return (
-    <section className="rounded-xl border border-gray-800 bg-[#111118] p-4">
+    <section className="rounded-2xl border border-gray-800 bg-[#111118] p-4">
       <div className="mb-3 flex items-start justify-between gap-3">
         <div>
           <h2 className="font-semibold text-white">{title}</h2>
-          <p className="text-xs text-gray-600">{subtitle}</p>
+          <p className="text-xs text-gray-500">{subtitle}</p>
         </div>
         <span className="rounded-full bg-white/5 px-2 py-0.5 text-xs text-gray-400">{items.length}</span>
       </div>
       <div className="space-y-2">
-        {items.length === 0 ? <p className="py-6 text-center text-xs text-gray-700">Empty</p> : items.slice(0, 20).map((item) => <WorkCard key={item.id} item={item} onOpen={() => onOpen(item.id)} />)}
+        {items.length === 0 ? <div className="rounded-xl border border-dashed border-gray-800 bg-black/10 px-3 py-4 text-center text-xs text-gray-600">Empty</div> : items.slice(0, 20).map((item) => <WorkCard key={item.id} item={item} onOpen={() => onOpen(item.id)} />)}
       </div>
     </section>
   );
@@ -452,16 +478,16 @@ function FailedColumn({ items, onOpen, onRequeue }: { items: WorkItem[]; onOpen:
   }
 
   return (
-    <section className="rounded-xl border border-red-500/20 bg-red-500/5 p-4">
+    <section className={`rounded-2xl border p-4 ${items.length > 0 ? "border-red-500/30 bg-red-500/10" : "border-gray-800 bg-[#111118]"}`}>
       <div className="mb-3 flex items-start justify-between gap-3">
         <div>
           <h2 className="font-semibold text-white">Failed</h2>
-          <p className="text-xs text-red-200/50">needs manual review · requeue when safe</p>
+          <p className={items.length > 0 ? "text-xs text-red-200/60" : "text-xs text-gray-500"}>needs manual review · requeue when safe</p>
         </div>
-        <span className="rounded-full bg-red-500/10 px-2 py-0.5 text-xs text-red-200">{items.length}</span>
+        <span className={`rounded-full px-2 py-0.5 text-xs ${items.length > 0 ? "bg-red-500/10 text-red-200" : "bg-white/5 text-gray-400"}`}>{items.length}</span>
       </div>
       <div className="space-y-2">
-        {items.length === 0 ? <p className="py-6 text-center text-xs text-red-200/30">No failed work items.</p> : items.slice(0, 20).map((item) => (
+        {items.length === 0 ? <div className="rounded-xl border border-dashed border-gray-800 bg-black/10 px-3 py-4 text-center text-xs text-gray-600">No failed work items.</div> : items.slice(0, 20).map((item) => (
           <WorkCard key={item.id} item={item} onOpen={() => onOpen(item.id)}>
             <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-red-500/10 pt-3">
               <div className="space-y-1 text-xs text-red-200/60">
@@ -586,7 +612,7 @@ function WorkItemDrawer({
               <button
                 type="button"
                 onClick={() => reschedule("now", "run-now")}
-                disabled={!canReschedule || busy !== null}
+                disabled={!canRunNow || busy !== null}
                 className="rounded-lg border border-green-400/30 bg-green-500/10 px-3 py-2 text-sm font-medium text-green-100 hover:bg-green-500/20 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {busy === "run-now" ? "Running…" : "Run now"}
@@ -642,7 +668,7 @@ function WorkItemDrawer({
 
 function WorkCard({ item, compact = false, children, onOpen }: { item: WorkItem; compact?: boolean; children?: ReactNode; onOpen?: () => void }) {
   return (
-    <div className="rounded-lg border border-gray-800 bg-[#0d0d14] p-3">
+    <div className="rounded-xl border border-gray-800 bg-[#0d0d14] p-3 transition hover:border-gray-700 hover:bg-[#11111b]">
       <button type="button" onClick={onOpen} className="flex w-full items-start justify-between gap-2 text-left">
         <div className={`font-medium text-white ${compact ? "text-xs" : "text-sm"}`}>{item.title}</div>
         <StatusPill status={item.status} />
@@ -654,7 +680,7 @@ function WorkCard({ item, compact = false, children, onOpen }: { item: WorkItem;
         <span>·</span>
         <span>{pretty(item.source_type)}</span>
       </div>
-      <div className="mt-2 grid gap-1 text-xs text-gray-600">
+      <div className="mt-2 grid gap-1 text-xs text-gray-500">
         {item.scheduled_for && <div>Scheduled: <span className="text-gray-400">{formatDate(item.scheduled_for)}</span></div>}
         {item.completed_at && <div>Completed: <span className="text-gray-400">{formatDate(item.completed_at)}</span></div>}
         {payloadString(item.payload, "dispatch_state") && <div>Dispatch: <span className="text-gray-400">{payloadString(item.payload, "dispatch_state")}</span></div>}
@@ -673,8 +699,8 @@ function StatusPill({ status }: { status: string }) {
 function Metric({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-lg bg-black/20 px-3 py-2">
-      <div className="text-[10px] uppercase tracking-wide text-gray-600">{label}</div>
-      <div className="mt-1 text-gray-300">{value}</div>
+      <div className="text-[10px] font-medium uppercase tracking-wide text-gray-500">{label}</div>
+      <div className="mt-1 text-gray-200">{value}</div>
     </div>
   );
 }
