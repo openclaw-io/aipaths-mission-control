@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { INTEL_DESTINATION_OPTIONS } from "@/lib/intel-destinations";
 import type { IntelInboxDetail } from "@/lib/intel-inbox";
 
@@ -43,6 +43,8 @@ export function IntelInboxDetail({
   onAction: (action: "promote" | "park" | "discard", payload?: { comment?: string; destinations?: string[]; ownerAgent?: string; collaborators?: string[] }) => Promise<void>;
 }) {
   const [submitting, setSubmitting] = useState<string | null>(null);
+  const submittingRef = useRef(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [selectedDestinations, setSelectedDestinations] = useState<string[]>([]);
   const [comment, setComment] = useState<string>("");
 
@@ -63,7 +65,10 @@ export function IntelInboxDetail({
   }, [detail]);
 
   async function submit(action: "promote" | "park" | "discard") {
+    if (submittingRef.current) return;
+    submittingRef.current = true;
     setSubmitting(action);
+    setErrorMessage(null);
     try {
       await onAction(
         action,
@@ -71,7 +76,10 @@ export function IntelInboxDetail({
           ? { comment, destinations: selectedDestinations }
           : { comment },
       );
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : `No se pudo completar la acción ${action}`);
     } finally {
+      submittingRef.current = false;
       setSubmitting(null);
     }
   }
@@ -213,6 +221,11 @@ export function IntelInboxDetail({
       </div>
 
       <div className="border-t border-gray-800 bg-[#111118]/95 p-5 shadow-[0_-20px_45px_rgba(0,0,0,0.25)]">
+        {errorMessage ? (
+          <div className="mb-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+            {errorMessage}
+          </div>
+        ) : null}
         <div className="flex flex-wrap justify-end gap-2">
           <button
             onClick={() => submit("promote")}
