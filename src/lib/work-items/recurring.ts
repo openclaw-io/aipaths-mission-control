@@ -125,7 +125,7 @@ export async function materializeRecurringWork(db: SupabaseClient, requestedBy =
         .from("work_items")
         .insert({
           kind: "task",
-          source_type: "recurring_rule",
+          source_type: "service",
           source_id: rule.id,
           title: rule.title,
           instruction: rule.instruction,
