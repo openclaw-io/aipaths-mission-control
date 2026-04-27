@@ -242,33 +242,12 @@ function LiveBoardTab({
 }) {
   return (
     <div className="mt-6 space-y-4">
-      <WorkQueueSummary inProgress={inProgress.length} ready={readyNow.length} blocked={blocked.length} failed={failed.length} />
       <ProgressTab items={inProgress} events={events} onOpen={onOpen} />
       <div className="grid gap-4 xl:grid-cols-3">
         <QueueColumn title="Next up" subtitle="Ready now" items={readyNow} onOpen={onOpen} />
         <QueueColumn title="Blocked" subtitle="Waiting dependencies" items={blocked} onOpen={onOpen} />
         <FailedColumn items={failed} onOpen={onOpen} onRequeue={onRequeue} />
       </div>
-    </div>
-  );
-}
-
-function WorkQueueSummary({ inProgress, ready, blocked, failed }: { inProgress: number; ready: number; blocked: number; failed: number }) {
-  const cards = [
-    { label: "Running", value: inProgress, tone: "border-purple-500/30 bg-purple-500/10 text-purple-200" },
-    { label: "Ready now", value: ready, tone: "border-blue-500/30 bg-blue-500/10 text-blue-200" },
-    { label: "Blocked", value: blocked, tone: "border-yellow-500/30 bg-yellow-500/10 text-yellow-200" },
-    { label: "Failed", value: failed, tone: failed > 0 ? "border-red-500/30 bg-red-500/10 text-red-200" : "border-gray-800 bg-[#111118] text-gray-400" },
-  ];
-
-  return (
-    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-      {cards.map((card) => (
-        <div key={card.label} className={`rounded-xl border px-4 py-3 ${card.tone}`}>
-          <div className="text-[11px] font-medium uppercase tracking-wide opacity-70">{card.label}</div>
-          <div className="mt-1 text-2xl font-semibold text-white">{card.value}</div>
-        </div>
-      ))}
     </div>
   );
 }
