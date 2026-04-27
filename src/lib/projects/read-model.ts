@@ -58,8 +58,6 @@ export type ProjectGalleryCard = {
   deferredUntil: string | null;
   updatedAt: string;
   linkedWorkItemsCount: number;
-  linkedPipelineItemsCount: number;
-  linkedServicesCount: number;
 };
 
 export type ProjectDeliverable = {
@@ -96,8 +94,6 @@ export type ProjectDetailPayload = {
   blockedReason: string | null;
   deferredUntil: string | null;
   linkedWorkItems: Array<{ id: string; relationType: string }>;
-  linkedPipelineItems: Array<{ id: string; relationType: string }>;
-  linkedServices: Array<{ id: string; relationType: string }>;
   recentEvents: Array<{
     id: string;
     eventType: string;
@@ -316,10 +312,8 @@ export async function listProjectGalleryCards(): Promise<ProjectGalleryCard[]> {
   await autoPromotePlanningProjects(rows);
   const projectIds = rows.map((p) => p.id);
 
-  const [workLinks, pipelineLinks, serviceLinks, primaryExecutionByProject] = await Promise.all([
+  const [workLinks, primaryExecutionByProject] = await Promise.all([
     projectIds.length ? supabaseAdmin.from("project_work_items").select("project_id") : Promise.resolve({ data: [], error: null }),
-    projectIds.length ? supabaseAdmin.from("project_pipeline_items").select("project_id") : Promise.resolve({ data: [], error: null }),
-    projectIds.length ? supabaseAdmin.from("project_services").select("project_id") : Promise.resolve({ data: [], error: null }),
     listPrimaryExecutionWorkItems(supabaseAdmin, projectIds),
   ]);
 
@@ -332,8 +326,6 @@ export async function listProjectGalleryCards(): Promise<ProjectGalleryCard[]> {
   };
 
   const workCounts = countBy(workLinks.data as Array<{ project_id: string }>);
-  const pipelineCounts = countBy(pipelineLinks.data as Array<{ project_id: string }>);
-  const serviceCounts = countBy(serviceLinks.data as Array<{ project_id: string }>);
 
   await reconcileProjectsWithPrimaryExecution(rows, primaryExecutionByProject);
 
@@ -359,8 +351,6 @@ export async function listProjectGalleryCards(): Promise<ProjectGalleryCard[]> {
       deferredUntil: project.deferred_until,
       updatedAt: project.updated_at,
       linkedWorkItemsCount: workCounts.get(project.id) || 0,
-      linkedPipelineItemsCount: pipelineCounts.get(project.id) || 0,
-      linkedServicesCount: serviceCounts.get(project.id) || 0,
     };
   });
 }
@@ -396,10 +386,8 @@ export async function getProjectDetail(projectId: string): Promise<ProjectDetail
     row.status = nextStatus;
   }
 
-  const [workLinks, pipelineLinks, serviceLinks, events] = await Promise.all([
+  const [workLinks, events] = await Promise.all([
     supabaseAdmin.from("project_work_items").select("work_item_id, relation_type").eq("project_id", projectId),
-    supabaseAdmin.from("project_pipeline_items").select("pipeline_item_id, relation_type").eq("project_id", projectId),
-    supabaseAdmin.from("project_services").select("service_id, relation_type").eq("project_id", projectId),
     supabaseAdmin
       .from("project_events")
       .select("id, event_type, from_status, to_status, actor, payload, created_at")
@@ -444,8 +432,6 @@ export async function getProjectDetail(projectId: string): Promise<ProjectDetail
     blockedReason: row.status === "blocked" ? deriveNextActionLabel(row) : null,
     deferredUntil: row.deferred_until,
     linkedWorkItems: (workLinks.data || []).map((r) => ({ id: r.work_item_id, relationType: r.relation_type })),
-    linkedPipelineItems: (pipelineLinks.data || []).map((r) => ({ id: r.pipeline_item_id, relationType: r.relation_type })),
-    linkedServices: (serviceLinks.data || []).map((r) => ({ id: r.service_id, relationType: r.relation_type })),
     recentEvents: (events.data || []).map((e) => ({
       id: e.id,
       eventType: e.event_type,
