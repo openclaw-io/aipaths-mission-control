@@ -64,6 +64,11 @@ function getCopyPreview(metadata: CommunityMetadata) {
   return text.length > 280 ? `${text.slice(0, 280)}…` : text;
 }
 
+function getOneLineCopyPreview(metadata: CommunityMetadata) {
+  const text = (getCopy(metadata) || "No copy saved yet.").replace(/\s+/g, " ").trim();
+  return text.length > 120 ? `${text.slice(0, 120)}…` : text;
+}
+
 function getPrimaryWorkItem(itemId: string, workItems: LinkedWorkItem[]) {
   return [...workItems]
     .filter((item) => item.source_id === itemId || item.payload?.pipeline_item_id === itemId)
@@ -84,6 +89,34 @@ function getPublishWorkItem(itemId: string, workItems: LinkedWorkItem[]) {
 
 function getScheduledDate(item: CommunityItem, workItems: LinkedWorkItem[]) {
   return getPublishWorkItem(item.id, workItems)?.scheduled_for || null;
+}
+
+function getPublishChannelLabel(workItem: LinkedWorkItem | null, metadata: CommunityMetadata) {
+  const payload = workItem?.payload || {};
+  if (typeof payload.target_channel_name === "string") return `#${payload.target_channel_name}`;
+  if (typeof payload.target_channel_id === "string") return `<#${payload.target_channel_id}>`;
+  return getChannelLabel(metadata);
+}
+
+function formatTime(value: string | null) {
+  if (!value) return "—";
+  return new Intl.DateTimeFormat("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: "Europe/London",
+  }).format(new Date(value));
+}
+
+function dateGroupLabel(value: string | null) {
+  if (!value) return "Unscheduled";
+  const date = new Date(value);
+  const now = new Date();
+  const londonDay = (d: Date) => new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/London", dateStyle: "short" }).format(d);
+  const tomorrow = new Date(now);
+  tomorrow.setDate(now.getDate() + 1);
+  if (londonDay(date) === londonDay(now)) return "Today";
+  if (londonDay(date) === londonDay(tomorrow)) return "Tomorrow";
+  return new Intl.DateTimeFormat("en-GB", { weekday: "long", day: "numeric", month: "short", timeZone: "Europe/London" }).format(date);
 }
 
 function formatDate(value: string | null) {
@@ -200,11 +233,31 @@ export function CommunityClient({ initialItems, initialWorkItems }: { initialIte
           <p className="text-sm text-gray-600">No community items here.</p>
         ) : (
           <div className="space-y-3">
-            {visibleItems.map((item) => {
+            {visibleItems.map((item, index) => {
               const metadata = getMetadata(item);
               const primaryWorkItem = getPrimaryWorkItem(item.id, workItems);
+              const publishWorkItem = getPublishWorkItem(item.id, workItems);
               const isSelected = selectedId === item.id;
               const isReview = item.status === "ready_for_review";
+              const scheduledDate = getScheduledDate(item, workItems);
+              const group = dateGroupLabel(scheduledDate);
+              const previousGroup = index > 0 ? dateGroupLabel(getScheduledDate(visibleItems[index - 1], workItems)) : null;
+
+              if (tab === "scheduled") {
+                return (
+                  <div key={item.id}>
+                    {group !== previousGroup && <p className="pb-1 pt-3 text-xs font-semibold uppercase tracking-wide text-gray-500 first:pt-0">{group}</p>}
+                    <ScheduledCommunityCard
+                      item={item}
+                      workItem={primaryWorkItem}
+                      publishWorkItem={publishWorkItem}
+                      expanded={isSelected}
+                      onToggle={() => setSelectedId(isSelected ? null : item.id)}
+                    />
+                  </div>
+                );
+              }
+
               return (
                 <article
                   key={item.id}
@@ -233,14 +286,13 @@ export function CommunityClient({ initialItems, initialWorkItems }: { initialIte
                           Review
                         </button>
                       )}
-                      {tab === "scheduled" && <div>{formatDate(getScheduledDate(item, workItems))}</div>}
                       {tab === "published" && <div>{formatDate(item.published_at)}</div>}
                     </div>
                   </div>
 
                   <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-gray-400">{getCopyPreview(metadata)}</p>
 
-                  {isSelected && !isReview && <CommunityDetails item={item} workItem={primaryWorkItem} publishWorkItem={getPublishWorkItem(item.id, workItems)} />}
+                  {isSelected && !isReview && <CommunityDetails item={item} workItem={primaryWorkItem} publishWorkItem={publishWorkItem} />}
                 </article>
               );
             })}
@@ -365,6 +417,77 @@ function ReviewDrawer({
         </div>
       </aside>
     </div>
+  );
+}
+
+function ScheduledCommunityCard({
+  item,
+  workItem,
+  publishWorkItem,
+  expanded,
+  onToggle,
+}: {
+  item: CommunityItem;
+  workItem: LinkedWorkItem | null;
+  publishWorkItem: LinkedWorkItem | null;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const metadata = getMetadata(item);
+  const channel = getPublishChannelLabel(publishWorkItem, metadata);
+  const scheduledFor = publishWorkItem?.scheduled_for || null;
+  const taskStatus = publishWorkItem?.status || workItem?.status || "missing task";
+  const suppressPreviews = publishWorkItem?.payload?.suppress_link_previews === true;
+  const copy = getCopy(metadata).trim();
+
+  return (
+    <article className={`rounded-lg border p-4 transition ${expanded ? "border-blue-500 bg-blue-500/5" : "border-gray-800 bg-black/10 hover:border-gray-700"}`}>
+      <div className="grid gap-4 lg:grid-cols-[88px_1fr_auto] lg:items-center">
+        <div className="rounded-xl border border-gray-800 bg-[#0a0a0f] px-3 py-2 text-center">
+          <p className="text-lg font-semibold text-white">{formatTime(scheduledFor)}</p>
+          <p className="mt-0.5 text-[11px] uppercase tracking-wide text-gray-600">London</p>
+        </div>
+
+        <div className="min-w-0">
+          <h3 className="truncate font-medium text-white">{item.title}</h3>
+          <p className="mt-1 truncate text-sm text-gray-500">{getOneLineCopyPreview(metadata)}</p>
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+            <span className="rounded-full bg-sky-500/15 px-2 py-0.5 font-medium text-sky-300">{channel}</span>
+            <span className={`rounded-full px-2 py-0.5 ${STATUS_STYLES[taskStatus] || "bg-gray-500/20 text-gray-300"}`}>task: {taskStatus}</span>
+            {suppressPreviews && <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-emerald-300">no previews</span>}
+          </div>
+        </div>
+
+        <div className="flex flex-wrap justify-start gap-2 lg:justify-end" onClick={(event) => event.stopPropagation()}>
+          <button onClick={onToggle} className="rounded-lg bg-white/10 px-3 py-2 text-sm font-medium text-white transition hover:bg-white/15">
+            {expanded ? "Hide copy" : "View copy"}
+          </button>
+          <a href="/work-items" className="rounded-lg bg-white/10 px-3 py-2 text-sm font-medium text-white transition hover:bg-white/15">
+            Work Queue
+          </a>
+          {metadata.source?.url && (
+            <a href={metadata.source.url} target="_blank" rel="noreferrer" className="rounded-lg bg-white/10 px-3 py-2 text-sm font-medium text-white transition hover:bg-white/15">
+              Source
+            </a>
+          )}
+        </div>
+      </div>
+
+      {expanded && (
+        <div className="mt-4 rounded-xl border border-gray-800 bg-black/20 p-4">
+          <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Approved copy</p>
+          {copy ? <CopyPreview copy={copy} /> : <p className="mt-3 text-sm text-gray-500">No copy saved yet.</p>}
+          <div className="mt-4 flex flex-wrap gap-3 text-sm">
+            {publishWorkItem && <span className="text-gray-500">Publish task: <span className="text-gray-300">{publishWorkItem.id}</span></span>}
+            {item.current_url && (
+              <a href={item.current_url} target="_blank" rel="noreferrer" className="text-blue-400 hover:text-blue-300">
+                Open post →
+              </a>
+            )}
+          </div>
+        </div>
+      )}
+    </article>
   );
 }
 
