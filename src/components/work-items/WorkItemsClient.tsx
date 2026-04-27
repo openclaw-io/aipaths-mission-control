@@ -418,120 +418,77 @@ function CalendarTab({ grouped, onOpen }: { grouped: Array<readonly [string, Wor
 }
 
 
-function RecurringTasksTab({ rules, onRulesChange }: { rules: RecurringWorkRule[]; onRulesChange: (rules: RecurringWorkRule[]) => void }) {
-  const [title, setTitle] = useState("Systems repo hygiene check");
-  const [ownerAgent, setOwnerAgent] = useState("systems");
-  const [cadenceInterval, setCadenceInterval] = useState(2);
-  const [cadenceUnit, setCadenceUnit] = useState<"days" | "weeks">("days");
-  const [timeOfDay, setTimeOfDay] = useState("02:30");
-  const [instruction, setInstruction] = useState("Check all AIPaths agent repositories for uncommitted changes, make sure meaningful work is committed or clearly reported, and flag any repos that need follow-up.");
-  const [busy, setBusy] = useState<"create" | "materialize" | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
-
-  async function refreshRules() {
-    const res = await fetch("/api/work-items/recurring-rules");
-    if (!res.ok) throw new Error(await res.text());
-    const body = await res.json();
-    onRulesChange((body.rules || []) as RecurringWorkRule[]);
-  }
-
-  async function createRule() {
-    setBusy("create");
-    setMessage(null);
-    try {
-      const res = await fetch("/api/work-items/recurring-rules", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title, instruction, owner_agent: ownerAgent, cadence_interval: cadenceInterval, cadence_unit: cadenceUnit, time_of_day: timeOfDay, timezone: "Europe/London", horizon_days: 28 }),
-      });
-      if (!res.ok) throw new Error(await res.text());
-      await refreshRules();
-      setMessage("Rule created. Materialize to create the next 4 weeks of work items.");
-    } catch (err) {
-      setMessage(err instanceof Error ? err.message : "Failed to create rule");
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function materialize() {
-    setBusy("materialize");
-    setMessage(null);
-    try {
-      const res = await fetch("/api/work-items/recurring-rules/materialize", { method: "POST" });
-      if (!res.ok) throw new Error(await res.text());
-      const body = await res.json();
-      await refreshRules();
-      setMessage(`Materialized ${body.created || 0} new occurrence(s); ${body.existing || 0} already existed.`);
-    } catch (err) {
-      setMessage(err instanceof Error ? err.message : "Failed to materialize rules");
-    } finally {
-      setBusy(null);
-    }
-  }
-
+function RecurringTasksTab({ rules }: { rules: RecurringWorkRule[]; onRulesChange: (rules: RecurringWorkRule[]) => void }) {
   return (
-    <section className="mt-6 grid gap-4 xl:grid-cols-[420px_1fr]">
-      <div className="rounded-2xl border border-gray-800 bg-[#111118] p-4">
-        <div className="mb-4">
-          <h2 className="text-lg font-semibold text-white">Create recurring task</h2>
-          <p className="text-xs text-gray-500">Rules generate visible scheduled work_items for the next 4 weeks.</p>
+    <section className="mt-6 rounded-2xl border border-gray-800 bg-[#111118] p-4">
+      <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold text-white">Recurring Tasks</h2>
+          <p className="mt-1 text-xs text-gray-500">Read-only rules that keep future work_items visible in Calendar.</p>
         </div>
-        <div className="space-y-3">
-          <label className="block text-xs text-gray-500">Title<input value={title} onChange={(event) => setTitle(event.target.value)} className="mt-1 w-full rounded-lg border border-gray-700 bg-[#0d0d14] px-3 py-2 text-sm text-white focus:outline-none" /></label>
-          <label className="block text-xs text-gray-500">Agent<input value={ownerAgent} onChange={(event) => setOwnerAgent(event.target.value)} className="mt-1 w-full rounded-lg border border-gray-700 bg-[#0d0d14] px-3 py-2 text-sm text-white focus:outline-none" /></label>
-          <div className="grid grid-cols-3 gap-2">
-            <label className="block text-xs text-gray-500">Every<input type="number" min={1} value={cadenceInterval} onChange={(event) => setCadenceInterval(Number(event.target.value))} className="mt-1 w-full rounded-lg border border-gray-700 bg-[#0d0d14] px-3 py-2 text-sm text-white focus:outline-none" /></label>
-            <label className="block text-xs text-gray-500">Unit<select value={cadenceUnit} onChange={(event) => setCadenceUnit(event.target.value as "days" | "weeks")} className="mt-1 w-full rounded-lg border border-gray-700 bg-[#0d0d14] px-3 py-2 text-sm text-white focus:outline-none"><option value="days">days</option><option value="weeks">weeks</option></select></label>
-            <label className="block text-xs text-gray-500">Time<input type="time" value={timeOfDay} onChange={(event) => setTimeOfDay(event.target.value)} className="mt-1 w-full rounded-lg border border-gray-700 bg-[#0d0d14] px-3 py-2 text-sm text-white focus:outline-none" /></label>
-          </div>
-          <label className="block text-xs text-gray-500">Instruction<textarea value={instruction} onChange={(event) => setInstruction(event.target.value)} rows={8} className="mt-1 w-full rounded-lg border border-gray-700 bg-[#0d0d14] px-3 py-2 text-sm text-white focus:outline-none" /></label>
-          <div className="flex flex-wrap gap-2">
-            <button type="button" onClick={createRule} disabled={busy !== null} className="rounded-lg border border-blue-400/30 bg-blue-500/10 px-3 py-2 text-sm font-medium text-blue-100 hover:bg-blue-500/20 disabled:opacity-50">{busy === "create" ? "Creating…" : "Create rule"}</button>
-            <button type="button" onClick={materialize} disabled={busy !== null} className="rounded-lg border border-green-400/30 bg-green-500/10 px-3 py-2 text-sm font-medium text-green-100 hover:bg-green-500/20 disabled:opacity-50">{busy === "materialize" ? "Materializing…" : "Materialize 4 weeks"}</button>
-          </div>
-          {message && <div className="rounded-lg border border-gray-800 bg-black/20 px-3 py-2 text-xs text-gray-300">{message}</div>}
-        </div>
+        <span className="rounded-full border border-gray-700 bg-white/5 px-2.5 py-1 text-xs text-gray-300">{rules.length} rules</span>
       </div>
 
-      <div className="rounded-2xl border border-gray-800 bg-[#111118] p-4">
-        <div className="mb-4 flex items-center justify-between">
-          <div>
-            <h2 className="text-lg font-semibold text-white">Recurring Tasks</h2>
-            <p className="text-xs text-gray-500">Source rules; generated instances appear in Calendar as normal work_items.</p>
-          </div>
-          <span className="rounded-full bg-white/5 px-2 py-0.5 text-xs text-gray-400">{rules.length}</span>
+      {rules.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-gray-800 bg-black/10 px-4 py-10 text-center">
+          <div className="text-sm font-medium text-gray-300">No recurring tasks yet</div>
+          <div className="mt-1 text-xs text-gray-600">Create them through Systems and they will show up here.</div>
         </div>
-        {rules.length === 0 ? (
-          <div className="rounded-xl border border-dashed border-gray-800 bg-black/10 px-3 py-8 text-center text-sm text-gray-600">No recurring rules yet.</div>
-        ) : (
-          <div className="space-y-3">
-            {rules.map((rule) => {
-              const occurrences = [...(rule.recurring_work_occurrences || [])].sort((a, b) => new Date(a.scheduled_for).getTime() - new Date(b.scheduled_for).getTime());
-              return (
-                <div key={rule.id} className="rounded-xl border border-gray-800 bg-[#0d0d14] p-4">
+      ) : (
+        <div className="grid gap-3 xl:grid-cols-2">
+          {rules.map((rule) => {
+            const occurrences = [...(rule.recurring_work_occurrences || [])].sort((a, b) => new Date(a.scheduled_for).getTime() - new Date(b.scheduled_for).getTime());
+            const nextOccurrence = occurrences.find((occurrence) => new Date(occurrence.scheduled_for).getTime() >= Date.now()) || occurrences[0];
+            const cadenceLabel = rule.cadence_interval === 1
+              ? `Every ${rule.cadence_unit.slice(0, -1)}`
+              : `Every ${rule.cadence_interval} ${rule.cadence_unit}`;
+
+            return (
+              <article key={rule.id} className="overflow-hidden rounded-2xl border border-gray-800 bg-[#0d0d14] transition hover:border-gray-700 hover:bg-[#10101a]">
+                <div className="border-b border-gray-800/80 p-4">
                   <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <div className="font-semibold text-white">{rule.title}</div>
-                      <div className="mt-1 text-xs text-gray-500">{rule.owner_agent} · every {rule.cadence_interval} {rule.cadence_unit} · {rule.time_of_day} {rule.timezone}</div>
+                    <div className="min-w-0">
+                      <div className="truncate text-base font-semibold text-white">{rule.title}</div>
+                      <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-gray-500">
+                        <span className="rounded-full border border-blue-500/20 bg-blue-500/10 px-2 py-0.5 text-blue-200">{agentFor({ owner_agent: rule.owner_agent, target_agent_id: rule.target_agent_id } as WorkItem)}</span>
+                        <span>{cadenceLabel}</span>
+                        <span>·</span>
+                        <span>{rule.time_of_day} {rule.timezone}</span>
+                      </div>
                     </div>
-                    <span className={`rounded-full border px-2 py-0.5 text-[11px] ${rule.enabled ? "border-green-500/20 bg-green-500/10 text-green-200" : "border-gray-700 bg-gray-800 text-gray-400"}`}>{rule.enabled ? "enabled" : "paused"}</span>
-                  </div>
-                  <div className="mt-3 rounded-lg bg-black/20 px-3 py-2 text-xs leading-relaxed text-gray-300">{rule.instruction}</div>
-                  <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-gray-500">
-                    <span>Horizon: {rule.horizon_days}d</span>
-                    <span>·</span>
-                    <span>Materialized: {occurrences.length}</span>
-                    {occurrences[0] && <><span>·</span><span>Next: {formatDate(occurrences[0].scheduled_for)}</span></>}
-                    {rule.last_materialized_at && <><span>·</span><span>Last run: {formatDate(rule.last_materialized_at)}</span></>}
+                    <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[11px] ${rule.enabled ? "border-green-500/20 bg-green-500/10 text-green-200" : "border-gray-700 bg-gray-800 text-gray-400"}`}>{rule.enabled ? "enabled" : "paused"}</span>
                   </div>
                 </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
+
+                <div className="space-y-4 p-4">
+                  <p className="rounded-xl border border-gray-800 bg-black/20 px-3 py-3 text-sm leading-relaxed text-gray-300">{rule.instruction}</p>
+
+                  <div className="grid gap-2 sm:grid-cols-3">
+                    <MiniMetric label="Next run" value={nextOccurrence ? formatDate(nextOccurrence.scheduled_for) : "—"} />
+                    <MiniMetric label="Horizon" value={`${rule.horizon_days} days`} />
+                    <MiniMetric label="Scheduled" value={`${occurrences.length} items`} />
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 text-[11px] text-gray-500">
+                    <span>source: recurring rule</span>
+                    {rule.last_materialized_at && <><span>·</span><span>last materialized {formatDate(rule.last_materialized_at)}</span></>}
+                  </div>
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      )}
     </section>
+  );
+}
+
+function MiniMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-lg border border-gray-800 bg-black/20 px-3 py-2">
+      <div className="text-[10px] font-medium uppercase tracking-wide text-gray-600">{label}</div>
+      <div className="mt-1 truncate text-xs text-gray-200">{value}</div>
+    </div>
   );
 }
 
