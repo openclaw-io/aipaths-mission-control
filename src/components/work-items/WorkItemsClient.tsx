@@ -94,6 +94,7 @@ export function WorkItemsClient({ initialItems, initialEvents }: { initialItems:
   const [tab, setTab] = useState<Tab>("live");
   const [agentFilter, setAgentFilter] = useState("all");
   const [sourceFilter, setSourceFilter] = useState("all");
+  const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
   const supabase = createClient();
@@ -173,6 +174,12 @@ export function WorkItemsClient({ initialItems, initialEvents }: { initialItems:
       .map(([day, dayItems]) => [day, dayItems.sort(sortBySchedule)] as const);
   }, [scheduledLater]);
 
+  const selectedItem = selectedItemId ? items.find((item) => item.id === selectedItemId) || null : null;
+
+  function updateItem(updated: WorkItem) {
+    setItems((current) => current.map((item) => item.id === updated.id ? updated : item));
+  }
+
   const tabs: Array<{ id: Tab; label: string; count?: number }> = [
     { id: "live", label: "Live Board", count: readyNow.length + blocked.length + inProgress.length + failed.length },
     { id: "calendar", label: "Calendar", count: scheduledLater.length },
@@ -206,11 +213,12 @@ export function WorkItemsClient({ initialItems, initialEvents }: { initialItems:
         </select>
       </div>
 
-      {tab === "live" && <LiveBoardTab inProgress={inProgress} readyNow={readyNow} blocked={blocked} failed={failed} events={events} onRequeue={(item) => {
+      {tab === "live" && <LiveBoardTab inProgress={inProgress} readyNow={readyNow} blocked={blocked} failed={failed} events={events} onOpen={setSelectedItemId} onRequeue={(item) => {
         setItems((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, status: "ready", started_at: null, completed_at: null, updated_at: new Date().toISOString() } : candidate));
       }} />}
-      {tab === "calendar" && <CalendarTab grouped={scheduledByDay} />}
-      {tab === "logs" && <LogsTab events={events} items={items} />}
+      {tab === "calendar" && <CalendarTab grouped={scheduledByDay} onOpen={setSelectedItemId} />}
+      {tab === "logs" && <LogsTab events={events} items={items} onOpen={setSelectedItemId} />}
+      {selectedItem && <WorkItemDrawer item={selectedItem} events={events.filter((event) => event.entity_id === selectedItem.id)} onClose={() => setSelectedItemId(null)} onUpdated={updateItem} />}
     </div>
   );
 }
@@ -221,6 +229,7 @@ function LiveBoardTab({
   blocked,
   failed,
   events,
+  onOpen,
   onRequeue,
 }: {
   inProgress: WorkItem[];
@@ -228,19 +237,20 @@ function LiveBoardTab({
   blocked: WorkItem[];
   failed: WorkItem[];
   events: WorkEvent[];
+  onOpen: (id: string) => void;
   onRequeue: (item: WorkItem) => void;
 }) {
   return (
     <div className="mt-6 space-y-4">
-      <ProgressTab items={inProgress} events={events} />
-      <QueueColumn title="Next up" subtitle="ready now · scheduler can pick these" items={readyNow} />
-      <QueueColumn title="Blocked" subtitle="waiting dependencies before this can run" items={blocked} />
-      <FailedColumn items={failed} onRequeue={onRequeue} />
+      <ProgressTab items={inProgress} events={events} onOpen={onOpen} />
+      <QueueColumn title="Next up" subtitle="ready now · scheduler can pick these" items={readyNow} onOpen={onOpen} />
+      <QueueColumn title="Blocked" subtitle="waiting dependencies before this can run" items={blocked} onOpen={onOpen} />
+      <FailedColumn items={failed} onOpen={onOpen} onRequeue={onRequeue} />
     </div>
   );
 }
 
-function ProgressTab({ items, events }: { items: WorkItem[]; events: WorkEvent[] }) {
+function ProgressTab({ items, events, onOpen }: { items: WorkItem[]; events: WorkEvent[]; onOpen: (id: string) => void }) {
   return (
     <section className="mt-6 rounded-xl border border-gray-800 bg-[#111118] p-4">
       <div className="mb-4 flex items-center justify-between">
@@ -255,7 +265,7 @@ function ProgressTab({ items, events }: { items: WorkItem[]; events: WorkEvent[]
             const lastEvent = events.find((event) => event.entity_id === item.id);
             const mins = minutesSince(item.started_at);
             return (
-              <div key={item.id} className="rounded-xl border border-purple-500/20 bg-purple-500/5 p-4">
+              <button key={item.id} type="button" onClick={() => onOpen(item.id)} className="w-full rounded-xl border border-purple-500/20 bg-purple-500/5 p-4 text-left transition hover:border-purple-400/40 hover:bg-purple-500/10">
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <div className="text-sm font-semibold text-white">{item.title}</div>
@@ -273,7 +283,7 @@ function ProgressTab({ items, events }: { items: WorkItem[]; events: WorkEvent[]
                     Last event: <span className="text-gray-200">{pretty(lastEvent.event_type)}</span> · {formatDate(lastEvent.created_at)}
                   </div>
                 )}
-              </div>
+              </button>
             );
           })}
         </div>
@@ -282,7 +292,7 @@ function ProgressTab({ items, events }: { items: WorkItem[]; events: WorkEvent[]
   );
 }
 
-function CalendarTab({ grouped }: { grouped: Array<readonly [string, WorkItem[]]> }) {
+function CalendarTab({ grouped, onOpen }: { grouped: Array<readonly [string, WorkItem[]]>; onOpen: (id: string) => void }) {
   const today = new Date();
   const weekStart = new Date(today);
   weekStart.setHours(0, 0, 0, 0);
@@ -354,7 +364,7 @@ function CalendarTab({ grouped }: { grouped: Array<readonly [string, WorkItem[]]
         ) : (
           <div className="divide-y divide-gray-900">
             {selectedItems.map((item) => (
-              <div key={item.id} className="grid gap-3 py-3 text-sm md:grid-cols-[120px_1fr_160px]">
+              <button key={item.id} type="button" onClick={() => onOpen(item.id)} className="grid w-full gap-3 py-3 text-left text-sm transition hover:bg-white/[0.02] md:grid-cols-[120px_1fr_160px]">
                 <div className="text-xs text-gray-500">{new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit" }).format(new Date(item.scheduled_for!))}</div>
                 <div>
                   <div className="font-medium text-white">{item.title}</div>
@@ -364,7 +374,7 @@ function CalendarTab({ grouped }: { grouped: Array<readonly [string, WorkItem[]]
                   <span className="text-xs text-gray-400">{agentFor(item)}</span>
                   <StatusPill status={item.status} />
                 </div>
-              </div>
+              </button>
             ))}
           </div>
         )}
@@ -373,7 +383,7 @@ function CalendarTab({ grouped }: { grouped: Array<readonly [string, WorkItem[]]
   );
 }
 
-function LogsTab({ events, items }: { events: WorkEvent[]; items: WorkItem[] }) {
+function LogsTab({ events, items, onOpen }: { events: WorkEvent[]; items: WorkItem[]; onOpen: (id: string) => void }) {
   const itemById = new Map(items.map((item) => [item.id, item]));
   return (
     <section className="mt-6 rounded-xl border border-gray-800 bg-[#111118] p-4">
@@ -388,7 +398,7 @@ function LogsTab({ events, items }: { events: WorkEvent[]; items: WorkItem[] }) 
           {events.map((event) => {
             const item = event.entity_id ? itemById.get(event.entity_id) : undefined;
             return (
-              <div key={event.id} className="grid gap-3 py-3 text-sm md:grid-cols-[180px_1fr_140px]">
+              <button key={event.id} type="button" onClick={() => event.entity_id && onOpen(event.entity_id)} className="grid w-full gap-3 py-3 text-left text-sm transition hover:bg-white/[0.02] md:grid-cols-[180px_1fr_140px]">
                 <div className="text-xs text-gray-500">{formatDate(event.created_at)}</div>
                 <div>
                   <div className="font-medium text-white">{pretty(event.event_type)}</div>
@@ -397,7 +407,7 @@ function LogsTab({ events, items }: { events: WorkEvent[]; items: WorkItem[] }) 
                   </div>
                 </div>
                 <div className="text-xs text-gray-400 md:text-right">{event.actor || payloadString(event.payload, "agent") || "system"}</div>
-              </div>
+              </button>
             );
           })}
         </div>
@@ -406,7 +416,7 @@ function LogsTab({ events, items }: { events: WorkEvent[]; items: WorkItem[] }) 
   );
 }
 
-function QueueColumn({ title, subtitle, items }: { title: string; subtitle: string; items: WorkItem[] }) {
+function QueueColumn({ title, subtitle, items, onOpen }: { title: string; subtitle: string; items: WorkItem[]; onOpen: (id: string) => void }) {
   return (
     <section className="rounded-xl border border-gray-800 bg-[#111118] p-4">
       <div className="mb-3 flex items-start justify-between gap-3">
@@ -417,13 +427,13 @@ function QueueColumn({ title, subtitle, items }: { title: string; subtitle: stri
         <span className="rounded-full bg-white/5 px-2 py-0.5 text-xs text-gray-400">{items.length}</span>
       </div>
       <div className="space-y-2">
-        {items.length === 0 ? <p className="py-6 text-center text-xs text-gray-700">Empty</p> : items.slice(0, 20).map((item) => <WorkCard key={item.id} item={item} />)}
+        {items.length === 0 ? <p className="py-6 text-center text-xs text-gray-700">Empty</p> : items.slice(0, 20).map((item) => <WorkCard key={item.id} item={item} onOpen={() => onOpen(item.id)} />)}
       </div>
     </section>
   );
 }
 
-function FailedColumn({ items, onRequeue }: { items: WorkItem[]; onRequeue: (item: WorkItem) => void }) {
+function FailedColumn({ items, onOpen, onRequeue }: { items: WorkItem[]; onOpen: (id: string) => void; onRequeue: (item: WorkItem) => void }) {
   const [busyId, setBusyId] = useState<string | null>(null);
 
   async function requeue(item: WorkItem) {
@@ -452,7 +462,7 @@ function FailedColumn({ items, onRequeue }: { items: WorkItem[]; onRequeue: (ite
       </div>
       <div className="space-y-2">
         {items.length === 0 ? <p className="py-6 text-center text-xs text-red-200/30">No failed work items.</p> : items.slice(0, 20).map((item) => (
-          <WorkCard key={item.id} item={item}>
+          <WorkCard key={item.id} item={item} onOpen={() => onOpen(item.id)}>
             <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-red-500/10 pt-3">
               <div className="space-y-1 text-xs text-red-200/60">
                 <div>{payloadString(item.payload, "dispatch_failure_reason") || payloadString(item.payload, "error") || "No failure reason stored"}</div>
@@ -474,13 +484,169 @@ function FailedColumn({ items, onRequeue }: { items: WorkItem[]; onRequeue: (ite
   );
 }
 
-function WorkCard({ item, compact = false, children }: { item: WorkItem; compact?: boolean; children?: ReactNode }) {
+
+function toDateTimeLocal(value: string | null | undefined) {
+  const date = value ? new Date(value) : new Date(Date.now() + 30 * 60 * 1000);
+  const offsetMs = date.getTimezoneOffset() * 60000;
+  return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
+}
+
+function PayloadPreview({ payload }: { payload: Record<string, unknown> | null }) {
+  if (!payload) return <p className="text-xs text-gray-600">No payload.</p>;
+  return (
+    <pre className="max-h-56 overflow-auto rounded-lg border border-gray-800 bg-black/30 p-3 text-[11px] leading-relaxed text-gray-400">
+      {JSON.stringify(payload, null, 2)}
+    </pre>
+  );
+}
+
+function WorkItemDrawer({
+  item,
+  events,
+  onClose,
+  onUpdated,
+}: {
+  item: WorkItem;
+  events: WorkEvent[];
+  onClose: () => void;
+  onUpdated: (item: WorkItem) => void;
+}) {
+  const [scheduledFor, setScheduledFor] = useState(() => toDateTimeLocal(item.scheduled_for));
+  const [busy, setBusy] = useState<"run-now" | "reschedule" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const canReschedule = ["ready", "draft", "blocked"].includes(item.status);
+  const canRunNow = item.status === "ready";
+  const currentUrl = payloadString(item.payload, "current_url") || payloadString(item.payload, "url");
+
+  useEffect(() => {
+    setScheduledFor(toDateTimeLocal(item.scheduled_for));
+  }, [item.id, item.scheduled_for]);
+
+  async function reschedule(value: string, mode: "run-now" | "reschedule") {
+    setBusy(mode);
+    setError(null);
+    try {
+      const res = await fetch(`/api/work-items/${item.id}/reschedule`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          scheduled_for: value,
+          reason: mode === "run-now" ? "manual_run_now_from_work_item_drawer" : "manual_reschedule_from_work_item_drawer",
+          mode,
+        }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      onUpdated((await res.json()) as WorkItem);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Action failed");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/60 backdrop-blur-sm" onClick={onClose}>
+      <aside className="h-full w-full max-w-2xl overflow-y-auto border-l border-gray-800 bg-[#0b0b12] shadow-2xl" onClick={(event) => event.stopPropagation()}>
+        <div className="sticky top-0 z-10 border-b border-gray-800 bg-[#0b0b12]/95 p-5 backdrop-blur">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <div className="mb-2 flex flex-wrap items-center gap-2">
+                <StatusPill status={item.status} />
+                <span className="text-xs text-gray-500">{item.id.slice(0, 8)}</span>
+              </div>
+              <h2 className="text-lg font-semibold text-white">{item.title}</h2>
+              <p className="mt-1 text-xs text-gray-500">{agentFor(item)} · {pretty(item.source_type)} · {pretty(item.kind)}</p>
+            </div>
+            <button type="button" onClick={onClose} className="rounded-lg border border-gray-700 px-3 py-1.5 text-sm text-gray-300 hover:bg-white/5">Close</button>
+          </div>
+        </div>
+
+        <div className="space-y-5 p-5">
+          <section className="rounded-xl border border-gray-800 bg-[#111118] p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <h3 className="font-semibold text-white">Actions</h3>
+              {!canReschedule && <span className="text-xs text-gray-600">Actions available for ready/draft/blocked only</span>}
+            </div>
+            <div className="grid gap-3 md:grid-cols-[1fr_auto_auto]">
+              <input
+                type="datetime-local"
+                value={scheduledFor}
+                onChange={(event) => setScheduledFor(event.target.value)}
+                disabled={!canReschedule || busy !== null}
+                className="rounded-lg border border-gray-700 bg-[#0d0d14] px-3 py-2 text-sm text-white focus:outline-none disabled:opacity-50"
+              />
+              <button
+                type="button"
+                onClick={() => reschedule(new Date(scheduledFor).toISOString(), "reschedule")}
+                disabled={!canReschedule || busy !== null || !scheduledFor}
+                className="rounded-lg border border-blue-400/30 bg-blue-500/10 px-3 py-2 text-sm font-medium text-blue-100 hover:bg-blue-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {busy === "reschedule" ? "Saving…" : "Reschedule"}
+              </button>
+              <button
+                type="button"
+                onClick={() => reschedule("now", "run-now")}
+                disabled={!canReschedule || busy !== null}
+                className="rounded-lg border border-green-400/30 bg-green-500/10 px-3 py-2 text-sm font-medium text-green-100 hover:bg-green-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {busy === "run-now" ? "Running…" : "Run now"}
+              </button>
+            </div>
+            {error && <p className="mt-3 rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-200">{error}</p>}
+          </section>
+
+          <section className="grid gap-3 md:grid-cols-2">
+            <Metric label="Scheduled" value={formatDate(item.scheduled_for)} />
+            <Metric label="Started" value={formatDate(item.started_at)} />
+            <Metric label="Completed" value={formatDate(item.completed_at)} />
+            <Metric label="Updated" value={formatDate(item.updated_at)} />
+            <Metric label="Requested by" value={item.requested_by || "—"} />
+            <Metric label="Source" value={item.source_id ? `${pretty(item.source_type)} · ${item.source_id.slice(0, 8)}` : pretty(item.source_type)} />
+          </section>
+
+          {currentUrl && (
+            <section className="rounded-xl border border-gray-800 bg-[#111118] p-4">
+              <h3 className="mb-2 font-semibold text-white">Current URL</h3>
+              <a href={currentUrl} target="_blank" rel="noreferrer" className="break-all text-sm text-blue-300 hover:text-blue-200">{currentUrl}</a>
+            </section>
+          )}
+
+          <section className="rounded-xl border border-gray-800 bg-[#111118] p-4">
+            <h3 className="mb-3 font-semibold text-white">Event timeline</h3>
+            {events.length === 0 ? (
+              <p className="py-4 text-center text-xs text-gray-600">No events in current log window.</p>
+            ) : (
+              <div className="space-y-3">
+                {events.map((event) => (
+                  <div key={event.id} className="rounded-lg border border-gray-800 bg-black/20 p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="text-sm font-medium text-white">{pretty(event.event_type)}</div>
+                      <div className="text-xs text-gray-500">{formatDate(event.created_at)}</div>
+                    </div>
+                    <div className="mt-1 text-xs text-gray-500">{event.actor || "system"}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section className="rounded-xl border border-gray-800 bg-[#111118] p-4">
+            <h3 className="mb-3 font-semibold text-white">Payload</h3>
+            <PayloadPreview payload={item.payload} />
+          </section>
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+function WorkCard({ item, compact = false, children, onOpen }: { item: WorkItem; compact?: boolean; children?: ReactNode; onOpen?: () => void }) {
   return (
     <div className="rounded-lg border border-gray-800 bg-[#0d0d14] p-3">
-      <div className="flex items-start justify-between gap-2">
+      <button type="button" onClick={onOpen} className="flex w-full items-start justify-between gap-2 text-left">
         <div className={`font-medium text-white ${compact ? "text-xs" : "text-sm"}`}>{item.title}</div>
         <StatusPill status={item.status} />
-      </div>
+      </button>
       <div className="mt-2 flex flex-wrap gap-2 text-xs text-gray-500">
         <span>{agentFor(item)}</span>
         <span>·</span>
