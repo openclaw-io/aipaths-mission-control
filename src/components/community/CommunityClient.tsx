@@ -70,6 +70,22 @@ function getPrimaryWorkItem(itemId: string, workItems: LinkedWorkItem[]) {
     .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0] || null;
 }
 
+function getPublishWorkItem(itemId: string, workItems: LinkedWorkItem[]) {
+  return [...workItems]
+    .filter((item) => {
+      const payload = item.payload || {};
+      const isLinked = item.source_id === itemId || payload.pipeline_item_id === itemId;
+      const isPublish = payload.action === "publish_community_post" || payload.relation_type === "publish";
+      const isOpen = ["draft", "ready", "blocked", "in_progress"].includes(item.status);
+      return isLinked && isPublish && isOpen;
+    })
+    .sort((a, b) => new Date(a.scheduled_for || a.created_at).getTime() - new Date(b.scheduled_for || b.created_at).getTime())[0] || null;
+}
+
+function getScheduledDate(item: CommunityItem, workItems: LinkedWorkItem[]) {
+  return getPublishWorkItem(item.id, workItems)?.scheduled_for || null;
+}
+
 function formatDate(value: string | null) {
   if (!value) return "—";
   return new Intl.DateTimeFormat("en-GB", {
@@ -83,9 +99,13 @@ function hasCopy(item: CommunityItem) {
   return Boolean(getCopy(getMetadata(item)).trim());
 }
 
-function tabItems(items: CommunityItem[], tab: TabKey) {
+function tabItems(items: CommunityItem[], tab: TabKey, workItems: LinkedWorkItem[]) {
   if (tab === "review") return items.filter((item) => item.status === "ready_for_review");
-  if (tab === "scheduled") return items.filter((item) => item.status === "scheduled").sort((a, b) => new Date(a.scheduled_for || a.updated_at).getTime() - new Date(b.scheduled_for || b.updated_at).getTime());
+  if (tab === "scheduled") {
+    return items
+      .filter((item) => item.status === "scheduled" && getPublishWorkItem(item.id, workItems)?.scheduled_for)
+      .sort((a, b) => new Date(getScheduledDate(a, workItems) || a.updated_at).getTime() - new Date(getScheduledDate(b, workItems) || b.updated_at).getTime());
+  }
   if (tab === "published") return items.filter((item) => ["published", "live"].includes(item.status));
   return items.filter((item) => ["parked", "rejected", "archived"].includes(item.status));
 }
@@ -100,9 +120,9 @@ export function CommunityClient({ initialItems, initialWorkItems }: { initialIte
   const [reviewNotes, setReviewNotes] = useState("");
   const [busyAction, setBusyAction] = useState<string | null>(null);
 
-  const visibleItems = useMemo(() => tabItems(items, tab), [items, tab]);
+  const visibleItems = useMemo(() => tabItems(items, tab, workItems), [items, tab, workItems]);
   const selectedReviewItem = useMemo(() => items.find((item) => item.id === reviewId) || null, [items, reviewId]);
-  const counts = useMemo(() => Object.fromEntries(TABS.map((t) => [t.key, tabItems(items, t.key).length])) as Record<TabKey, number>, [items]);
+  const counts = useMemo(() => Object.fromEntries(TABS.map((t) => [t.key, tabItems(items, t.key, workItems).length])) as Record<TabKey, number>, [items, workItems]);
 
   function openReview(item: CommunityItem) {
     setSelectedId(null);
@@ -213,14 +233,14 @@ export function CommunityClient({ initialItems, initialWorkItems }: { initialIte
                           Review
                         </button>
                       )}
-                      {tab === "scheduled" && <div>{formatDate(item.scheduled_for)}</div>}
+                      {tab === "scheduled" && <div>{formatDate(getScheduledDate(item, workItems))}</div>}
                       {tab === "published" && <div>{formatDate(item.published_at)}</div>}
                     </div>
                   </div>
 
                   <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-gray-400">{getCopyPreview(metadata)}</p>
 
-                  {isSelected && !isReview && <CommunityDetails item={item} workItem={primaryWorkItem} />}
+                  {isSelected && !isReview && <CommunityDetails item={item} workItem={primaryWorkItem} publishWorkItem={getPublishWorkItem(item.id, workItems)} />}
                 </article>
               );
             })}
@@ -348,7 +368,7 @@ function ReviewDrawer({
   );
 }
 
-function CommunityDetails({ item, workItem }: { item: CommunityItem; workItem: LinkedWorkItem | null }) {
+function CommunityDetails({ item, workItem, publishWorkItem }: { item: CommunityItem; workItem: LinkedWorkItem | null; publishWorkItem: LinkedWorkItem | null }) {
   const metadata = getMetadata(item);
   const pollOptions = metadata.copy?.poll_options || [];
 
@@ -357,10 +377,11 @@ function CommunityDetails({ item, workItem }: { item: CommunityItem; workItem: L
       <div className="grid gap-3 text-sm md:grid-cols-2">
         <Detail label="Type" value={prettyKind(metadata.kind)} />
         <Detail label="Channel" value={getChannelLabel(metadata)} />
-        <Detail label="Scheduled" value={formatDate(item.scheduled_for)} />
+        <Detail label="Scheduled" value={formatDate(publishWorkItem?.scheduled_for || null)} />
         <Detail label="Published" value={formatDate(item.published_at)} />
         {metadata.source?.type && <Detail label="Source" value={metadata.source.type} />}
-        {workItem && <Detail label="Work item" value={`${workItem.title} · ${workItem.status}`} />}
+        {publishWorkItem && <Detail label="Publish task" value={`${publishWorkItem.title} · ${publishWorkItem.status}`} />}
+        {workItem && <Detail label="Latest work item" value={`${workItem.title} · ${workItem.status}`} />}
       </div>
 
       {metadata.source?.url && (

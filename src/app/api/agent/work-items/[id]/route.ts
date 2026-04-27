@@ -79,6 +79,160 @@ async function notifyWorkItem(workItemId: string, agent: string, title: string) 
   }).catch(() => {});
 }
 
+function communityPublishTarget(metadata: JsonRecord) {
+  const destinationKey = typeof metadata.intel_destination_key === "string" ? metadata.intel_destination_key : null;
+  const destinationLabel = typeof metadata.destination_label === "string" ? metadata.destination_label.toLowerCase() : "";
+  const kind = typeof metadata.kind === "string" ? metadata.kind : null;
+  const source = (metadata.source || {}) as JsonRecord;
+  const sourceType = typeof source.type === "string" ? source.type : null;
+
+  if (destinationKey === "news" || destinationLabel === "news" || kind === "news" || metadata.intel) {
+    return { channelId: "1498256983122378883", channelName: "🛰️_radar_ia", label: "news/radar" };
+  }
+  if (destinationKey === "poll" || destinationLabel.includes("encuesta") || kind === "poll") {
+    return { channelId: "1283759728798994533", channelName: "📔_encuestas", label: "poll" };
+  }
+  if (["blog", "guide", "doc", "video"].includes(String(sourceType || destinationKey || kind || ""))) {
+    return { channelId: "1445797470662692864", channelName: "_📣anuncios", label: "content announcement" };
+  }
+  return { channelId: "1498256983122378883", channelName: "🛰️_radar_ia", label: "default community update" };
+}
+
+async function ensureCommunityPublishWorkItem(db: ReturnType<typeof createServiceClient>, input: {
+  pipelineItemId: string;
+  title: string;
+  scheduledFor: string;
+  priority?: string | null;
+  requestedBy?: string | null;
+  metadata?: JsonRecord | null;
+  copyText?: string | null;
+}) {
+  const openStatuses = ["draft", "ready", "blocked", "in_progress"];
+  const { data: existingItems, error: existingError } = await db
+    .from("work_items")
+    .select("id, status, payload")
+    .in("source_type", ["pipeline_item", "service"])
+    .eq("source_id", input.pipelineItemId)
+    .in("status", openStatuses)
+    .order("created_at", { ascending: false });
+
+  if (existingError) throw existingError;
+
+  const existingPublish = (existingItems || []).find((item: { payload?: JsonRecord | null }) => {
+    const payload = (item.payload || {}) as JsonRecord;
+    return payload.action === "publish_community_post" || payload.relation_type === "publish";
+  });
+
+  const metadata = input.metadata || {};
+  const target = communityPublishTarget(metadata);
+  const instruction = [
+    `Publish community post "${input.title}".`,
+    `Pipeline item ID: ${input.pipelineItemId}.`,
+    "",
+    "Target channel contract:",
+    `- Publish to <#${target.channelId}> (${target.channelName}) because this is a ${target.label}.`,
+    "- Do not publish news/radar items in #anuncios. #anuncios is only for blogs, guides, videos, product/content announcements, or similar major content launches.",
+    "- Polls/engagement questions go to #📔_encuestas when the post type is a poll.",
+    "",
+    "Message formatting contract:",
+    "- Publish only the approved copy from the pipeline card, but wrap every raw URL as <https://...> so Discord suppresses link previews/embeds.",
+    "- Do not add source-link previews or Discord embeds unless Gonza explicitly asks.",
+    "",
+    "After publishing:",
+    "- Complete this work item with current_url/published_at if available.",
+    "- Send the publication log/update to <#1473660854800224316>, not to the private director channel.",
+    `- Suggested log format: Anuncio: ${input.title}\n\nLo publiqué en #${target.channelName} con el enfoque aprobado para comunidad.\n\nPost: [ver post](<POST_URL>)`,
+    input.copyText ? "" : null,
+    input.copyText ? "Approved copy:" : null,
+    input.copyText || null,
+  ].filter(Boolean).join("\n");
+
+  if (existingPublish?.id) {
+    const { data: updated, error } = await db
+      .from("work_items")
+      .update({
+        title: `Publish community post: ${input.title}`,
+        instruction,
+        status: existingPublish.status === "in_progress" ? "in_progress" : "ready",
+        priority: input.priority || "medium",
+        owner_agent: "community",
+        target_agent_id: "community",
+        requested_by: input.requestedBy || "mission-control",
+        scheduled_for: input.scheduledFor,
+        payload: {
+          ...((existingPublish.payload || {}) as JsonRecord),
+          trigger: "community_schedule",
+          pipeline_type: "community_post",
+          pipeline_item_id: input.pipelineItemId,
+          relation_type: "publish",
+          action: "publish_community_post",
+          target_channel_id: target.channelId,
+          target_channel_name: target.channelName,
+          log_channel_id: "1473660854800224316",
+          suppress_link_previews: true,
+        },
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", existingPublish.id)
+      .select("id")
+      .single();
+    if (error) throw error;
+    return { id: updated.id as string, created: false };
+  }
+
+  const { data: inserted, error } = await db
+    .from("work_items")
+    .insert({
+      kind: "task",
+      source_type: "pipeline_item",
+      source_id: input.pipelineItemId,
+      title: `Publish community post: ${input.title}`,
+      instruction,
+      status: "ready",
+      priority: input.priority || "medium",
+      owner_agent: "community",
+      target_agent_id: "community",
+      requested_by: input.requestedBy || "mission-control",
+      scheduled_for: input.scheduledFor,
+      payload: {
+        trigger: "community_schedule",
+        pipeline_type: "community_post",
+        pipeline_item_id: input.pipelineItemId,
+        relation_type: "publish",
+        action: "publish_community_post",
+        target_channel_id: target.channelId,
+        target_channel_name: target.channelName,
+        log_channel_id: "1473660854800224316",
+        suppress_link_previews: true,
+      },
+    })
+    .select("id")
+    .single();
+
+  if (error) throw error;
+
+  const { error: mapError } = await db.from("pipeline_work_map").insert({
+    pipeline_item_id: input.pipelineItemId,
+    work_item_id: inserted.id,
+    relation_type: "publish",
+  });
+  if (mapError && !String(mapError.message || "").includes("duplicate")) throw mapError;
+
+  await db.from("pipeline_events").insert({
+    pipeline_item_id: input.pipelineItemId,
+    event_type: "pipeline_item.publish_work_scheduled",
+    actor: "work-item-completion",
+    payload: {
+      work_item_id: inserted.id,
+      relation_type: "publish",
+      scheduled_for: input.scheduledFor,
+      source: "work_items",
+    },
+  });
+
+  return { id: inserted.id as string, created: true };
+}
+
 async function createCommunityAnnouncementForGuide(db: ReturnType<typeof createServiceClient>, input: {
   guide: JsonRecord;
   url: string;
@@ -342,19 +496,32 @@ export async function PATCH(
       const scheduledFor = extractCommunityScheduledFor(body as Record<string, unknown>);
       const { data: communityItem } = await db
         .from("pipeline_items")
-        .select("metadata, scheduled_for")
+        .select("metadata, title, priority, requested_by")
         .eq("id", pipelineItemId)
         .eq("pipeline_type", "community_post")
         .maybeSingle();
 
       if (communityItem) {
         const communityMetadata = (communityItem.metadata || {}) as JsonRecord;
-        const finalScheduledFor = scheduledFor || (typeof communityItem.scheduled_for === "string" ? communityItem.scheduled_for : null);
+        const copyMetadata = (communityMetadata.copy || {}) as JsonRecord;
+        const finalScheduledFor = scheduledFor;
+        const publishWork = finalScheduledFor
+          ? await ensureCommunityPublishWorkItem(db, {
+              pipelineItemId,
+              title: String(communityItem.title || data.title || "Community post"),
+              scheduledFor: finalScheduledFor,
+              priority: typeof communityItem.priority === "string" ? communityItem.priority : data.priority,
+              requestedBy: typeof communityItem.requested_by === "string" ? communityItem.requested_by : data.requested_by,
+              metadata: communityMetadata,
+              copyText: typeof copyMetadata.text === "string" ? copyMetadata.text : null,
+            })
+          : null;
+
         await db
           .from("pipeline_items")
           .update({
             status: finalScheduledFor ? "scheduled" : "approved",
-            scheduled_for: finalScheduledFor,
+            scheduled_for: null,
             metadata: {
               ...communityMetadata,
               schedule: {
@@ -362,11 +529,14 @@ export async function PATCH(
                 scheduled_for: finalScheduledFor,
                 scheduled_at: new Date().toISOString(),
                 scheduled_by: data.owner_agent || "community",
+                source: "work_items",
+                publish_work_item_id: publishWork?.id || null,
               },
               runtime_feedback: {
                 ...((communityMetadata.runtime_feedback || {}) as JsonRecord),
-                last_status: finalScheduledFor ? "scheduled" : "schedule_missing_date",
+                last_status: finalScheduledFor ? "publish_work_item_scheduled" : "schedule_missing_date",
                 last_work_item_id: data.id,
+                publish_work_item_id: publishWork?.id || null,
                 updated_at: new Date().toISOString(),
               },
             },
