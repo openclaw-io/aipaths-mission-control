@@ -154,7 +154,9 @@ export function YouTubeDecisionBoard({ initialItems, initialWorkItems }: { initi
   }, [selectedItem]);
 
   async function submitQuickAction(model: BoardItemModel, action: QuickAction) {
-    if (!drawerState) return;
+    const actionState = drawerState && selectedId === model.item.id
+      ? drawerState
+      : { gateKey: model.currentGateKey, note: "", workItemRelationType: model.currentGateKey };
 
     setBusyAction(`${model.item.id}:${action}`);
     try {
@@ -163,9 +165,9 @@ export function YouTubeDecisionBoard({ initialItems, initialWorkItems }: { initi
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           action,
-          gateKey: drawerState.gateKey,
-          note: drawerState.note,
-          workItemRelationType: drawerState.workItemRelationType,
+          gateKey: actionState.gateKey,
+          note: actionState.note,
+          workItemRelationType: actionState.workItemRelationType,
           createWorkItem: action === "request_rework" || action === "send_to_agent",
         }),
       });
@@ -196,7 +198,7 @@ export function YouTubeDecisionBoard({ initialItems, initialWorkItems }: { initi
         <div>
           <h1 className="text-2xl font-bold text-white">YouTube</h1>
           <p className="mt-1 max-w-3xl text-sm text-gray-500">
-            Human decisions, agent work, and ready-to-record items are separated so Gonza only sees the calls that actually need human judgment.
+            Concept first. Gonza only sees the idea, the reason it might matter, and one primary action to move it forward.
           </p>
         </div>
         <div className="flex flex-wrap gap-3 text-sm text-gray-400">
@@ -230,7 +232,9 @@ export function YouTubeDecisionBoard({ initialItems, initialWorkItems }: { initi
                       key={model.item.id}
                       model={model}
                       selected={selectedId === model.item.id}
+                      busyAction={busyAction}
                       onSelect={() => setSelectedId(model.item.id)}
+                      onQuickAction={(action) => submitQuickAction(model, action)}
                     />
                   ))}
                 </div>
@@ -255,15 +259,28 @@ export function YouTubeDecisionBoard({ initialItems, initialWorkItems }: { initi
   );
 }
 
-function CardButton({ model, selected, onSelect }: { model: BoardItemModel; selected: boolean; onSelect: () => void }) {
-  const { item, metadata, responsibility, currentGateKey, currentGate, openWorkItem, scores } = model;
+function CardButton({
+  model,
+  selected,
+  busyAction,
+  onSelect,
+  onQuickAction,
+}: {
+  model: BoardItemModel;
+  selected: boolean;
+  busyAction: string | null;
+  onSelect: () => void;
+  onQuickAction: (action: QuickAction) => void;
+}) {
+  const { item, metadata, responsibility, currentGateKey, openWorkItem } = model;
   const badge = RESPONSIBILITY_BADGES[responsibility.bucket];
+  const concept = stringOrFallback(metadata.concept || metadata.overview?.concept || metadata.decision_summary, "No concept saved yet.");
+  const why = stringOrFallback(metadata.overview?.why_it_matters || metadata.evidence?.why_it_matters || metadata.next_action, "Needs first validation.");
+  const isBusy = (action: QuickAction) => busyAction === `${item.id}:${action}`;
 
   return (
-    <button
-      type="button"
-      onClick={onSelect}
-      className={`w-full rounded-2xl border p-4 text-left transition ${
+    <article
+      className={`w-full rounded-2xl border p-4 transition ${
         selected ? "border-blue-500 bg-blue-500/5" : "border-gray-800 bg-black/15 hover:border-gray-700 hover:bg-white/5"
       }`}
     >
@@ -272,38 +289,48 @@ function CardButton({ model, selected, onSelect }: { model: BoardItemModel; sele
           <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
             {metadata.pillar && <span>{metadata.pillar}</span>}
             <span className={`rounded-full border px-2 py-0.5 ${badge.className}`}>{badge.label}</span>
-            <span className={`rounded-full px-2 py-0.5 ${GATE_STATUS_STYLES[getGateStatus(metadata, currentGateKey)]}`}>{formatGateStatus(getGateStatus(metadata, currentGateKey))}</span>
-            <span className={`rounded-full px-2 py-0.5 ${ITEM_STATUS_STYLES[item.status] || "bg-gray-500/20 text-gray-300"}`}>{formatItemStatus(item.status)}</span>
+            {openWorkItem && <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-sky-300">working</span>}
           </div>
           <h3 className="mt-2 text-base font-semibold text-white">{item.title}</h3>
-          <p className="mt-2 text-sm text-gray-400">Current gate: {YOUTUBE_GATE_META[currentGateKey].label}</p>
+          <p className="mt-2 text-sm leading-6 text-gray-300">{concept}</p>
+          <p className="mt-3 text-sm leading-6 text-gray-500">{why}</p>
         </div>
-        <div className="shrink-0 text-right text-xs text-gray-500">
-          <div>{formatDate(item.updated_at)}</div>
-          {openWorkItem && <div className="mt-2 text-sky-300">open work: {openWorkItem.status}</div>}
-        </div>
+        <div className="shrink-0 text-right text-xs text-gray-500">{formatDate(item.updated_at)}</div>
       </div>
 
-      <div className="mt-4 grid gap-2 sm:grid-cols-5">
-        <ScorePill label="Reach" value={scores.reach} />
-        <ScorePill label="Retention" value={scores.retention} />
-        <ScorePill label="Conversion" value={scores.conversion} />
-        <ScorePill label="Confidence" value={scores.confidence} />
-        <ScorePill label="Priority" value={scores.priority} highlight />
-      </div>
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-gray-800 pt-4">
+        <button type="button" onClick={onSelect} className="rounded-lg bg-white/10 px-3 py-2 text-sm text-white transition hover:bg-white/15">
+          Ver detalles
+        </button>
 
-      <div className="mt-4 rounded-xl border border-gray-800 bg-black/20 p-3">
-        <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">What&apos;s needed</p>
-        <div className="mt-3 grid gap-3 md:grid-cols-2">
-          {getCardNeedRows(model).map((row) => (
-            <NeedRow key={row.label} label={row.label} value={row.value} />
-          ))}
-          {!currentGate.reason && !currentGate.evidence_summary && responsibility.bucket === "killed_archived" && (
-            <NeedRow label="Outcome" value="This idea is no longer active." />
+        <div className="flex flex-wrap gap-2">
+          {responsibility.bucket === "agent_working" && (
+            <span className="rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-sm text-sky-300">En progreso</span>
+          )}
+
+          {(responsibility.bucket === "agent_next" || responsibility.bucket === "needs_gonza") && (
+            <>
+              <ActionButton label="Descartar" variant="danger" busy={isBusy("kill")} onClick={() => onQuickAction("kill")} />
+              <ActionButton label="Avanzar" variant="primary" busy={isBusy("send_to_agent")} onClick={() => onQuickAction("send_to_agent")} />
+            </>
+          )}
+
+          {responsibility.bucket === "ready_for_gonza_review" && (
+            <>
+              <ActionButton label="Pedir rework" variant="warning" busy={isBusy("request_rework")} onClick={() => onQuickAction("request_rework")} />
+              <ActionButton label="Descartar" variant="danger" busy={isBusy("kill")} onClick={() => onQuickAction("kill")} />
+              <ActionButton label="Aprobar" variant="success" busy={isBusy("approve")} onClick={() => onQuickAction("approve")} />
+            </>
+          )}
+
+          {responsibility.bucket === "ready_to_record" && (
+            <ActionButton label="Aprobar siguiente" variant="success" busy={isBusy("approve")} onClick={() => onQuickAction("approve")} />
           )}
         </div>
       </div>
-    </button>
+
+      <p className="mt-3 text-xs text-gray-600">Internal step: {YOUTUBE_GATE_META[currentGateKey].label}</p>
+    </article>
   );
 }
 
