@@ -19,6 +19,7 @@ export interface CampaignMetric {
   subject_en?: string | null;
   subject_es?: string | null;
   status?: string | null;
+  created_at?: string | null;
   scheduled_for?: string | null;
   sent_at?: string | null;
   total_recipients?: number | null;
@@ -28,6 +29,31 @@ export interface CampaignMetric {
   total_clicks?: number | null;
   total_bounces?: number | null;
   total_complaints?: number | null;
+  recipient_row_count?: number | null;
+  is_real_campaign?: boolean;
+  is_test_row?: boolean;
+  is_legacy_incomplete?: boolean;
+  activity_at?: string | null;
+  month_key?: string | null;
+}
+
+export interface CampaignMetricsRollup {
+  campaignCount: number;
+  totalRecipients: number;
+  totalSent: number;
+  totalDelivered: number;
+  totalOpens: number;
+  totalClicks: number;
+  totalBounces: number;
+}
+
+export interface CampaignMetricsSummary {
+  monthLabel: string;
+  realCampaigns: number;
+  testRows: number;
+  legacyIncompleteRows: number;
+  allTime: CampaignMetricsRollup;
+  currentMonth: CampaignMetricsRollup;
 }
 
 export interface EmailCampaignPipelineItem {
@@ -63,6 +89,7 @@ export interface EmailCampaignPageData {
   workItems: EmailCampaignWorkItem[];
   audienceSnapshot: AudienceSnapshot;
   campaignMetrics: CampaignMetric[];
+  campaignMetricsSummary: CampaignMetricsSummary;
   errors: string[];
 }
 
@@ -90,7 +117,6 @@ interface CampaignCardData {
   sectionSlots: string[];
   canonicalScheduledFor: string | null;
   campaignMetric: CampaignMetric | null;
-  notionCampaignId: string | null;
   isExpiredCandidate: boolean;
   isCandidate: boolean;
   sortTimestamp: number;
@@ -125,7 +151,7 @@ const SECTION_META: Array<{ key: SectionKey; title: string; description: string 
   {
     key: "sent",
     title: "Sent / Logs",
-    description: "Completed sends, send attempts, and operational logs.",
+    description: "Pipeline-side send logs and historical work items. Newsletter delivery metrics live in the section above.",
   },
   {
     key: "expired",
@@ -161,6 +187,10 @@ function readString(value: unknown): string | null {
 
 function readBoolean(value: unknown): boolean | null {
   return typeof value === "boolean" ? value : null;
+}
+
+function readNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function readDate(value: unknown): string | null {
@@ -282,15 +312,6 @@ function normalizeKey(value: string | null): string | null {
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/[^a-z0-9]+/g, " ")
     .trim() ?? null;
-}
-
-function getNotionCampaignId(metadata: JsonObject): string | null {
-  return (
-    readString(metadata.notion_campaign_id) ??
-    readString(metadata.notion_id) ??
-    readString(metadata.notionCardId) ??
-    readString(metadata.card_id)
-  );
 }
 
 function getSupabaseCampaignId(metadata: JsonObject): string | null {
@@ -507,7 +528,6 @@ function prepareCards(data: EmailCampaignPageData): CampaignCardData[] {
         sectionSlots: getSectionSlots(metadata),
         canonicalScheduledFor,
         campaignMetric: metricForItem(item, data.campaignMetrics),
-        notionCampaignId: getNotionCampaignId(metadata),
         isExpiredCandidate,
         isCandidate,
         sortTimestamp: getSortTimestamp(canonicalScheduledFor, expiresAt, item),
@@ -542,26 +562,290 @@ function formatNumber(value: number | null | undefined): string {
 }
 
 function formatRate(numerator: number | null | undefined, denominator: number | null | undefined): string {
-  if (!numerator || !denominator) {
+  if (numerator == null || denominator == null || denominator <= 0) {
     return "—";
   }
 
   return `${Math.round((numerator / denominator) * 100)}%`;
 }
 
-function commandFor(kind: "dry" | "test" | "send", notionCampaignId: string | null): string {
-  const cardId = notionCampaignId ?? "<notion-campaign-id>";
-  const base = `cd ~/Documents/openclaw/infra/notion-dispatcher && npm run send-campaign -- --card-id=${cardId}`;
+function metricTitle(metric: CampaignMetric): string {
+  return (
+    readString(metric.title_es) ??
+    readString(metric.title_en) ??
+    readString(metric.subject_es) ??
+    readString(metric.subject_en) ??
+    "Untitled campaign"
+  );
+}
 
-  if (kind === "dry") {
-    return `${base} --dry-run`;
-  }
+function metricSubject(metric: CampaignMetric): string | null {
+  return readString(metric.subject_es) ?? readString(metric.subject_en);
+}
 
-  if (kind === "test") {
-    return `${base} --test-email=<gonza@email>`;
-  }
+function metricPrimaryAudience(metric: CampaignMetric): number | null {
+  return readNumber(metric.total_recipients) ?? readNumber(metric.recipient_row_count);
+}
 
-  return base;
+function metricSendBase(metric: CampaignMetric): number | null {
+  return readNumber(metric.total_sent) ?? metricPrimaryAudience(metric);
+}
+
+function metricDeliveredBase(metric: CampaignMetric): number | null {
+  return readNumber(metric.total_delivered) ?? metricSendBase(metric);
+}
+
+function MetricStat({
+  label,
+  value,
+  rate,
+}: {
+  label: string;
+  value: number | null | undefined;
+  rate: string;
+}) {
+  return (
+    <div className="rounded-xl border border-white/8 bg-[#0d0d13] p-3">
+      <p className="text-[11px] uppercase tracking-[0.18em] text-gray-500">{label}</p>
+      <p className="mt-2 text-lg font-semibold text-white">{formatNumber(value)}</p>
+      <p className="mt-1 text-xs text-gray-500">{rate === "—" ? "Rate unavailable" : rate}</p>
+    </div>
+  );
+}
+
+function RollupPanel({ title, rollup }: { title: string; rollup: CampaignMetricsRollup }) {
+  return (
+    <div className="rounded-2xl border border-white/8 bg-[#0d0d13] p-5">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h3 className="text-base font-semibold text-white">{title}</h3>
+          <p className="mt-1 text-sm text-gray-500">
+            {rollup.campaignCount} real campaign{rollup.campaignCount === 1 ? "" : "s"}
+          </p>
+        </div>
+        <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-gray-300">
+          Recipients {formatNumber(rollup.totalRecipients)}
+        </span>
+      </div>
+
+      <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+        <MetricStat
+          label="Sent"
+          value={rollup.totalSent}
+          rate={formatRate(rollup.totalSent, rollup.totalRecipients)}
+        />
+        <MetricStat
+          label="Delivered"
+          value={rollup.totalDelivered}
+          rate={formatRate(rollup.totalDelivered, rollup.totalSent || rollup.totalRecipients)}
+        />
+        <MetricStat
+          label="Opens"
+          value={rollup.totalOpens}
+          rate={formatRate(rollup.totalOpens, rollup.totalDelivered || rollup.totalSent)}
+        />
+        <MetricStat
+          label="Clicks"
+          value={rollup.totalClicks}
+          rate={formatRate(rollup.totalClicks, rollup.totalDelivered || rollup.totalSent)}
+        />
+        <MetricStat
+          label="Bounces"
+          value={rollup.totalBounces}
+          rate={formatRate(rollup.totalBounces, rollup.totalSent || rollup.totalRecipients)}
+        />
+      </div>
+    </div>
+  );
+}
+
+function MetricCard({ metric, subdued = false }: { metric: CampaignMetric; subdued?: boolean }) {
+  const subject = metricSubject(metric);
+  const activityLabel = formatDateTime(readDate(metric.activity_at) ?? readDate(metric.sent_at) ?? readDate(metric.created_at), true);
+  const deliveredBase = metricDeliveredBase(metric);
+  const sendBase = metricSendBase(metric);
+
+  return (
+    <article
+      className={`rounded-2xl border border-gray-800 bg-[#111118] p-5 ${
+        subdued ? "opacity-60" : ""
+      }`}
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="truncate text-base font-semibold text-white">{metricTitle(metric)}</h3>
+            <span
+              className={`rounded-full border px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.18em] ${
+                metric.is_real_campaign
+                  ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-300"
+                  : "border-white/10 bg-white/5 text-gray-400"
+              }`}
+            >
+              {metric.is_real_campaign ? "Real" : "Test / retry"}
+            </span>
+            {metric.is_legacy_incomplete && (
+              <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.18em] text-amber-200">
+                Legacy / incomplete
+              </span>
+            )}
+          </div>
+          {subject && subject !== metricTitle(metric) && (
+            <p className="mt-2 text-sm text-gray-400">{subject}</p>
+          )}
+        </div>
+
+        <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-xs text-gray-300">
+          {normalizeLabel(readString(metric.status), "Unknown")}
+        </span>
+      </div>
+
+      <div className="mt-4 flex flex-wrap gap-2 text-xs text-gray-400">
+        <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1">
+          Campaign ID {metric.id}
+        </span>
+        <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1">
+          Recipients {formatNumber(metricPrimaryAudience(metric))}
+        </span>
+        {readNumber(metric.recipient_row_count) != null && (
+          <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1">
+            Recipient rows {formatNumber(metric.recipient_row_count)}
+          </span>
+        )}
+        <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1">
+          {activityLabel ? `Activity ${activityLabel}` : "No activity timestamp"}
+        </span>
+      </div>
+
+      {metric.is_legacy_incomplete && (
+        <div className="mt-4 rounded-xl border border-amber-500/15 bg-amber-500/10 p-3 text-sm text-amber-100/85">
+          Old `sending` row from before the current month. Treat this as stale legacy/incomplete history, not an active send.
+        </div>
+      )}
+
+      <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <MetricStat
+          label="Delivered"
+          value={metric.total_delivered}
+          rate={formatRate(metric.total_delivered, sendBase)}
+        />
+        <MetricStat
+          label="Opens"
+          value={metric.total_opens}
+          rate={formatRate(metric.total_opens, deliveredBase)}
+        />
+        <MetricStat
+          label="Clicks"
+          value={metric.total_clicks}
+          rate={formatRate(metric.total_clicks, deliveredBase)}
+        />
+        <MetricStat
+          label="Bounces"
+          value={metric.total_bounces}
+          rate={formatRate(metric.total_bounces, sendBase)}
+        />
+      </div>
+    </article>
+  );
+}
+
+function SentMetricsSection({ data }: { data: EmailCampaignPageData }) {
+  const realMetrics = data.campaignMetrics.filter((metric) => metric.is_real_campaign);
+  const testMetrics = data.campaignMetrics.filter((metric) => !metric.is_real_campaign);
+
+  return (
+    <section className="mt-6 rounded-2xl border border-gray-800 bg-[#111118] p-5">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h2 className="text-lg font-semibold text-white">Sent / Metrics</h2>
+          <p className="mt-1 max-w-3xl text-sm text-gray-500">
+            Read-only delivery history from website Supabase `newsletter_campaigns`. Real campaigns are separated from low-volume tests and retries, and monthly totals only count real rows.
+          </p>
+        </div>
+        <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-3 py-1 text-xs font-medium uppercase tracking-[0.18em] text-emerald-300">
+          Website Supabase source
+        </span>
+      </div>
+
+      <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <div className="rounded-xl border border-white/8 bg-[#0d0d13] p-4">
+          <p className="text-[11px] uppercase tracking-[0.18em] text-gray-500">Real campaigns</p>
+          <p className="mt-2 text-2xl font-semibold text-white">{data.campaignMetricsSummary.realCampaigns}</p>
+        </div>
+        <div className="rounded-xl border border-white/8 bg-[#0d0d13] p-4">
+          <p className="text-[11px] uppercase tracking-[0.18em] text-gray-500">{data.campaignMetricsSummary.monthLabel}</p>
+          <p className="mt-2 text-2xl font-semibold text-white">{data.campaignMetricsSummary.currentMonth.campaignCount}</p>
+          <p className="mt-1 text-sm text-gray-500">Real campaigns this month.</p>
+        </div>
+        <div className="rounded-xl border border-white/8 bg-[#0d0d13] p-4">
+          <p className="text-[11px] uppercase tracking-[0.18em] text-gray-500">Tests / retries</p>
+          <p className="mt-2 text-2xl font-semibold text-white">{data.campaignMetricsSummary.testRows}</p>
+          <p className="mt-1 text-sm text-gray-500">Low-volume rows de-emphasized below.</p>
+        </div>
+        <div className="rounded-xl border border-white/8 bg-[#0d0d13] p-4">
+          <p className="text-[11px] uppercase tracking-[0.18em] text-gray-500">Legacy / incomplete</p>
+          <p className="mt-2 text-2xl font-semibold text-white">{data.campaignMetricsSummary.legacyIncompleteRows}</p>
+          <p className="mt-1 text-sm text-gray-500">Old `sending` rows from before this month.</p>
+        </div>
+      </div>
+
+      <div className="mt-4 grid gap-4 xl:grid-cols-2">
+        <RollupPanel title="Real campaigns · All time" rollup={data.campaignMetricsSummary.allTime} />
+        <RollupPanel
+          title={`Real campaigns · ${data.campaignMetricsSummary.monthLabel}`}
+          rollup={data.campaignMetricsSummary.currentMonth}
+        />
+      </div>
+
+      <div className="mt-6">
+        <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h3 className="text-xl font-semibold text-white">Real campaign history</h3>
+            <p className="mt-1 text-sm text-gray-500">
+              Newsletter rows classified as real from recipient volume, with delivery and engagement metrics.
+            </p>
+          </div>
+          <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-medium uppercase tracking-[0.18em] text-gray-400">
+            {realMetrics.length} row{realMetrics.length === 1 ? "" : "s"}
+          </span>
+        </div>
+
+        {realMetrics.length > 0 ? (
+          <div className="grid gap-4 xl:grid-cols-2">
+            {realMetrics.map((metric) => (
+              <MetricCard key={metric.id} metric={metric} />
+            ))}
+          </div>
+        ) : (
+          <div className="rounded-2xl border border-dashed border-white/10 bg-[#0d0d13] px-5 py-8 text-sm text-gray-500">
+            No real campaign rows found in `newsletter_campaigns`.
+          </div>
+        )}
+      </div>
+
+      {testMetrics.length > 0 && (
+        <div className="mt-6">
+          <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
+            <div>
+              <h3 className="text-xl font-semibold text-white">Tests / retries / low-volume rows</h3>
+              <p className="mt-1 text-sm text-gray-500">
+                De-emphasized history. These rows do not contribute to the summary totals above.
+              </p>
+            </div>
+            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-medium uppercase tracking-[0.18em] text-gray-400">
+              {testMetrics.length} row{testMetrics.length === 1 ? "" : "s"}
+            </span>
+          </div>
+
+          <div className="grid gap-4 xl:grid-cols-2">
+            {testMetrics.map((metric) => (
+              <MetricCard key={metric.id} metric={metric} subdued />
+            ))}
+          </div>
+        </div>
+      )}
+    </section>
+  );
 }
 
 function workItemLabel(workItem: EmailCampaignWorkItem): string {
@@ -573,33 +857,14 @@ function workItemLabel(workItem: EmailCampaignWorkItem): string {
   return normalizeLabel(action, "Work Item");
 }
 
-function CopyCommandButton({ label, command }: { label: string; command: string }) {
-  const [copied, setCopied] = useState(false);
-
-  async function handleCopy() {
-    await navigator.clipboard.writeText(command);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1400);
-  }
-
-  return (
-    <button
-      type="button"
-      onClick={handleCopy}
-      className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-left text-xs text-gray-300 transition hover:border-blue-400/40 hover:text-white"
-      title={command}
-    >
-      {copied ? "Copied" : label}
-    </button>
-  );
-}
-
 function ItemCard({ card }: { card: CampaignCardData }) {
   const metadata = getMetadata(card.item);
   const style = statusStyleForCard(card);
   const expiresLabel = formatDateTime(card.expiresAt);
   const scheduledLabel = formatDateTime(card.canonicalScheduledFor, true);
   const scheduledRelative = formatRelativeBucket(card.canonicalScheduledFor);
+  const metric = card.campaignMetric;
+  const metricSubjectLine = metric ? metricSubject(metric) : null;
 
   return (
     <article
@@ -672,67 +937,60 @@ function ItemCard({ card }: { card: CampaignCardData }) {
         </p>
       </div>
 
-      {card.campaignMetric && (
+      {metric && (
         <div className="mt-4 rounded-xl border border-white/8 bg-[#0d0d13] p-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <p className="text-[11px] uppercase tracking-[0.18em] text-gray-500">Supabase Campaign Metrics</p>
-              <p className="mt-2 text-sm font-medium text-white">
-                {card.campaignMetric.subject_es ?? card.campaignMetric.subject_en ?? "No subject stored"}
-              </p>
+              <p className="mt-2 text-sm font-medium text-white">{metricTitle(metric)}</p>
               <p className="mt-1 text-xs text-gray-500">
-                Campaign ID: {card.campaignMetric.id}
+                {metricSubjectLine && metricSubjectLine !== metricTitle(metric) ? `${metricSubjectLine} · ` : ""}Campaign ID: {metric.id}
               </p>
             </div>
-            <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-xs text-gray-300">
-              {normalizeLabel(readString(card.campaignMetric.status), "Unknown")}
-            </span>
+            <div className="flex flex-wrap gap-2">
+              <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-xs text-gray-300">
+                {normalizeLabel(readString(metric.status), "Unknown")}
+              </span>
+              <span
+                className={`rounded-full border px-2.5 py-1 text-xs ${
+                  metric.is_real_campaign
+                    ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-300"
+                    : "border-white/10 bg-white/5 text-gray-400"
+                }`}
+              >
+                {metric.is_real_campaign ? "Real" : "Test / retry"}
+              </span>
+              {metric.is_legacy_incomplete && (
+                <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-2.5 py-1 text-xs text-amber-200">
+                  Legacy / incomplete
+                </span>
+              )}
+            </div>
           </div>
-          <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4">
-            <div>
-              <p className="text-[11px] uppercase tracking-[0.18em] text-gray-500">Recipients</p>
-              <p className="mt-1 text-lg font-semibold text-white">{formatNumber(card.campaignMetric.total_recipients)}</p>
-            </div>
-            <div>
-              <p className="text-[11px] uppercase tracking-[0.18em] text-gray-500">Delivered</p>
-              <p className="mt-1 text-lg font-semibold text-white">{formatNumber(card.campaignMetric.total_delivered)}</p>
-            </div>
-            <div>
-              <p className="text-[11px] uppercase tracking-[0.18em] text-gray-500">Open Rate</p>
-              <p className="mt-1 text-lg font-semibold text-white">
-                {formatRate(card.campaignMetric.total_opens, card.campaignMetric.total_delivered ?? card.campaignMetric.total_sent)}
-              </p>
-            </div>
-            <div>
-              <p className="text-[11px] uppercase tracking-[0.18em] text-gray-500">Click Rate</p>
-              <p className="mt-1 text-lg font-semibold text-white">
-                {formatRate(card.campaignMetric.total_clicks, card.campaignMetric.total_delivered ?? card.campaignMetric.total_sent)}
-              </p>
-            </div>
+          <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <MetricStat
+              label="Delivered"
+              value={metric.total_delivered}
+              rate={formatRate(metric.total_delivered, metricSendBase(metric))}
+            />
+            <MetricStat
+              label="Opens"
+              value={metric.total_opens}
+              rate={formatRate(metric.total_opens, metricDeliveredBase(metric))}
+            />
+            <MetricStat
+              label="Clicks"
+              value={metric.total_clicks}
+              rate={formatRate(metric.total_clicks, metricDeliveredBase(metric))}
+            />
+            <MetricStat
+              label="Bounces"
+              value={metric.total_bounces}
+              rate={formatRate(metric.total_bounces, metricSendBase(metric))}
+            />
           </div>
         </div>
       )}
-
-      <div className="mt-4 rounded-xl border border-blue-500/10 bg-blue-500/[0.04] p-4">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <p className="text-[11px] uppercase tracking-[0.18em] text-blue-300/70">Operational Commands</p>
-            <p className="mt-1 text-sm text-gray-400">
-              Copy-only helpers. Real send still requires terminal execution after dry-run + test review.
-            </p>
-          </div>
-          {!card.notionCampaignId && (
-            <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-2.5 py-1 text-xs text-amber-200">
-              Missing Notion ID
-            </span>
-          )}
-        </div>
-        <div className="mt-3 flex flex-wrap gap-2">
-          <CopyCommandButton label="Copy dry-run" command={commandFor("dry", card.notionCampaignId)} />
-          <CopyCommandButton label="Copy test-send" command={commandFor("test", card.notionCampaignId)} />
-          <CopyCommandButton label="Copy real-send" command={commandFor("send", card.notionCampaignId)} />
-        </div>
-      </div>
 
       <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]">
         <div className="rounded-xl border border-white/8 bg-[#0d0d13] p-4">
@@ -824,8 +1082,7 @@ export function EmailCampaignsClient({ data }: { data: EmailCampaignPageData }) 
             </span>
           </div>
           <p className="mt-2 max-w-3xl text-sm text-gray-400">
-            Pipeline view for email candidates, campaign assembly, review, scheduling, and send logs.
-            Scheduling is derived from linked work items only.
+            V2 planning surface for candidates, drafting, review, scheduling, and historical metrics. Send actions stay out of this UI.
           </p>
         </div>
 
@@ -899,6 +1156,8 @@ export function EmailCampaignsClient({ data }: { data: EmailCampaignPageData }) 
         )}
       </div>
 
+      <SentMetricsSection data={data} />
+
       <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <div className="rounded-2xl border border-gray-800 bg-[#111118] p-5">
           <p className="text-[11px] uppercase tracking-[0.18em] text-gray-500">Candidates</p>
@@ -918,7 +1177,7 @@ export function EmailCampaignsClient({ data }: { data: EmailCampaignPageData }) 
         <div className="rounded-2xl border border-gray-800 bg-[#111118] p-5">
           <p className="text-[11px] uppercase tracking-[0.18em] text-gray-500">Sent / Archived</p>
           <p className="mt-2 text-3xl font-semibold text-white">{counts.sent + counts.expired}</p>
-          <p className="mt-1 text-sm text-gray-500">Completed sends plus expired or archived campaign inputs.</p>
+          <p className="mt-1 text-sm text-gray-500">Pipeline send logs plus expired or archived campaign inputs.</p>
         </div>
       </div>
 
