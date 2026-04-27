@@ -2,6 +2,17 @@ import { NextResponse, type NextRequest } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { verifyPublishedContent } from "@/lib/content/live-verification";
 import { createPipelineWorkItem } from "@/lib/work-items/pipeline-materializer";
+import {
+  YOUTUBE_GATE_ORDER,
+  YOUTUBE_GATE_STATUSES,
+  buildGateHistoryEntry,
+  derivePipelineItemStatus,
+  getGateEntry,
+  getScores,
+  getYouTubeMetadata,
+  type YouTubeGateKey,
+  type YouTubeGateStatus,
+} from "@/lib/youtube-pipeline";
 
 export const dynamic = "force-dynamic";
 
@@ -64,6 +75,28 @@ function extractCommunityScheduledFor(body: Record<string, unknown>) {
     if (match) return match[0];
   }
   return null;
+}
+
+function isYouTubeGateKey(value: unknown): value is YouTubeGateKey {
+  return typeof value === "string" && (YOUTUBE_GATE_ORDER as readonly string[]).includes(value);
+}
+
+function isYouTubeGateStatus(value: unknown): value is YouTubeGateStatus {
+  return typeof value === "string" && (YOUTUBE_GATE_STATUSES as readonly string[]).includes(value);
+}
+
+function extractYouTubeGateStatus(body: Record<string, unknown>) {
+  const explicit = body.gate_status || getNestedString(body.output, ["gate_status"]);
+  return isYouTubeGateStatus(explicit) ? explicit : null;
+}
+
+function extractYouTubeEvidenceSummary(body: Record<string, unknown>) {
+  return (
+    getNestedString(body.output, ["evidence_summary"]) ||
+    getNestedString(body.output, ["summary"]) ||
+    getNestedString(body.output, ["recommendation"]) ||
+    (typeof body.result === "string" && body.result.trim() ? body.result.trim().slice(0, 1800) : null)
+  );
 }
 
 async function notifyWorkItem(workItemId: string, agent: string, title: string) {
@@ -417,6 +450,69 @@ export async function PATCH(
     const isCommunityDraftAction = action === "draft_guide_announcement" || action === "revise_community_announcement" || action === "draft_community_news" || action === "develop_community_post";
     const isCommunityScheduleAction = action === "schedule_community_post";
     const isCommunityPublishAction = action === "publish_community_post";
+    const isVideo = pipelineType === "video";
+    const isYouTubeGateAction = isVideo && action.startsWith("youtube_gate_");
+
+    if (isYouTubeGateAction) {
+      const relationType = typeof payload.relation_type === "string" ? payload.relation_type : action.replace("youtube_gate_", "");
+      const gateKey = isYouTubeGateKey(relationType) ? relationType : null;
+      const { data: videoItem } = await db
+        .from("pipeline_items")
+        .select("metadata,status,published_at")
+        .eq("id", pipelineItemId)
+        .eq("pipeline_type", "video")
+        .maybeSingle();
+
+      if (gateKey && videoItem) {
+        const now = new Date().toISOString();
+        const metadata = getYouTubeMetadata(videoItem.metadata);
+        const previousGate = getGateEntry(metadata, gateKey);
+        const scores = getScores(metadata);
+        const evidenceSummary = extractYouTubeEvidenceSummary(body as Record<string, unknown>);
+        const nextGateStatus = extractYouTubeGateStatus(body as Record<string, unknown>) || (previousGate.status === "not_started" || !previousGate.status ? "in_progress" : previousGate.status);
+        const nextMetadata = {
+          ...metadata,
+          gates: {
+            ...((metadata.gates || {}) as JsonRecord),
+            [gateKey]: {
+              ...previousGate,
+              status: nextGateStatus,
+              evidence_summary: evidenceSummary || previousGate.evidence_summary,
+              work_item_id: data.id,
+              updated_at: now,
+              history: [
+                ...((Array.isArray(previousGate.history) ? previousGate.history : []) || []),
+                buildGateHistoryEntry({
+                  at: now,
+                  by: data.owner_agent || "youtube",
+                  status: nextGateStatus,
+                  reason: previousGate.reason || null,
+                  evidenceSummary: evidenceSummary || previousGate.evidence_summary || null,
+                  nextAction: previousGate.next_action || null,
+                  scores,
+                }),
+              ],
+            },
+          },
+          runtime_feedback: {
+            ...((metadata.runtime_feedback || {}) as JsonRecord),
+            last_status: "youtube_gate_work_completed",
+            last_work_item_id: data.id,
+            last_gate_key: gateKey,
+            updated_at: now,
+          },
+        };
+
+        await db
+          .from("pipeline_items")
+          .update({
+            status: derivePipelineItemStatus(nextMetadata, { currentStatus: videoItem.status, publishedAt: videoItem.published_at }),
+            metadata: nextMetadata,
+            updated_at: now,
+          })
+          .eq("id", pipelineItemId);
+      }
+    }
 
     if (isCommunity && isCommunityPublishAction) {
       const publishUrl = extractCurrentUrl(body as Record<string, unknown>);
