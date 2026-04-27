@@ -318,7 +318,7 @@ export async function POST(request: NextRequest) {
     message += `\n## Community draft contract\nWrite the final community/news copy into the Mission Control pipeline card. Do not DM Gonza with the draft and do not publish it. Complete this work item only after PATCHing the final copy as output.copy.text or as a clearly labeled final copy in result; Mission Control will move the card to ready_for_review.\n`;
   }
   if (isCommunitySchedule) {
-    message += `\n## Community schedule contract\nSchedule the already-approved community post. Do not publish now unless it is explicitly due. Complete this work item with scheduled_for (ISO timestamp) so Mission Control can set the pipeline card to scheduled; the due worker will create the later publish task.\n`;
+    message += `\n## Community schedule contract\nChoose the publish date/time for this approved community post. Do not publish now. Complete this work item with scheduled_for (ISO timestamp); Mission Control will create/update the future publish work item in Work Queue, and the Work Queue scheduler will dispatch it when due.\n`;
   }
   if (isCommunityPublish) {
     message += `\n## Community publish contract\nPublish only the approved copy. After publishing, complete this work item with current_url/published_at if available. Also send a very short agent-log style note, e.g. “Publiqué la noticia en el canal de news de la comunidad.”\n`;

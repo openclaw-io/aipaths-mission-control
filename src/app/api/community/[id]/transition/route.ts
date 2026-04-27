@@ -84,10 +84,10 @@ function createScheduleInstruction(item: { id: string; title: string; metadata?:
     `Pipeline item ID: ${item.id}`,
     "",
     "Task:",
-    "- Schedule this approved community post for Discord.",
-    "- Choose an appropriate publish date/time if none is provided.",
-    "- Set pipeline_items.scheduled_for and move the community post to scheduled.",
-    "- Do not publish immediately unless the schedule is due/explicitly intended.",
+    "- Choose the publish date/time for this approved community post.",
+    "- Do not publish now.",
+    "- Complete this scheduling work item with scheduled_for as an ISO timestamp.",
+    "- Mission Control will create/update the future publish work item in Work Queue from that scheduled_for value.",
     "",
     `Target: ${String(target.channel_name || target.channel_id || "Discord")}`,
     source.url ? `Source URL: ${String(source.url)}` : "Source URL: (none)",
@@ -108,7 +108,7 @@ export async function POST(
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const { action, reviewNotes, scheduled_for, current_url } = await request.json();
+  const { action, reviewNotes, current_url } = await request.json();
   const targetStatus = ACTION_TARGET[action];
   if (!targetStatus || !(COMMUNITY_STATUSES as readonly string[]).includes(targetStatus)) {
     return NextResponse.json({ error: "Invalid action" }, { status: 400 });
@@ -211,7 +211,6 @@ export async function POST(
     updated_at: new Date().toISOString(),
   };
 
-  if (scheduled_for) updatePayload.scheduled_for = scheduled_for;
   if (current_url) updatePayload.current_url = current_url;
   if (action === "mark_published") updatePayload.published_at = new Date().toISOString();
 
@@ -219,7 +218,7 @@ export async function POST(
     .from("pipeline_items")
     .update(updatePayload)
     .eq("id", id)
-    .select("id, pipeline_type, title, slug, status, priority, owner_agent, requested_by, source_type, source_id, scheduled_for, published_at, current_url, content_path, content_format, metadata, created_at, updated_at")
+    .select("id, pipeline_type, title, slug, status, priority, owner_agent, requested_by, source_type, source_id, published_at, current_url, content_path, content_format, metadata, created_at, updated_at")
     .single();
 
   if (updateError) {
