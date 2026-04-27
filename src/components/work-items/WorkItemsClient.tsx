@@ -277,22 +277,26 @@ function ProgressTab({ items, events }: { items: WorkItem[]; events: WorkEvent[]
 
 function CalendarTab({ grouped }: { grouped: Array<readonly [string, WorkItem[]]> }) {
   const today = new Date();
-  const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
-  const gridStart = new Date(monthStart);
-  gridStart.setDate(monthStart.getDate() - ((monthStart.getDay() + 6) % 7));
+  const weekStart = new Date(today);
+  weekStart.setHours(0, 0, 0, 0);
+  weekStart.setDate(today.getDate() - ((today.getDay() + 6) % 7));
+  const rangeEnd = new Date(weekStart);
+  rangeEnd.setDate(weekStart.getDate() + 34);
 
   const itemsByDay = new Map(grouped);
-  const days = Array.from({ length: 42 }, (_, index) => {
-    const day = new Date(gridStart);
-    day.setDate(gridStart.getDate() + index);
+  const days = Array.from({ length: 35 }, (_, index) => {
+    const day = new Date(weekStart);
+    day.setDate(weekStart.getDate() + index);
     return day;
   });
 
   return (
     <section className="mt-6 rounded-xl border border-gray-800 bg-[#111118] p-4">
       <div className="mb-4 flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-white">{new Intl.DateTimeFormat("en-GB", { month: "long", year: "numeric" }).format(today)}</h2>
-        <span className="text-xs text-gray-500">scheduled future work</span>
+        <h2 className="text-lg font-semibold text-white">
+          {new Intl.DateTimeFormat("en-GB", { month: "short", day: "2-digit" }).format(weekStart)} – {new Intl.DateTimeFormat("en-GB", { month: "short", day: "2-digit", year: "numeric" }).format(rangeEnd)}
+        </h2>
+        <span className="text-xs text-gray-500">current week + 4 weeks · scheduled future work</span>
       </div>
       <div className="grid grid-cols-7 border-l border-t border-gray-800 text-xs text-gray-500">
         {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((label) => (
@@ -301,10 +305,9 @@ function CalendarTab({ grouped }: { grouped: Array<readonly [string, WorkItem[]]
         {days.map((day) => {
           const key = day.toISOString().slice(0, 10);
           const dayItems = itemsByDay.get(key) || [];
-          const isCurrentMonth = day.getMonth() === today.getMonth();
           const isToday = key === today.toISOString().slice(0, 10);
           return (
-            <div key={key} className={`min-h-32 border-b border-r border-gray-800 p-2 ${isCurrentMonth ? "bg-[#0d0d14]" : "bg-black/20 opacity-50"}`}>
+            <div key={key} className="min-h-32 border-b border-r border-gray-800 bg-[#0d0d14] p-2">
               <div className={`mb-2 flex h-6 w-6 items-center justify-center rounded-full text-xs ${isToday ? "bg-blue-500 text-white" : "text-gray-500"}`}>{day.getDate()}</div>
               <div className="space-y-1">
                 {dayItems.slice(0, 4).map((item) => (
