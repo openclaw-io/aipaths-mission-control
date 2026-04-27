@@ -79,12 +79,32 @@ async function notifyWorkItem(workItemId: string, agent: string, title: string) 
   }).catch(() => {});
 }
 
+function communityPublishTarget(metadata: JsonRecord) {
+  const destinationKey = typeof metadata.intel_destination_key === "string" ? metadata.intel_destination_key : null;
+  const destinationLabel = typeof metadata.destination_label === "string" ? metadata.destination_label.toLowerCase() : "";
+  const kind = typeof metadata.kind === "string" ? metadata.kind : null;
+  const source = (metadata.source || {}) as JsonRecord;
+  const sourceType = typeof source.type === "string" ? source.type : null;
+
+  if (destinationKey === "news" || destinationLabel === "news" || kind === "news" || metadata.intel) {
+    return { channelId: "1498256983122378883", channelName: "🛰️_radar_ia", label: "news/radar" };
+  }
+  if (destinationKey === "poll" || destinationLabel.includes("encuesta") || kind === "poll") {
+    return { channelId: "1283759728798994533", channelName: "📔_encuestas", label: "poll" };
+  }
+  if (["blog", "guide", "doc", "video"].includes(String(sourceType || destinationKey || kind || ""))) {
+    return { channelId: "1445797470662692864", channelName: "_📣anuncios", label: "content announcement" };
+  }
+  return { channelId: "1498256983122378883", channelName: "🛰️_radar_ia", label: "default community update" };
+}
+
 async function ensureCommunityPublishWorkItem(db: ReturnType<typeof createServiceClient>, input: {
   pipelineItemId: string;
   title: string;
   scheduledFor: string;
   priority?: string | null;
   requestedBy?: string | null;
+  metadata?: JsonRecord | null;
   copyText?: string | null;
 }) {
   const openStatuses = ["draft", "ready", "blocked", "in_progress"];
@@ -103,12 +123,25 @@ async function ensureCommunityPublishWorkItem(db: ReturnType<typeof createServic
     return payload.action === "publish_community_post" || payload.relation_type === "publish";
   });
 
+  const metadata = input.metadata || {};
+  const target = communityPublishTarget(metadata);
   const instruction = [
     `Publish community post "${input.title}".`,
     `Pipeline item ID: ${input.pipelineItemId}.`,
-    "Publish only the approved copy from the pipeline card.",
-    "After publishing, complete this work item with current_url/published_at if available.",
-    "Send a very short agent-log style note: “Publiqué la noticia en el canal de news de la comunidad.”",
+    "",
+    "Target channel contract:",
+    `- Publish to <#${target.channelId}> (${target.channelName}) because this is a ${target.label}.`,
+    "- Do not publish news/radar items in #anuncios. #anuncios is only for blogs, guides, videos, product/content announcements, or similar major content launches.",
+    "- Polls/engagement questions go to #📔_encuestas when the post type is a poll.",
+    "",
+    "Message formatting contract:",
+    "- Publish only the approved copy from the pipeline card, but wrap every raw URL as <https://...> so Discord suppresses link previews/embeds.",
+    "- Do not add source-link previews or Discord embeds unless Gonza explicitly asks.",
+    "",
+    "After publishing:",
+    "- Complete this work item with current_url/published_at if available.",
+    "- Send the publication log/update to <#1473660854800224316>, not to the private director channel.",
+    `- Suggested log format: Anuncio: ${input.title}\n\nLo publiqué en #${target.channelName} con el enfoque aprobado para comunidad.\n\nPost: [ver post](<POST_URL>)`,
     input.copyText ? "" : null,
     input.copyText ? "Approved copy:" : null,
     input.copyText || null,
@@ -133,6 +166,10 @@ async function ensureCommunityPublishWorkItem(db: ReturnType<typeof createServic
           pipeline_item_id: input.pipelineItemId,
           relation_type: "publish",
           action: "publish_community_post",
+          target_channel_id: target.channelId,
+          target_channel_name: target.channelName,
+          log_channel_id: "1473660854800224316",
+          suppress_link_previews: true,
         },
         updated_at: new Date().toISOString(),
       })
@@ -163,6 +200,10 @@ async function ensureCommunityPublishWorkItem(db: ReturnType<typeof createServic
         pipeline_item_id: input.pipelineItemId,
         relation_type: "publish",
         action: "publish_community_post",
+        target_channel_id: target.channelId,
+        target_channel_name: target.channelName,
+        log_channel_id: "1473660854800224316",
+        suppress_link_previews: true,
       },
     })
     .select("id")
@@ -471,6 +512,7 @@ export async function PATCH(
               scheduledFor: finalScheduledFor,
               priority: typeof communityItem.priority === "string" ? communityItem.priority : data.priority,
               requestedBy: typeof communityItem.requested_by === "string" ? communityItem.requested_by : data.requested_by,
+              metadata: communityMetadata,
               copyText: typeof copyMetadata.text === "string" ? copyMetadata.text : null,
             })
           : null;
