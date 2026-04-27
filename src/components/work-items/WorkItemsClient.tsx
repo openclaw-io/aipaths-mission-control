@@ -35,6 +35,27 @@ export interface WorkEvent {
   created_at: string;
 }
 
+export interface ScheduledPipelineItem {
+  id: string;
+  title: string;
+  status: string;
+  pipeline_type: string | null;
+  owner_agent: string | null;
+  scheduled_for: string;
+  created_at: string;
+  updated_at: string | null;
+}
+
+type CalendarEntry = {
+  id: string;
+  title: string;
+  status: string;
+  scheduled_for: string;
+  agent: string;
+  source: string;
+  kind: "work" | "pipeline";
+};
+
 const STATUS_STYLES: Record<string, string> = {
   draft: "bg-slate-500/20 text-slate-300 border-slate-500/20",
   ready: "bg-blue-500/20 text-blue-300 border-blue-500/20",
@@ -81,9 +102,18 @@ function sortBySchedule(a: WorkItem, b: WorkItem) {
   return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
 }
 
-export function WorkItemsClient({ initialItems, initialEvents }: { initialItems: WorkItem[]; initialEvents: WorkEvent[] }) {
+export function WorkItemsClient({
+  initialItems,
+  initialEvents,
+  initialScheduledPipelineItems,
+}: {
+  initialItems: WorkItem[];
+  initialEvents: WorkEvent[];
+  initialScheduledPipelineItems: ScheduledPipelineItem[];
+}) {
   const [items, setItems] = useState(initialItems);
   const [events, setEvents] = useState(initialEvents);
+  const [scheduledPipelineItems, setScheduledPipelineItems] = useState(initialScheduledPipelineItems);
   const [tab, setTab] = useState<Tab>("live");
   const [agentFilter, setAgentFilter] = useState("all");
   const [sourceFilter, setSourceFilter] = useState("all");
@@ -95,7 +125,7 @@ export function WorkItemsClient({ initialItems, initialEvents }: { initialItems:
     let alive = true;
 
     async function refresh() {
-      const [itemsRes, eventsRes] = await Promise.all([
+      const [itemsRes, eventsRes, scheduledPipelineRes] = await Promise.all([
         supabase
           .from("work_items")
           .select("id,title,status,priority,owner_agent,target_agent_id,requested_by,source_type,source_id,kind,created_at,updated_at,started_at,completed_at,scheduled_for,payload")
@@ -107,11 +137,19 @@ export function WorkItemsClient({ initialItems, initialEvents }: { initialItems:
           .eq("domain", "work")
           .order("created_at", { ascending: false })
           .limit(100),
+        supabase
+          .from("pipeline_items")
+          .select("id,title,status,pipeline_type,owner_agent,scheduled_for,created_at,updated_at")
+          .not("scheduled_for", "is", null)
+          .in("status", ["scheduled", "approved"])
+          .order("scheduled_for", { ascending: true })
+          .limit(200),
       ]);
 
       if (!alive) return;
       if (!itemsRes.error) setItems((itemsRes.data || []) as WorkItem[]);
       if (!eventsRes.error) setEvents((eventsRes.data || []) as WorkEvent[]);
+      if (!scheduledPipelineRes.error) setScheduledPipelineItems((scheduledPipelineRes.data || []) as ScheduledPipelineItem[]);
     }
 
     const workChannel = supabase
@@ -124,6 +162,11 @@ export function WorkItemsClient({ initialItems, initialEvents }: { initialItems:
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "event_log", filter: "domain=eq.work" }, refresh)
       .subscribe();
 
+    const pipelineChannel = supabase
+      .channel("work-queue-scheduled-pipeline")
+      .on("postgres_changes", { event: "*", schema: "public", table: "pipeline_items" }, refresh)
+      .subscribe();
+
     const timer = window.setInterval(() => {
       setNow(Date.now());
       refresh();
@@ -133,6 +176,7 @@ export function WorkItemsClient({ initialItems, initialEvents }: { initialItems:
       alive = false;
       supabase.removeChannel(workChannel);
       supabase.removeChannel(eventChannel);
+      supabase.removeChannel(pipelineChannel);
       window.clearInterval(timer);
     };
   }, [supabase]);
@@ -148,27 +192,54 @@ export function WorkItemsClient({ initialItems, initialEvents }: { initialItems:
   const agents = useMemo(() => Array.from(new Set(items.map(agentFor))).sort(), [items]);
   const sources = useMemo(() => Array.from(new Set(items.map((item) => item.source_type || "unknown"))).sort(), [items]);
 
+  const filteredScheduledPipelineItems = useMemo(() => {
+    return scheduledPipelineItems.filter((item) => agentFilter === "all" || (item.owner_agent || "unassigned") === agentFilter);
+  }, [scheduledPipelineItems, agentFilter]);
+
   const readyNow = filteredItems.filter((item) => item.status === "ready" && (!item.scheduled_for || new Date(item.scheduled_for).getTime() <= now)).sort(sortBySchedule);
   const scheduledLater = filteredItems.filter((item) => ["ready", "draft", "blocked"].includes(item.status) && item.scheduled_for && new Date(item.scheduled_for).getTime() > now).sort(sortBySchedule);
+  const scheduledWorkForCalendar = filteredItems.filter((item) => ["ready", "draft", "blocked"].includes(item.status) && item.scheduled_for).sort(sortBySchedule);
   const blocked = filteredItems.filter((item) => item.status === "blocked").sort(sortBySchedule);
   const inProgress = filteredItems.filter((item) => item.status === "in_progress").sort((a, b) => new Date(a.started_at || a.created_at).getTime() - new Date(b.started_at || b.created_at).getTime());
   const failed = filteredItems.filter((item) => item.status === "failed").sort((a, b) => new Date(b.completed_at || b.updated_at || b.created_at).getTime() - new Date(a.completed_at || a.updated_at || a.created_at).getTime());
 
   const scheduledByDay = useMemo(() => {
-    const groups = new Map<string, WorkItem[]>();
-    for (const item of scheduledLater) {
-      const key = item.scheduled_for!.slice(0, 10);
-      groups.set(key, [...(groups.get(key) || []), item]);
+    const groups = new Map<string, CalendarEntry[]>();
+    for (const item of scheduledWorkForCalendar) {
+      const entry: CalendarEntry = {
+        id: item.id,
+        title: item.title,
+        status: item.status,
+        scheduled_for: item.scheduled_for!,
+        agent: agentFor(item),
+        source: pretty(item.source_type),
+        kind: "work",
+      };
+      const key = entry.scheduled_for.slice(0, 10);
+      groups.set(key, [...(groups.get(key) || []), entry]);
+    }
+    for (const item of filteredScheduledPipelineItems) {
+      const entry: CalendarEntry = {
+        id: item.id,
+        title: item.title,
+        status: item.status,
+        scheduled_for: item.scheduled_for,
+        agent: item.owner_agent || "unassigned",
+        source: pretty(item.pipeline_type),
+        kind: "pipeline",
+      };
+      const key = entry.scheduled_for.slice(0, 10);
+      groups.set(key, [...(groups.get(key) || []), entry]);
     }
     return Array.from(groups.entries())
       .sort(([a], [b]) => a.localeCompare(b))
-      .slice(0, 21)
-      .map(([day, dayItems]) => [day, dayItems.sort(sortBySchedule)] as const);
-  }, [scheduledLater]);
+      .slice(0, 31)
+      .map(([day, dayItems]) => [day, dayItems.sort((a, b) => new Date(a.scheduled_for).getTime() - new Date(b.scheduled_for).getTime())] as const);
+  }, [scheduledWorkForCalendar, filteredScheduledPipelineItems]);
 
   const tabs: Array<{ id: Tab; label: string; count?: number }> = [
     { id: "live", label: "Live Board", count: readyNow.length + blocked.length + inProgress.length + failed.length },
-    { id: "calendar", label: "Calendar", count: scheduledLater.length },
+    { id: "calendar", label: "Calendar", count: scheduledWorkForCalendar.length + filteredScheduledPipelineItems.length },
     { id: "logs", label: "Logs", count: events.length },
   ];
 
@@ -275,7 +346,7 @@ function ProgressTab({ items, events }: { items: WorkItem[]; events: WorkEvent[]
   );
 }
 
-function CalendarTab({ grouped }: { grouped: Array<readonly [string, WorkItem[]]> }) {
+function CalendarTab({ grouped }: { grouped: Array<readonly [string, CalendarEntry[]]> }) {
   const today = new Date();
   const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
   const gridStart = new Date(monthStart);
@@ -292,7 +363,7 @@ function CalendarTab({ grouped }: { grouped: Array<readonly [string, WorkItem[]]
     <section className="mt-6 rounded-xl border border-gray-800 bg-[#111118] p-4">
       <div className="mb-4 flex items-center justify-between">
         <h2 className="text-lg font-semibold text-white">{new Intl.DateTimeFormat("en-GB", { month: "long", year: "numeric" }).format(today)}</h2>
-        <span className="text-xs text-gray-500">scheduled future work</span>
+        <span className="text-xs text-gray-500">scheduled work + pipeline outputs</span>
       </div>
       <div className="grid grid-cols-7 border-l border-t border-gray-800 text-xs text-gray-500">
         {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((label) => (
@@ -308,9 +379,9 @@ function CalendarTab({ grouped }: { grouped: Array<readonly [string, WorkItem[]]
               <div className={`mb-2 flex h-6 w-6 items-center justify-center rounded-full text-xs ${isToday ? "bg-blue-500 text-white" : "text-gray-500"}`}>{day.getDate()}</div>
               <div className="space-y-1">
                 {dayItems.slice(0, 4).map((item) => (
-                  <div key={item.id} className="rounded border border-blue-500/20 bg-blue-500/10 px-2 py-1 text-[11px] text-blue-100">
+                  <div key={`${item.kind}-${item.id}`} className={`rounded border px-2 py-1 text-[11px] ${item.kind === "pipeline" ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-100" : "border-blue-500/20 bg-blue-500/10 text-blue-100"}`}>
                     <div className="truncate font-medium">{item.title}</div>
-                    <div className="mt-0.5 text-blue-200/60">{new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit" }).format(new Date(item.scheduled_for!))} · {agentFor(item)}</div>
+                    <div className="mt-0.5 opacity-70">{new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit" }).format(new Date(item.scheduled_for))} · {item.agent} · {item.kind === "pipeline" ? item.source : "work"}</div>
                   </div>
                 ))}
                 {dayItems.length > 4 && <div className="text-[11px] text-gray-500">+{dayItems.length - 4} more</div>}
