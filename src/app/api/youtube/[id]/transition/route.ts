@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/admin";
 import { createPipelineWorkItem } from "@/lib/work-items/pipeline-materializer";
 import {
+  getAgentDeliverableLabel,
   YOUTUBE_GATE_META,
   YOUTUBE_GATE_ORDER,
   YOUTUBE_GATE_STATUSES,
@@ -13,6 +14,7 @@ import {
   buildGateHistoryEntry,
   derivePipelineItemStatus,
   getGateEntry,
+  getNextDecision,
   getScores,
   getYouTubeMetadata,
   priorityLevelFromScore,
@@ -42,24 +44,31 @@ function createWorkItemInstruction(input: {
   title: string;
   gateKey: YouTubeGateKey;
   gateStatus: YouTubeGateStatus;
+  actionType: "legacy" | "approve" | "request_rework" | "kill" | "send_to_agent";
   reason: string | null;
   evidenceSummary: string | null;
   nextAction: string | null;
 }) {
   const gateLabel = YOUTUBE_GATE_META[input.gateKey].label;
+  const deliverable = getAgentDeliverableLabel(input.gateKey);
+  const taskLine = input.actionType === "request_rework"
+    ? `- Rework the ${gateLabel} gate and return with a stronger recommendation.`
+    : `- Move the ${gateLabel} gate forward and prepare the required artefact.`;
+
   return [
     `YouTube pipeline item: ${input.title}`,
     `Gate: ${gateLabel}`,
-    `Decision: ${input.gateStatus.replaceAll("_", " ")}`,
+    `Current status: ${input.gateStatus.replaceAll("_", " ")}`,
     "",
     "Task:",
-    `- Resolve the ${gateLabel} gate for this video concept.`,
+    taskLine,
+    `- Produce: ${deliverable}.`,
     "- Update the supporting evidence, packaging, retention, or production notes directly on the pipeline item if your tooling supports it.",
     "- Finish with a clear recommendation for the next gate decision.",
     "",
-    `Reason: ${input.reason || "(missing)"}`,
-    `Evidence summary: ${input.evidenceSummary || "(missing)"}`,
-    `Next action: ${input.nextAction || "(missing)"}`,
+    `Human note: ${input.reason || "(none)"}`,
+    `Evidence summary: ${input.evidenceSummary || "(none yet)"}`,
+    `Suggested next action: ${input.nextAction || "(none)"}`,
   ].join("\n");
 }
 
@@ -68,22 +77,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const supabase = await createClient();
   const db = createServiceClient();
 
-  const {
-    gateKey,
-    gateStatus,
-    reason,
-    evidenceSummary,
-    nextAction,
-    createWorkItem,
-    workItemRelationType,
-  } = await request.json();
-
-  if (!isGateKey(gateKey)) {
-    return NextResponse.json({ error: "Invalid gateKey" }, { status: 400 });
-  }
-  if (!isGateStatus(gateStatus)) {
-    return NextResponse.json({ error: "Invalid gateStatus" }, { status: 400 });
-  }
+  const body = await request.json();
 
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -101,19 +95,54 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
   const now = new Date().toISOString();
   const metadata = getYouTubeMetadata(item.metadata);
+  const currentDecision = getNextDecision(metadata);
+  const gateKey = isGateKey(body.gateKey) ? body.gateKey : currentDecision.gateKey;
+
+  if (!isGateKey(gateKey)) {
+    return NextResponse.json({ error: "Invalid gateKey" }, { status: 400 });
+  }
+
   const gates = toRecord(metadata.gates);
   const previousGate = getGateEntry(metadata, gateKey);
   const scores = getScores(metadata);
-  const safeReason = trimToNull(reason);
-  const safeEvidenceSummary = trimToNull(evidenceSummary);
-  const safeNextAction = trimToNull(nextAction);
+  const requestedAction = typeof body.action === "string" ? body.action : null;
+  const requestedWorkItemRelationType = typeof body.workItemRelationType === "string" ? body.workItemRelationType : gateKey;
+  const safeReason = trimToNull(body.reason ?? body.note);
+  const safeEvidenceSummary = trimToNull(body.evidenceSummary);
+  const safeNextAction = trimToNull(body.nextAction);
+
+  let nextGateStatus: YouTubeGateStatus;
+  let actionType: "legacy" | "approve" | "request_rework" | "kill" | "send_to_agent" = "legacy";
+  let shouldCreateWorkItem = body.createWorkItem === true;
+
+  if (requestedAction === "approve") {
+    nextGateStatus = "pass";
+    actionType = "approve";
+  } else if (requestedAction === "request_rework") {
+    nextGateStatus = "rework";
+    actionType = "request_rework";
+    shouldCreateWorkItem = body.createWorkItem !== false;
+  } else if (requestedAction === "kill") {
+    nextGateStatus = "kill";
+    actionType = "kill";
+  } else if (requestedAction === "send_to_agent") {
+    nextGateStatus = previousGate.status && previousGate.status !== "not_started" ? previousGate.status : "in_progress";
+    actionType = "send_to_agent";
+    shouldCreateWorkItem = true;
+  } else {
+    const requestedStatus = body.gateStatus;
+    if (!isGateStatus(requestedStatus)) {
+      return NextResponse.json({ error: "Invalid gateStatus" }, { status: 400 });
+    }
+    nextGateStatus = requestedStatus;
+  }
 
   const updatedGate: YouTubeGateEntry = {
     ...previousGate,
-    status: gateStatus,
-    reason: safeReason || undefined,
-    evidence_summary: safeEvidenceSummary || undefined,
-    next_action: safeNextAction || undefined,
+    status: nextGateStatus,
+    reason: safeReason || previousGate.reason || undefined,
+    evidence_summary: safeEvidenceSummary || previousGate.evidence_summary || undefined,
+    next_action: safeNextAction || previousGate.next_action || undefined,
     decided_at: now,
     decided_by: user.email || user.id,
     updated_at: now,
@@ -122,9 +151,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       buildGateHistoryEntry({
         at: now,
         by: user.email || user.id,
-        status: gateStatus,
+        status: nextGateStatus,
         reason: safeReason,
-        evidenceSummary: safeEvidenceSummary,
+        evidenceSummary: actionType === "send_to_agent" ? null : safeEvidenceSummary,
         nextAction: safeNextAction,
         scores,
       }),
@@ -147,8 +176,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   });
 
   let workItem: { id?: string } | null = null;
-  if (createWorkItem === true) {
-    const relationType = workItemRelationType === "investigate" ? "investigate" : gateKey;
+  if (shouldCreateWorkItem) {
+    const relationType = requestedWorkItemRelationType === "investigate" ? "investigate" : gateKey;
     const title = relationType === "investigate"
       ? `Investigate ${YOUTUBE_GATE_META[gateKey].label}: ${item.title}`
       : `YouTube ${YOUTUBE_GATE_META[gateKey].label}: ${item.title}`;
@@ -160,9 +189,10 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       instruction: createWorkItemInstruction({
         title: item.title,
         gateKey,
-        gateStatus,
+        gateStatus: nextGateStatus,
+        actionType,
         reason: safeReason,
-        evidenceSummary: safeEvidenceSummary,
+        evidenceSummary: actionType === "send_to_agent" ? previousGate.evidence_summary || null : safeEvidenceSummary,
         nextAction: safeNextAction,
       }),
       priority: priorityLevelFromScore(scores.priority),
