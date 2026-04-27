@@ -1,10 +1,10 @@
 import { supabaseAdmin } from "@/lib/supabase/admin";
-import { WorkItemsClient, type WorkEvent, type WorkItem } from "@/components/work-items/WorkItemsClient";
+import { WorkItemsClient, type RecurringWorkRule, type WorkEvent, type WorkItem } from "@/components/work-items/WorkItemsClient";
 
 export const dynamic = "force-dynamic";
 
 export default async function WorkItemsPage() {
-  const [itemsRes, eventsRes] = await Promise.all([
+  const [itemsRes, eventsRes, rulesRes] = await Promise.all([
     supabaseAdmin
       .from("work_items")
       .select("id,title,status,priority,owner_agent,target_agent_id,requested_by,source_type,source_id,kind,created_at,updated_at,started_at,completed_at,scheduled_for,payload")
@@ -16,6 +16,10 @@ export default async function WorkItemsPage() {
       .eq("domain", "work")
       .order("created_at", { ascending: false })
       .limit(100),
+    supabaseAdmin
+      .from("recurring_work_rules")
+      .select("*, recurring_work_occurrences(id, scheduled_for, work_item_id, status)")
+      .order("created_at", { ascending: false }),
   ]);
 
   if (itemsRes.error) {
@@ -26,5 +30,9 @@ export default async function WorkItemsPage() {
     console.error("[WorkItemsPage] Failed to fetch work events:", eventsRes.error);
   }
 
-  return <WorkItemsClient initialItems={(itemsRes.data || []) as WorkItem[]} initialEvents={(eventsRes.data || []) as WorkEvent[]} />;
+  if (rulesRes.error) {
+    console.error("[WorkItemsPage] Failed to fetch recurring rules:", rulesRes.error);
+  }
+
+  return <WorkItemsClient initialItems={(itemsRes.data || []) as WorkItem[]} initialEvents={(eventsRes.data || []) as WorkEvent[]} initialRules={(rulesRes.data || []) as RecurringWorkRule[]} />;
 }

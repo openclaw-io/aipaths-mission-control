@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { createClient } from "@/lib/supabase/client";
 
-type Tab = "live" | "calendar" | "logs";
+type Tab = "live" | "calendar" | "recurring" | "logs";
 
 export interface WorkItem {
   id: string;
@@ -33,6 +33,29 @@ export interface WorkEvent {
   actor: string | null;
   payload: Record<string, unknown> | null;
   created_at: string;
+}
+
+export interface RecurringWorkRule {
+  id: string;
+  title: string;
+  instruction: string;
+  owner_agent: string;
+  target_agent_id: string | null;
+  requested_by: string | null;
+  priority: string | null;
+  cadence_unit: "days" | "weeks";
+  cadence_interval: number;
+  time_of_day: string;
+  timezone: string;
+  start_date: string;
+  end_date: string | null;
+  horizon_days: number;
+  enabled: boolean;
+  metadata: Record<string, unknown> | null;
+  last_materialized_at: string | null;
+  created_at: string;
+  updated_at: string | null;
+  recurring_work_occurrences?: Array<{ id: string; scheduled_for: string; work_item_id: string | null; status: string }>;
 }
 
 const STATUS_STYLES: Record<string, string> = {
@@ -88,9 +111,10 @@ function sortBySchedule(a: WorkItem, b: WorkItem) {
   return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
 }
 
-export function WorkItemsClient({ initialItems, initialEvents }: { initialItems: WorkItem[]; initialEvents: WorkEvent[] }) {
+export function WorkItemsClient({ initialItems, initialEvents, initialRules = [] }: { initialItems: WorkItem[]; initialEvents: WorkEvent[]; initialRules?: RecurringWorkRule[] }) {
   const [items, setItems] = useState(initialItems);
   const [events, setEvents] = useState(initialEvents);
+  const [rules, setRules] = useState(initialRules);
   const [tab, setTab] = useState<Tab>("live");
   const [agentFilter, setAgentFilter] = useState("all");
   const [sourceFilter, setSourceFilter] = useState("all");
@@ -120,6 +144,9 @@ export function WorkItemsClient({ initialItems, initialEvents }: { initialItems:
       if (!alive) return;
       if (!itemsRes.error) setItems((itemsRes.data || []) as WorkItem[]);
       if (!eventsRes.error) setEvents((eventsRes.data || []) as WorkEvent[]);
+      fetch("/api/work-items/recurring-rules").then((res) => res.ok ? res.json() : null).then((body) => {
+        if (alive && body?.rules) setRules(body.rules as RecurringWorkRule[]);
+      }).catch(() => {});
     }
 
     const workChannel = supabase
@@ -183,6 +210,7 @@ export function WorkItemsClient({ initialItems, initialEvents }: { initialItems:
   const tabs: Array<{ id: Tab; label: string; count?: number }> = [
     { id: "live", label: "Live Board", count: readyNow.length + blocked.length + inProgress.length + failed.length },
     { id: "calendar", label: "Calendar", count: scheduledLater.length },
+    { id: "recurring", label: "Recurring Tasks", count: rules.length },
     { id: "logs", label: "Logs", count: events.length },
   ];
 
@@ -217,6 +245,7 @@ export function WorkItemsClient({ initialItems, initialEvents }: { initialItems:
         setItems((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, status: "ready", started_at: null, completed_at: null, updated_at: new Date().toISOString() } : candidate));
       }} />}
       {tab === "calendar" && <CalendarTab grouped={scheduledByDay} onOpen={setSelectedItemId} />}
+      {tab === "recurring" && <RecurringTasksTab rules={rules} onRulesChange={setRules} />}
       {tab === "logs" && <LogsTab events={events} items={items} onOpen={setSelectedItemId} />}
       {selectedItem && <WorkItemDrawer item={selectedItem} events={events.filter((event) => event.entity_id === selectedItem.id)} onClose={() => setSelectedItemId(null)} onUpdated={updateItem} />}
     </div>
@@ -381,6 +410,124 @@ function CalendarTab({ grouped, onOpen }: { grouped: Array<readonly [string, Wor
                 </div>
               </button>
             ))}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+
+function RecurringTasksTab({ rules, onRulesChange }: { rules: RecurringWorkRule[]; onRulesChange: (rules: RecurringWorkRule[]) => void }) {
+  const [title, setTitle] = useState("Systems repo hygiene check");
+  const [ownerAgent, setOwnerAgent] = useState("systems");
+  const [cadenceInterval, setCadenceInterval] = useState(2);
+  const [cadenceUnit, setCadenceUnit] = useState<"days" | "weeks">("days");
+  const [timeOfDay, setTimeOfDay] = useState("02:30");
+  const [instruction, setInstruction] = useState("Check all AIPaths agent repositories for uncommitted changes, make sure meaningful work is committed or clearly reported, and flag any repos that need follow-up.");
+  const [busy, setBusy] = useState<"create" | "materialize" | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+
+  async function refreshRules() {
+    const res = await fetch("/api/work-items/recurring-rules");
+    if (!res.ok) throw new Error(await res.text());
+    const body = await res.json();
+    onRulesChange((body.rules || []) as RecurringWorkRule[]);
+  }
+
+  async function createRule() {
+    setBusy("create");
+    setMessage(null);
+    try {
+      const res = await fetch("/api/work-items/recurring-rules", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title, instruction, owner_agent: ownerAgent, cadence_interval: cadenceInterval, cadence_unit: cadenceUnit, time_of_day: timeOfDay, timezone: "Europe/London", horizon_days: 28 }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      await refreshRules();
+      setMessage("Rule created. Materialize to create the next 4 weeks of work items.");
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Failed to create rule");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function materialize() {
+    setBusy("materialize");
+    setMessage(null);
+    try {
+      const res = await fetch("/api/work-items/recurring-rules/materialize", { method: "POST" });
+      if (!res.ok) throw new Error(await res.text());
+      const body = await res.json();
+      await refreshRules();
+      setMessage(`Materialized ${body.created || 0} new occurrence(s); ${body.existing || 0} already existed.`);
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Failed to materialize rules");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <section className="mt-6 grid gap-4 xl:grid-cols-[420px_1fr]">
+      <div className="rounded-2xl border border-gray-800 bg-[#111118] p-4">
+        <div className="mb-4">
+          <h2 className="text-lg font-semibold text-white">Create recurring task</h2>
+          <p className="text-xs text-gray-500">Rules generate visible scheduled work_items for the next 4 weeks.</p>
+        </div>
+        <div className="space-y-3">
+          <label className="block text-xs text-gray-500">Title<input value={title} onChange={(event) => setTitle(event.target.value)} className="mt-1 w-full rounded-lg border border-gray-700 bg-[#0d0d14] px-3 py-2 text-sm text-white focus:outline-none" /></label>
+          <label className="block text-xs text-gray-500">Agent<input value={ownerAgent} onChange={(event) => setOwnerAgent(event.target.value)} className="mt-1 w-full rounded-lg border border-gray-700 bg-[#0d0d14] px-3 py-2 text-sm text-white focus:outline-none" /></label>
+          <div className="grid grid-cols-3 gap-2">
+            <label className="block text-xs text-gray-500">Every<input type="number" min={1} value={cadenceInterval} onChange={(event) => setCadenceInterval(Number(event.target.value))} className="mt-1 w-full rounded-lg border border-gray-700 bg-[#0d0d14] px-3 py-2 text-sm text-white focus:outline-none" /></label>
+            <label className="block text-xs text-gray-500">Unit<select value={cadenceUnit} onChange={(event) => setCadenceUnit(event.target.value as "days" | "weeks")} className="mt-1 w-full rounded-lg border border-gray-700 bg-[#0d0d14] px-3 py-2 text-sm text-white focus:outline-none"><option value="days">days</option><option value="weeks">weeks</option></select></label>
+            <label className="block text-xs text-gray-500">Time<input type="time" value={timeOfDay} onChange={(event) => setTimeOfDay(event.target.value)} className="mt-1 w-full rounded-lg border border-gray-700 bg-[#0d0d14] px-3 py-2 text-sm text-white focus:outline-none" /></label>
+          </div>
+          <label className="block text-xs text-gray-500">Instruction<textarea value={instruction} onChange={(event) => setInstruction(event.target.value)} rows={8} className="mt-1 w-full rounded-lg border border-gray-700 bg-[#0d0d14] px-3 py-2 text-sm text-white focus:outline-none" /></label>
+          <div className="flex flex-wrap gap-2">
+            <button type="button" onClick={createRule} disabled={busy !== null} className="rounded-lg border border-blue-400/30 bg-blue-500/10 px-3 py-2 text-sm font-medium text-blue-100 hover:bg-blue-500/20 disabled:opacity-50">{busy === "create" ? "Creating…" : "Create rule"}</button>
+            <button type="button" onClick={materialize} disabled={busy !== null} className="rounded-lg border border-green-400/30 bg-green-500/10 px-3 py-2 text-sm font-medium text-green-100 hover:bg-green-500/20 disabled:opacity-50">{busy === "materialize" ? "Materializing…" : "Materialize 4 weeks"}</button>
+          </div>
+          {message && <div className="rounded-lg border border-gray-800 bg-black/20 px-3 py-2 text-xs text-gray-300">{message}</div>}
+        </div>
+      </div>
+
+      <div className="rounded-2xl border border-gray-800 bg-[#111118] p-4">
+        <div className="mb-4 flex items-center justify-between">
+          <div>
+            <h2 className="text-lg font-semibold text-white">Recurring Tasks</h2>
+            <p className="text-xs text-gray-500">Source rules; generated instances appear in Calendar as normal work_items.</p>
+          </div>
+          <span className="rounded-full bg-white/5 px-2 py-0.5 text-xs text-gray-400">{rules.length}</span>
+        </div>
+        {rules.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-gray-800 bg-black/10 px-3 py-8 text-center text-sm text-gray-600">No recurring rules yet.</div>
+        ) : (
+          <div className="space-y-3">
+            {rules.map((rule) => {
+              const occurrences = [...(rule.recurring_work_occurrences || [])].sort((a, b) => new Date(a.scheduled_for).getTime() - new Date(b.scheduled_for).getTime());
+              return (
+                <div key={rule.id} className="rounded-xl border border-gray-800 bg-[#0d0d14] p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="font-semibold text-white">{rule.title}</div>
+                      <div className="mt-1 text-xs text-gray-500">{rule.owner_agent} · every {rule.cadence_interval} {rule.cadence_unit} · {rule.time_of_day} {rule.timezone}</div>
+                    </div>
+                    <span className={`rounded-full border px-2 py-0.5 text-[11px] ${rule.enabled ? "border-green-500/20 bg-green-500/10 text-green-200" : "border-gray-700 bg-gray-800 text-gray-400"}`}>{rule.enabled ? "enabled" : "paused"}</span>
+                  </div>
+                  <div className="mt-3 rounded-lg bg-black/20 px-3 py-2 text-xs leading-relaxed text-gray-300">{rule.instruction}</div>
+                  <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-gray-500">
+                    <span>Horizon: {rule.horizon_days}d</span>
+                    <span>·</span>
+                    <span>Materialized: {occurrences.length}</span>
+                    {occurrences[0] && <><span>·</span><span>Next: {formatDate(occurrences[0].scheduled_for)}</span></>}
+                    {rule.last_materialized_at && <><span>·</span><span>Last run: {formatDate(rule.last_materialized_at)}</span></>}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
