@@ -31,7 +31,7 @@ export async function findOpenPipelineWorkItem(
 
   if (error) throw error;
 
-  return (data || []).find((item: any) => item?.payload?.relation_type === relationType) || null;
+  return (data || []).find((item: { payload?: { relation_type?: string } | null }) => item?.payload?.relation_type === relationType) || null;
 }
 
 export async function createPipelineWorkItem(db: SupabaseClient, input: PipelineWorkInput) {

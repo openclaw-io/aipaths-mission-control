@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { NextResponse, type NextRequest } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { AGENT_ROUTING, isRoutedAgent } from "@/lib/agent-routing";
@@ -82,10 +83,56 @@ function buildWorkItemStatusCommand(workItemId: string, status: "in_progress" | 
   return `bash -lc ${shellSingleQuote(script)}`;
 }
 
+async function checkModelHealth(agentId = "systems") {
+  const gatewayUrl = process.env.OPENCLAW_GATEWAY_URL || "http://127.0.0.1:18789";
+  const gatewayToken = process.env.OPENCLAW_GATEWAY_TOKEN;
+
+  if (!gatewayToken) return { ok: false, agentId, reason: "missing_OPENCLAW_GATEWAY_TOKEN" };
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Number(process.env.OPENCLAW_MODEL_HEALTH_TIMEOUT_MS || 60000));
+  try {
+    const res = await fetch(`${gatewayUrl}/v1/chat/completions`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "Authorization": `Bearer ${gatewayToken}`,
+        "Content-Type": "application/json",
+        "x-openclaw-agent-id": agentId,
+        "x-openclaw-session-key": `agent:${agentId}:mission-control:model-health:${Date.now()}`,
+      },
+      body: JSON.stringify({
+        model: `openclaw:${agentId}`,
+        messages: [{ role: "user", content: "Mission Control model health check. Reply OK only." }],
+        stream: false,
+      }),
+    });
+    const text = await res.text().catch(() => "");
+    let body: any = null;
+    try { body = text ? JSON.parse(text) : null; } catch { body = null; }
+    const content = body?.choices?.[0]?.message?.content;
+    const normalized = typeof content === "string" ? content.trim().toLowerCase() : "";
+    const looksHealthy = res.ok && normalized === "ok";
+    return looksHealthy
+      ? { ok: true, agentId, status: res.status }
+      : {
+          ok: false,
+          agentId,
+          status: res.status,
+          reason: res.ok
+            ? `unexpected_health_response: ${content ? String(content).slice(0, 300) : text.slice(0, 300)}`
+            : text.slice(0, 500) || `HTTP ${res.status}`,
+        };
+  } catch (err) {
+    return { ok: false, agentId, reason: err instanceof Error ? err.message : String(err) };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function wakeAgent(agentId: string, workItemId: string, message: string): Promise<boolean> {
   const gatewayUrl = process.env.OPENCLAW_GATEWAY_URL || "http://127.0.0.1:18789";
   const gatewayToken = process.env.OPENCLAW_GATEWAY_TOKEN;
-  const wakeTimeoutMs = Number(process.env.OPENCLAW_WAKE_TIMEOUT_MS || 120_000);
 
   if (!gatewayToken) {
     console.log(`[notify-work-item] No OPENCLAW_GATEWAY_TOKEN — skipping agent wake for ${agentId}`);
@@ -93,39 +140,114 @@ async function wakeAgent(agentId: string, workItemId: string, message: string): 
   }
 
   const sessionKey = buildWorkItemSessionKey(agentId, workItemId);
+  const payload = {
+    gatewayUrl,
+    gatewayToken,
+    agentId,
+    sessionKey,
+    message,
+    workItemId,
+    missionControlApi: process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3001",
+    agentApiKey: process.env.AGENT_API_KEY || "",
+  };
 
+  const script = String.raw`
+const fs = require("node:fs");
+const payload = JSON.parse(process.env.OPENCLAW_WAKE_PAYLOAD || "{}");
+const logPath = process.env.OPENCLAW_WAKE_LOG || "/tmp/openclaw-work-item-wake.log";
+const log = (line) => fs.appendFileSync(logPath, new Date().toISOString() + " " + line + "\n");
+async function restoreReady(reason) {
+  if (!payload.agentApiKey || !payload.missionControlApi || !payload.workItemId) return;
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), wakeTimeoutMs);
-
-    const res = await fetch(`${gatewayUrl}/v1/chat/completions`, {
-      method: "POST",
+    const retryDelayMs = Number(process.env.OPENCLAW_WAKE_RETRY_DELAY_MS || 5 * 60 * 1000);
+    await fetch(payload.missionControlApi + "/api/agent/work-items/" + payload.workItemId, {
+      method: "PATCH",
       headers: {
-        "Authorization": `Bearer ${gatewayToken}`,
+        "Authorization": "Bearer " + payload.agentApiKey,
         "Content-Type": "application/json",
-        "x-openclaw-agent-id": agentId,
-        "x-openclaw-session-key": sessionKey,
       },
       body: JSON.stringify({
-        model: `openclaw:${agentId}`,
-        messages: [{ role: "user", content: message }],
+        status: "ready",
+        scheduled_for: new Date(Date.now() + retryDelayMs).toISOString(),
+        payload_patch: {
+          dispatch_state: "ready_after_wake_failure",
+          dispatch_failure_reason: reason,
+          dispatch_last_failed_at: new Date().toISOString(),
+          dispatch_retry_scheduled_for: new Date(Date.now() + retryDelayMs).toISOString(),
+        },
+        payload_increment: { wake_failure_count: 1 },
+      }),
+    });
+  } catch (err) {
+    log("[notify-work-item] failed to restore ready for " + payload.workItemId + ": " + (err && err.message ? err.message : String(err)));
+  }
+}
+(async () => {
+  try {
+    const res = await fetch(payload.gatewayUrl + "/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + payload.gatewayToken,
+        "Content-Type": "application/json",
+        "x-openclaw-agent-id": payload.agentId,
+        "x-openclaw-session-key": payload.sessionKey,
+      },
+      body: JSON.stringify({
+        model: "openclaw:" + payload.agentId,
+        messages: [{ role: "user", content: payload.message }],
         stream: false,
       }),
-      signal: controller.signal,
     });
-
-    clearTimeout(timeoutId);
-    console.log(`[notify-work-item] ${agentId} wake: HTTP ${res.status}`);
-    return res.ok;
-  } catch (err: unknown) {
-    if (err instanceof Error && err.name === "AbortError") {
-      console.error(`[notify-work-item] ${agentId} wake timed out after ${wakeTimeoutMs}ms`);
-      return false;
+    const text = await res.text().catch(() => "");
+    log("[notify-work-item] " + payload.agentId + " " + payload.workItemId + " HTTP " + res.status + " " + text.slice(0, 500));
+    if (!res.ok) {
+      await restoreReady("wake_http_" + res.status + ": " + text.slice(0, 300));
     }
+    process.exit(res.ok ? 0 : 1);
+  } catch (err) {
+    const reason = err && err.message ? err.message : String(err);
+    log("[notify-work-item] " + payload.agentId + " " + payload.workItemId + " failed: " + reason);
+    await restoreReady("wake_fetch_failed: " + reason);
+    process.exit(1);
+  }
+})();
+`;
+
+  try {
+    const child = spawn(process.execPath, ["-e", script], {
+      detached: true,
+      stdio: "ignore",
+      env: {
+        ...process.env,
+        OPENCLAW_WAKE_PAYLOAD: JSON.stringify(payload),
+        OPENCLAW_WAKE_LOG: process.env.OPENCLAW_WAKE_LOG || "/tmp/openclaw-work-item-wake.log",
+      },
+    });
+    child.unref();
+    console.log(`[notify-work-item] spawned detached wake pid ${child.pid} for ${agentId} ${workItemId}`);
+    return true;
+  } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`[notify-work-item] ${agentId} wake failed:`, message);
+    console.error(`[notify-work-item] failed to spawn detached wake for ${agentId}:`, message);
     return false;
   }
+}
+
+export async function GET(request: NextRequest) {
+  const bearerToken = request.headers.get("authorization")?.replace("Bearer ", "");
+  const isInternalCall = !!bearerToken && bearerToken === process.env.AGENT_API_KEY;
+
+  if (!isInternalCall) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const agentId = request.nextUrl.searchParams.get("agent") || "systems";
+  if (!isRoutedAgent(agentId)) {
+    return NextResponse.json({ ok: false, error: `Unknown agent: ${agentId}` }, { status: 400 });
+  }
+
+  const health = await checkModelHealth(agentId);
+  return NextResponse.json(health, { status: health.ok ? 200 : 503 });
 }
 
 export async function POST(request: NextRequest) {
@@ -183,7 +305,24 @@ export async function POST(request: NextRequest) {
   if (item.scheduled_for) message += `\nScheduled for: ${item.scheduled_for}\n`;
   if (item.source_type) message += `\nSource: ${item.source_type}\n`;
 
+  const workPayload = (item.payload || {}) as Record<string, unknown>;
+  const isCommunityPost = workPayload.pipeline_type === "community_post";
+  const actionName = typeof workPayload.action === "string" ? workPayload.action : "";
+  const isCommunityDraft = isCommunityPost && ["draft_community_news", "develop_community_post", "draft_guide_announcement", "revise_community_announcement"].includes(actionName);
+  const isCommunitySchedule = isCommunityPost && actionName === "schedule_community_post";
+  const isCommunityPublish = isCommunityPost && (actionName === "publish_community_post" || workPayload.relation_type === "publish");
+
   message += `\n## Execution context\nThis wake is running in a detached Mission Control work-item session, not a user chat thread. Do not assume you can reply in-context to a human. If you need to send an external message, use the appropriate tool explicitly.\n`;
+
+  if (isCommunityDraft) {
+    message += `\n## Community draft contract\nWrite the final community/news copy into the Mission Control pipeline card. Do not DM Gonza with the draft and do not publish it. Complete this work item only after PATCHing the final copy as output.copy.text or as a clearly labeled final copy in result; Mission Control will move the card to ready_for_review.\n`;
+  }
+  if (isCommunitySchedule) {
+    message += `\n## Community schedule contract\nSchedule the already-approved community post. Do not publish now unless it is explicitly due. Complete this work item with scheduled_for (ISO timestamp) so Mission Control can set the pipeline card to scheduled; the due worker will create the later publish task.\n`;
+  }
+  if (isCommunityPublish) {
+    message += `\n## Community publish contract\nPublish only the approved copy. After publishing, complete this work item with current_url/published_at if available. Also send a very short agent-log style note, e.g. “Publiqué la noticia en el canal de news de la comunidad.”\n`;
+  }
 
   const claimCommand = buildWorkItemStatusCommand(item.id, "in_progress");
   const completeCommand = buildWorkItemStatusCommand(item.id, "done");
@@ -243,5 +382,5 @@ ${failCommand}
     }
   }
 
-  return NextResponse.json({ ok: true, agent, woke, workItemId: item.id });
+  return NextResponse.json({ ok: true, agent, woke, workItemId: item.id, wakeMode: "detached_spawn" });
 }

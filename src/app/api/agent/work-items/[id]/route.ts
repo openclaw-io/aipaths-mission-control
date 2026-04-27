@@ -1,7 +1,11 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { verifyPublishedContent } from "@/lib/content/live-verification";
+import { createPipelineWorkItem } from "@/lib/work-items/pipeline-materializer";
 
 export const dynamic = "force-dynamic";
+
+type JsonRecord = Record<string, unknown>;
 
 function checkAuth(req: NextRequest): boolean {
   const token = req.headers.get("authorization")?.replace("Bearer ", "");
@@ -15,6 +19,150 @@ function createServiceClient() {
   );
 }
 
+function getNestedString(value: unknown, path: string[]) {
+  let current: unknown = value;
+  for (const key of path) {
+    if (!current || typeof current !== "object") return null;
+    current = (current as Record<string, unknown>)[key];
+  }
+  return typeof current === "string" && current.trim() ? current.trim() : null;
+}
+
+function extractCurrentUrl(body: Record<string, unknown>) {
+  if (typeof body.current_url === "string" && body.current_url.trim()) return body.current_url.trim();
+  const outputUrl = getNestedString(body.output, ["current_url"]);
+  if (outputUrl) return outputUrl;
+  const resultUrl = typeof body.result === "string" ? body.result.match(/https?:\/\/\S+/)?.[0] : null;
+  return resultUrl?.replace(/[),.;]+$/, "") || null;
+}
+
+function extractCommunityCopy(body: Record<string, unknown>) {
+  const outputCopy =
+    getNestedString(body.output, ["copy", "text"]) ||
+    getNestedString(body.output, ["copy"]) ||
+    getNestedString(body.output, ["text"]);
+  if (outputCopy) return outputCopy;
+  if (typeof body.result === "string" && body.result.trim()) {
+    const result = body.result.trim();
+    const labeledDraft = result.match(/(?:Draft community\/news post \(Spanish\)|Draft community\/news post|Draft news post|Borrador(?: listo)?(?: para aprobaci[oó]n)?(?:\s*[—:-]\s*noticia comunidad)?|Copy|Final copy|Texto final)\s*[:\n]+([\s\S]+)/i)?.[1]?.trim();
+    const candidate = (labeledDraft || result)
+      .replace(/\n+Recommendation:[\s\S]*$/i, "")
+      .replace(/\n+Recomendaci[oó]n:[\s\S]*$/i, "")
+      .trim();
+    const genericCompletionOnly = /^(drafted|sent|validated|recommendation|publish after|copy listo|borrador listo|no publicado|hecho|listo)[\s\S]{0,220}$/i.test(candidate);
+    return genericCompletionOnly ? null : candidate;
+  }
+  return null;
+}
+
+function extractCommunityScheduledFor(body: Record<string, unknown>) {
+  if (typeof body.scheduled_for === "string" && body.scheduled_for.trim()) return body.scheduled_for.trim();
+  const outputScheduledFor = getNestedString(body.output, ["scheduled_for"]) || getNestedString(body.output, ["schedule", "scheduled_for"]);
+  if (outputScheduledFor) return outputScheduledFor;
+  if (typeof body.result === "string") {
+    const match = body.result.match(/20\d{2}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:?\d{2})/);
+    if (match) return match[0];
+  }
+  return null;
+}
+
+async function notifyWorkItem(workItemId: string, agent: string, title: string) {
+  if (!process.env.AGENT_API_KEY) return;
+  const baseUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3001";
+  await fetch(`${baseUrl}/api/work-items/notify`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.AGENT_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ workItemId, agent, title, action: "created" }),
+  }).catch(() => {});
+}
+
+async function createCommunityAnnouncementForGuide(db: ReturnType<typeof createServiceClient>, input: {
+  guide: JsonRecord;
+  url: string;
+  requestedBy: string | null;
+}) {
+  const { guide, url, requestedBy } = input;
+  const guideTitle = typeof guide.title === "string" ? guide.title : "published guide";
+  const guideSlug = typeof guide.slug === "string" ? guide.slug : null;
+  const guidePriority = typeof guide.priority === "string" ? guide.priority : "medium";
+  const guideRequestedBy = typeof guide.requested_by === "string" ? guide.requested_by : null;
+  const guidePipelineType = typeof guide.pipeline_type === "string" ? guide.pipeline_type : "guide";
+
+  const { data: existingCommunityItem } = await db
+    .from("pipeline_items")
+    .select("id, title, status")
+    .eq("pipeline_type", "community_post")
+    .eq("source_id", guide.id)
+    .maybeSingle();
+
+  const communityItem = existingCommunityItem || (await db
+    .from("pipeline_items")
+    .insert({
+      pipeline_type: "community_post",
+      title: `Announce guide: ${guideTitle}`,
+      slug: guideSlug ? `announce-${guideSlug}` : null,
+      status: "draft",
+      priority: guidePriority,
+      owner_agent: "community",
+      requested_by: requestedBy || guideRequestedBy || "mission-control",
+      source_type: "manual",
+      source_id: guide.id,
+      current_url: null,
+      metadata: {
+        kind: "guide_announcement",
+        channel: "discord",
+        target: { platform: "discord" },
+        source: {
+          type: guidePipelineType,
+          pipeline_item_id: guide.id,
+          url,
+          title: guideTitle,
+          slug: guideSlug,
+        },
+        copy: { text: "", poll_options: [] },
+        automation: {
+          trigger: "published_content_verified",
+          created_at: new Date().toISOString(),
+        },
+      },
+    })
+    .select("id, title, status")
+    .single()).data;
+
+  if (!communityItem?.id) return null;
+
+  const { workItem } = await createPipelineWorkItem(db, {
+    pipelineItemId: communityItem.id,
+    pipelineType: "community_post",
+    title: `Draft Discord announcement: ${guide.title}`,
+    instruction: [
+      `Community post item: ${communityItem.title}`,
+      "",
+      "Task:",
+      "- Draft a concise Discord announcement for this newly published guide.",
+      "- Include the guide link and one clear reason the community should read it.",
+      "- Keep it ready for Gonza review; do not publish directly.",
+      "- When completing the work item, include the final announcement copy in the PATCH body as result or output.copy.text so Mission Control can save it for review.",
+      "",
+      `Guide: ${guideTitle}`,
+      `URL: ${url}`,
+    ].join("\n"),
+    priority: guidePriority,
+    ownerAgent: "community",
+    requestedBy: requestedBy || guideRequestedBy || "mission-control",
+    relationType: "distribute_community",
+    action: "draft_guide_announcement",
+    trigger: "published_content_verified",
+  });
+
+  if (workItem?.id) await notifyWorkItem(workItem.id, "community", guideTitle);
+
+  return { communityItem, workItem };
+}
+
 export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -23,7 +171,7 @@ export async function PATCH(
 
   const { id } = await params;
   const body = await req.json();
-  const { status, result, output, current_url, published_at } = body;
+  const { status, result, output, current_url, published_at, scheduled_for, payload_patch, payload_increment } = body;
 
   const validStatuses = ["draft", "ready", "blocked", "in_progress", "done", "failed", "canceled"];
   if (status && !validStatuses.includes(status)) {
@@ -44,11 +192,28 @@ export async function PATCH(
 
   const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
   if (status) updates.status = status;
+  if (status === "ready") {
+    updates.started_at = null;
+    updates.completed_at = null;
+  }
   if (status === "in_progress") updates.started_at = new Date().toISOString();
   if (status === "done") updates.completed_at = new Date().toISOString();
   if (status === "failed") updates.completed_at = new Date().toISOString();
+  if (typeof scheduled_for === "string" || scheduled_for === null) updates.scheduled_for = scheduled_for;
   if (result) updates.instruction = `${existing.instruction || ""}\n\nResult:\n${String(result)}`.trim();
   if (output) updates.payload = { ...(existing.payload || {}), output };
+  if (payload_patch && typeof payload_patch === "object" && !Array.isArray(payload_patch)) {
+    updates.payload = { ...(existing.payload || {}), ...((updates.payload as Record<string, unknown>) || {}), ...(payload_patch as Record<string, unknown>) };
+  }
+  if (payload_increment && typeof payload_increment === "object" && !Array.isArray(payload_increment)) {
+    const basePayload = { ...(existing.payload || {}), ...((updates.payload as Record<string, unknown>) || {}) };
+    for (const [key, rawDelta] of Object.entries(payload_increment as Record<string, unknown>)) {
+      const delta = Number(rawDelta);
+      if (!Number.isFinite(delta)) continue;
+      basePayload[key] = Number(basePayload[key] || 0) + delta;
+    }
+    updates.payload = basePayload;
+  }
 
   const { data, error } = await db
     .from("work_items")
@@ -59,25 +224,178 @@ export async function PATCH(
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-  const payload = data.payload || {};
-  if (status === "done" && payload.pipeline_type === "blog" && payload.pipeline_item_id) {
-    const pipelineItemId = payload.pipeline_item_id as string;
+  const payload = (data.payload || {}) as Record<string, unknown>;
+  const sourceBackedPipelineItemId = ["pipeline_item", "service"].includes(String(data.source_type || "")) && typeof data.source_id === "string"
+    ? data.source_id
+    : null;
+  const inferredPipelineItemId = typeof payload.pipeline_item_id === "string" ? payload.pipeline_item_id : sourceBackedPipelineItemId;
 
-    if (payload.action === "localize_blog_to_en") {
+  if (status === "done" && inferredPipelineItemId) {
+    const pipelineItemId = inferredPipelineItemId;
+    let pipelineType = String(payload.pipeline_type || "");
+    let action = String(payload.action || "");
+
+    if (!pipelineType || !action) {
+      const { data: inferredPipelineItem } = await db
+        .from("pipeline_items")
+        .select("pipeline_type")
+        .eq("id", pipelineItemId)
+        .maybeSingle();
+      pipelineType = pipelineType || String(inferredPipelineItem?.pipeline_type || "");
+
+      const title = String(data.title || "").toLowerCase();
+      const relationType = typeof payload.relation_type === "string" ? payload.relation_type : "";
+      if (!action && pipelineType === "community_post") {
+        if (relationType === "publish" || title.includes("publish")) action = "publish_community_post";
+        else if (relationType === "schedule" || title.includes("schedule")) action = "schedule_community_post";
+        else action = title.includes("revise") ? "revise_community_announcement" : "draft_guide_announcement";
+      } else if (!action && (pipelineType === "blog" || pipelineType === "doc" || pipelineType === "guide")) {
+        if (title.includes("publish")) action = pipelineType === "blog" ? "publish_blog" : "publish_guide";
+        if (title.includes("localize")) action = pipelineType === "blog" ? "localize_blog_to_en" : "localize_guide_to_en";
+      }
+    }
+
+    const isBlog = pipelineType === "blog";
+    const isGuide = ["doc", "guide"].includes(pipelineType);
+    const isCommunity = pipelineType === "community_post";
+    const isLocalizeAction = action === "localize_blog_to_en" || action === "localize_guide_to_en";
+    const isPublishAction = action === "publish_blog" || action === "publish_guide";
+    const isCommunityDraftAction = action === "draft_guide_announcement" || action === "revise_community_announcement" || action === "draft_community_news" || action === "develop_community_post";
+    const isCommunityScheduleAction = action === "schedule_community_post";
+    const isCommunityPublishAction = action === "publish_community_post";
+
+    if (isCommunity && isCommunityPublishAction) {
+      const publishUrl = extractCurrentUrl(body as Record<string, unknown>);
+      const { data: communityItem } = await db
+        .from("pipeline_items")
+        .select("metadata")
+        .eq("id", pipelineItemId)
+        .eq("pipeline_type", "community_post")
+        .maybeSingle();
+
+      const communityMetadata = ((communityItem?.metadata || {}) as JsonRecord) || {};
+      await db
+        .from("pipeline_items")
+        .update({
+          status: "published",
+          published_at: published_at || new Date().toISOString(),
+          current_url: publishUrl || current_url || null,
+          metadata: {
+            ...communityMetadata,
+            runtime_feedback: {
+              ...((communityMetadata.runtime_feedback || {}) as JsonRecord),
+              last_status: "published",
+              last_work_item_id: data.id,
+              updated_at: new Date().toISOString(),
+            },
+          },
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", pipelineItemId);
+    }
+
+    if (isCommunity && isCommunityDraftAction) {
+      const copyText = extractCommunityCopy(body as Record<string, unknown>);
+      const { data: communityItem } = await db
+        .from("pipeline_items")
+        .select("metadata")
+        .eq("id", pipelineItemId)
+        .eq("pipeline_type", "community_post")
+        .maybeSingle();
+
+      if (communityItem) {
+        const communityMetadata = (communityItem.metadata || {}) as JsonRecord;
+        const copyMetadata = (communityMetadata.copy || {}) as JsonRecord;
+        const nextStatus = copyText ? "ready_for_review" : "draft";
+        await db
+          .from("pipeline_items")
+          .update({
+            status: nextStatus,
+            metadata: {
+              ...communityMetadata,
+              copy: {
+                ...copyMetadata,
+                text: copyText || copyMetadata.text || "",
+              },
+              review: copyText
+                ? communityMetadata.review
+                : {
+                    ...((communityMetadata.review || {}) as JsonRecord),
+                    notes: "Community work item completed without announcement copy. Needs a clean re-draft before review.",
+                    last_requested_at: new Date().toISOString(),
+                    last_requested_by: "system",
+                  },
+              runtime_feedback: {
+                ...((communityMetadata.runtime_feedback || {}) as JsonRecord),
+                last_status: copyText ? "copy_saved" : "completed_without_copy",
+                last_work_item_id: data.id,
+                updated_at: new Date().toISOString(),
+              },
+            },
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", pipelineItemId);
+      }
+    }
+
+    if (isCommunity && isCommunityScheduleAction) {
+      const scheduledFor = extractCommunityScheduledFor(body as Record<string, unknown>);
+      const { data: communityItem } = await db
+        .from("pipeline_items")
+        .select("metadata, scheduled_for")
+        .eq("id", pipelineItemId)
+        .eq("pipeline_type", "community_post")
+        .maybeSingle();
+
+      if (communityItem) {
+        const communityMetadata = (communityItem.metadata || {}) as JsonRecord;
+        const finalScheduledFor = scheduledFor || (typeof communityItem.scheduled_for === "string" ? communityItem.scheduled_for : null);
+        await db
+          .from("pipeline_items")
+          .update({
+            status: finalScheduledFor ? "scheduled" : "approved",
+            scheduled_for: finalScheduledFor,
+            metadata: {
+              ...communityMetadata,
+              schedule: {
+                ...((communityMetadata.schedule || {}) as JsonRecord),
+                scheduled_for: finalScheduledFor,
+                scheduled_at: new Date().toISOString(),
+                scheduled_by: data.owner_agent || "community",
+              },
+              runtime_feedback: {
+                ...((communityMetadata.runtime_feedback || {}) as JsonRecord),
+                last_status: finalScheduledFor ? "scheduled" : "schedule_missing_date",
+                last_work_item_id: data.id,
+                updated_at: new Date().toISOString(),
+              },
+            },
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", pipelineItemId);
+      }
+    }
+
+    if ((isBlog || isGuide) && isLocalizeAction) {
+      const label = isGuide ? "guide" : "blog";
+      const publishAction = isGuide ? "publish_guide" : "publish_blog";
       const { data: pipelineItem } = await db
         .from("pipeline_items")
-        .select("metadata, title, priority")
+        .select("metadata, title, priority, scheduled_for")
         .eq("id", pipelineItemId)
         .single();
+
+      const pipelineMetadata = (pipelineItem?.metadata || {}) as Record<string, unknown>;
+      const localizationMetadata = (pipelineMetadata.localization || {}) as Record<string, unknown>;
 
       await db
         .from("pipeline_items")
         .update({
           status: "scheduled",
           metadata: {
-            ...(pipelineItem?.metadata || {}),
+            ...pipelineMetadata,
             localization: {
-              ...(((pipelineItem?.metadata || {}) as any).localization || {}),
+              ...localizationMetadata,
               en_ready: true,
               translated_at: new Date().toISOString(),
             },
@@ -92,52 +410,132 @@ export async function PATCH(
           kind: "task",
           source_type: "service",
           source_id: pipelineItemId,
-          title: `Publish blog: ${pipelineItem?.title || existing.title}`,
+          title: `Publish ${label}: ${pipelineItem?.title || existing.title}`,
           instruction: [
-            `Pipeline blog item: ${pipelineItem?.title || existing.title}`,
+            `Pipeline ${label} item: ${pipelineItem?.title || existing.title}`,
             "",
             "Task:",
-            "- Publish the blog to the website",
+            `- Publish the ${label} to the website`,
             "- When done, update the work item with current_url and optional notes",
             "- Mission Control will mark the pipeline item live and store published_at/current_url",
           ].join("\n"),
-          status: "draft",
+          // Publication work items are scheduled work. The scheduler should
+          // dispatch them only after a publication date is set and due; do not
+          // wake dev immediately from the localization completion hook.
+          status: pipelineItem?.scheduled_for ? "ready" : "draft",
+          scheduled_for: pipelineItem?.scheduled_for || null,
           priority: pipelineItem?.priority || existing.priority || "medium",
           owner_agent: "dev",
+          target_agent_id: "dev",
           requested_by: existing.requested_by,
           payload: {
             trigger: "work_item_completion",
-            pipeline_type: "blog",
+            pipeline_type: pipelineType,
             pipeline_item_id: pipelineItemId,
-            action: "publish_blog",
+            action: publishAction,
           },
         })
         .select("id")
         .single();
 
-      if (publishWorkItem?.id && process.env.AGENT_API_KEY) {
-        const baseUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3001";
-        await fetch(`${baseUrl}/api/work-items/notify`, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${process.env.AGENT_API_KEY}`,
-            "Content-Type": "application/json",
+      if (publishWorkItem?.id) {
+        await db.from("event_log").insert({
+          domain: "work",
+          event_type: "work_item.publication_scheduled",
+          entity_type: "work_item",
+          entity_id: publishWorkItem.id,
+          actor: "pipeline-publication",
+          payload: {
+            pipeline_type: pipelineType,
+            pipeline_item_id: pipelineItemId,
+            action: publishAction,
+            scheduled_for: pipelineItem?.scheduled_for || null,
           },
-          body: JSON.stringify({ workItemId: publishWorkItem.id, agent: "dev", title: pipelineItem?.title || existing.title, action: "created" }),
-        }).catch(() => {});
+        });
       }
     }
 
-    if (payload.action === "publish_blog") {
-      await db
+    if ((isBlog || isGuide) && isPublishAction) {
+      const publishUrl = extractCurrentUrl(body as Record<string, unknown>);
+      const { data: pipelineItem, error: pipelineError } = await db
         .from("pipeline_items")
-        .update({
-          status: "live",
-          published_at: published_at || new Date().toISOString(),
-          current_url: current_url || null,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", pipelineItemId);
+        .select("*")
+        .eq("id", pipelineItemId)
+        .single();
+
+      if (!pipelineError && pipelineItem) {
+        const pipelineMetadata = (pipelineItem.metadata || {}) as JsonRecord;
+        const expectedDescription =
+          getNestedString(pipelineMetadata, ["seo", "meta_description"]) ||
+          getNestedString(pipelineMetadata, ["draft_summary"]) ||
+          getNestedString(pipelineMetadata, ["summary"]);
+
+        const verification = await verifyPublishedContent({
+          type: isGuide ? "guide" : "blog",
+          url: publishUrl || "",
+          expectedTitle: pipelineItem.title,
+          expectedSlug: pipelineItem.slug,
+          expectedDescription,
+        });
+
+        const verificationMetadata = {
+          ...(pipelineMetadata.publication_verification || {}),
+          checked_at: new Date().toISOString(),
+          work_item_id: data.id,
+          url: publishUrl || null,
+          result: verification,
+        };
+
+        if (verification.ok) {
+          const liveUrl = verification.finalUrl || publishUrl;
+          await db
+            .from("pipeline_items")
+            .update({
+              status: "live",
+              published_at: published_at || new Date().toISOString(),
+              current_url: liveUrl,
+              metadata: {
+                ...pipelineMetadata,
+                publication_verification: verificationMetadata,
+              },
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", pipelineItemId);
+
+          if (isGuide) {
+            await createCommunityAnnouncementForGuide(db, {
+              guide: { ...pipelineItem, current_url: liveUrl },
+              url: liveUrl || publishUrl || "",
+              requestedBy: existing.requested_by || data.requested_by || null,
+            });
+          }
+        } else {
+          await db
+            .from("pipeline_items")
+            .update({
+              metadata: {
+                ...pipelineMetadata,
+                publication_verification: verificationMetadata,
+              },
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", pipelineItemId);
+
+          await db.from("event_log").insert({
+            domain: "content",
+            event_type: "published_content.verification_failed",
+            entity_type: "pipeline_item",
+            entity_id: pipelineItemId,
+            actor: data.owner_agent || "dev",
+            payload: {
+              pipeline_type: pipelineType,
+              action,
+              work_item_id: data.id,
+              verification,
+            },
+          });
+        }
+      }
     }
   }
 
@@ -152,10 +550,11 @@ export async function PATCH(
       requested_by: data.requested_by,
       source_type: data.source_type,
       source_id: data.source_id,
-      pipeline_type: payload.pipeline_type,
-      pipeline_item_id: payload.pipeline_item_id,
-      action: payload.action,
+      pipeline_type: typeof payload.pipeline_type === "string" ? payload.pipeline_type : null,
+      pipeline_item_id: typeof payload.pipeline_item_id === "string" ? payload.pipeline_item_id : null,
+      action: typeof payload.action === "string" ? payload.action : null,
       current_url: current_url || null,
+      scheduled_for: typeof scheduled_for === "string" || scheduled_for === null ? scheduled_for : undefined,
     },
   });
 

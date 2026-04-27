@@ -17,6 +17,12 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const { id } = await params;
   const body = await request.json().catch(() => ({}));
   const comment = typeof body?.comment === "string" ? body.comment.trim() : "";
+  const destinations = Array.isArray(body?.destinations)
+    ? body.destinations
+        .filter((value: unknown): value is string => typeof value === "string")
+        .map((value: string) => value.trim())
+        .filter(Boolean)
+    : [];
   const ownerAgent = typeof body?.ownerAgent === "string" ? body.ownerAgent.trim() : "";
   const collaborators = Array.isArray(body?.collaborators)
     ? body.collaborators
@@ -30,6 +36,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       enrichedItemId: id,
       reviewer: user.email || user.id,
       notes: comment || undefined,
+      destinations,
       ownerAgent: ownerAgent || undefined,
       collaborators,
     });

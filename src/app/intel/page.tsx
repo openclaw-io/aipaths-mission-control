@@ -59,9 +59,9 @@ export default async function IntelInboxPage({
 
   return (
     <div>
-      <h1 className="text-2xl font-bold text-white">🧠 Intel Inbox</h1>
+      <h1 className="text-2xl font-bold text-white">Intel Inbox</h1>
       <p className="mt-1 text-sm text-gray-500">
-        Review enriched intel signals and decide what should move into pipeline.
+        Review enriched intel signals and route the strongest ones into the right pipeline.
       </p>
       <div className="mt-6">
         <ContentInboxClient

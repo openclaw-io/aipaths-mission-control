@@ -6,8 +6,8 @@ export default async function OfficePage() {
 
   const [tasksRes, memoryRes, cronRes] = await Promise.all([
     supabase
-      .from("agent_tasks")
-      .select("id, title, agent, status, created_at, started_at, completed_at")
+      .from("work_items")
+      .select("id, title, owner_agent, target_agent_id, status, created_at, started_at, completed_at")
       .order("created_at", { ascending: false }),
     supabase
       .from("memories")

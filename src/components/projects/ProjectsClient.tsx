@@ -2,9 +2,9 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { CreateEpicModal } from "./CreateEpicModal";
-import { ProjectCardV1 } from "./ProjectCardV1";
-import { ProjectDetailV1 } from "./ProjectDetailV1";
+import { CreateProjectModal } from "./CreateProjectModal";
+import { ProjectCard } from "./ProjectCard";
+import { ProjectDetail } from "./ProjectDetail";
 import { WorkflowLegendDemo } from "./WorkflowLegendDemo";
 import { QueueSchedulerStatus } from "./QueueSchedulerStatus";
 import type { ProjectDetailPayload, ProjectGalleryCard } from "@/lib/projects/read-model";
@@ -164,7 +164,7 @@ export function ProjectsClient({
         <div className="space-y-6">
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
             {sorted.map((project) => (
-              <ProjectCardV1 key={project.id} project={project} onOpen={() => setExpandedProject(project.id)} />
+              <ProjectCard key={project.id} project={project} onOpen={() => setExpandedProject(project.id)} />
             ))}
           </div>
           <WorkflowLegendDemo />
@@ -172,10 +172,10 @@ export function ProjectsClient({
       )}
 
       {expandedProject && projectDetails[expandedProject] && (
-        <ProjectDetailV1 project={projectDetails[expandedProject]} onClose={() => setExpandedProject(null)} />
+        <ProjectDetail project={projectDetails[expandedProject]} onClose={() => setExpandedProject(null)} />
       )}
 
-      {showCreate && <CreateEpicModal onClose={() => setShowCreate(false)} />}
+      {showCreate && <CreateProjectModal onClose={() => setShowCreate(false)} />}
     </>
   );
 }

@@ -1,5 +1,7 @@
 "use client";
 
+/* eslint-disable react-hooks/set-state-in-effect */
+
 import { useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { IntelInboxDetail } from "./IntelInboxDetail";
@@ -7,6 +9,12 @@ import { IntelInboxList } from "./IntelInboxList";
 import type { IntelInboxDetail as IntelInboxDetailType, IntelInboxListItem } from "@/lib/intel-inbox";
 
 type DetailResponse = IntelInboxDetailType;
+type ActionPayload = {
+  comment?: string;
+  destinations?: string[];
+  ownerAgent?: string;
+  collaborators?: string[];
+};
 
 export function ContentInboxClient({
   initialItems,
@@ -60,10 +68,11 @@ export function ContentInboxClient({
     if (statusFilter !== "new") params.set("status", statusFilter);
     if (assetFilter !== "all") params.set("primaryAssetType", assetFilter);
     if (ownerFilter !== "all") params.set("ownerAgent", ownerFilter);
-    if (selectedId) params.set("idea", selectedId);
 
     const nextSearch = params.toString();
-    const currentSearch = searchParams.toString();
+    const currentParams = new URLSearchParams(searchParams.toString());
+    currentParams.delete("idea");
+    const currentSearch = currentParams.toString();
     const next = nextSearch ? `${pathname}?${nextSearch}` : pathname;
 
     if (!initializedRef.current) {
@@ -76,16 +85,56 @@ export function ContentInboxClient({
       return;
     }
 
+    setSelectedId(null);
+    setDetail(null);
     setLoadingList(true);
     router.replace(next);
-  }, [statusFilter, assetFilter, ownerFilter, selectedId, router, pathname, searchParams]);
+  }, [statusFilter, assetFilter, ownerFilter, router, pathname, searchParams]);
 
   useEffect(() => {
+    setItems(initialItems);
+    setTotal(initialTotal);
+    setLoadingList(false);
+  }, [initialItems, initialTotal]);
+
+  useEffect(() => {
+    if (!initialSelectedId || !initialDetail) return;
     setSelectedId(initialSelectedId);
     setDetail(initialDetail);
-    setLoadingList(false);
-    setLoadingDetail(false);
-  }, [initialSelectedId, initialDetail, initialItems, initialTotal]);
+  }, [initialSelectedId, initialDetail]);
+
+  useEffect(() => {
+    if (!selectedId) {
+      setLoadingDetail(false);
+      return;
+    }
+    if (detail?.item?.id === selectedId) {
+      setLoadingDetail(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    setLoadingDetail(true);
+
+    fetch(`/api/intel/inbox/${selectedId}`, { signal: controller.signal })
+      .then(async (res) => {
+        const json = await res.json();
+        if (!res.ok) throw new Error(json?.error || "Failed to load intel item");
+        setDetail(json as DetailResponse);
+      })
+      .catch((error) => {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        console.error("[ContentInboxClient] Failed to load intel detail", error);
+        setSelectedId(null);
+        setDetail(null);
+        setToast("Could not load intel detail");
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoadingDetail(false);
+      });
+
+    return () => controller.abort();
+  }, [selectedId, detail?.item?.id]);
 
   useEffect(() => {
     if (!toast) return;
@@ -93,7 +142,23 @@ export function ContentInboxClient({
     return () => window.clearTimeout(timeout);
   }, [toast]);
 
-  async function handleAction(action: "promote" | "park" | "discard", payload?: { comment?: string; ownerAgent?: string; collaborators?: string[] }) {
+  function openDetail(id: string) {
+    setSelectedId(id);
+    setDetail((current) => current?.item?.id === id ? current : null);
+  }
+
+  function closeDetail() {
+    setSelectedId(null);
+    setDetail(null);
+    const params = new URLSearchParams(window.location.search);
+    if (params.has("idea")) {
+      params.delete("idea");
+      const next = params.toString() ? `${pathname}?${params.toString()}` : pathname;
+      window.history.replaceState(null, "", next);
+    }
+  }
+
+  async function handleAction(action: "promote" | "park" | "discard", payload?: ActionPayload) {
     if (!selectedId) return;
     const endpoint = `/api/intel/inbox/${selectedId}/${action}`;
     const res = await fetch(endpoint, {
@@ -101,20 +166,20 @@ export function ContentInboxClient({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         comment: payload?.comment || undefined,
+        destinations: payload?.destinations || undefined,
         ownerAgent: payload?.ownerAgent || undefined,
         collaborators: payload?.collaborators || undefined,
       }),
     });
     const json = await res.json();
     if (!res.ok) throw new Error(json?.error || `Failed to ${action} idea`);
-    setToast(
-      action === "promote"
-        ? "Idea promoted to pipeline"
-        : action === "park"
-          ? "Idea saved"
-          : "Idea dismissed"
-    );
-    setSelectedId(null);
+    if (action === "promote") {
+      const promotedCount = Array.isArray(json?.destinations) ? json.destinations.length : payload?.destinations?.length || 0;
+      setToast(promotedCount > 1 ? `Promoted to ${promotedCount} destinations` : "Promoted to pipeline");
+    } else {
+      setToast(action === "park" ? "Intel saved" : "Intel dismissed");
+    }
+    closeDetail();
     router.refresh();
   }
 
@@ -133,7 +198,7 @@ export function ContentInboxClient({
           <span>Inbox de señales enriquecidas para revisar y decidir</span>
           <div className="ml-auto flex flex-wrap gap-2">
            <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="rounded-lg border border-gray-800 bg-[#0d0d14] px-3 py-2 text-sm text-white">
-             <option value="new">New</option>
+             <option value="new">New / sin decidir</option>
              <option value="all">All statuses</option>
              <option value="saved">Saved</option>
              <option value="promoted">Promoted</option>
@@ -155,8 +220,8 @@ export function ContentInboxClient({
         </div>
         <div className="mt-3 flex flex-wrap gap-2 text-xs text-gray-500">
           <span className="rounded-full border border-gray-800 px-2 py-1">Default view: new intel</span>
-          <span className="rounded-full border border-gray-800 px-2 py-1">Open detail to decide</span>
-          <span className="rounded-full border border-gray-800 px-2 py-1">Promote, Save, Dismiss</span>
+          <span className="rounded-full border border-gray-800 px-2 py-1">&quot;new&quot; = sin decisión de review</span>
+          <span className="rounded-full border border-gray-800 px-2 py-1">Badge &quot;latest run&quot; = lote reciente, no estado</span>
         </div>
       </div>
 
@@ -164,14 +229,14 @@ export function ContentInboxClient({
         <IntelInboxList
           items={items}
           selectedId={selectedId}
-          onSelect={setSelectedId}
+          onSelect={openDetail}
           loading={loadingList}
         />
 
         <IntelInboxDetail
           detail={detail}
           loading={loadingDetail}
-          onClose={() => setSelectedId(null)}
+          onClose={closeDetail}
           onAction={handleAction}
         />
       </div>

@@ -8,7 +8,8 @@ import type { SpriteAgent } from "@/lib/types/office";
 interface TaskRow {
   id: string;
   title: string;
-  agent: string;
+  owner_agent: string | null;
+  target_agent_id: string | null;
   status: string;
   created_at: string;
   started_at: string | null;
@@ -41,7 +42,7 @@ export function useOfficeAgents(
       .channel("office-agents")
       .on(
         "postgres_changes",
-        { event: "*", schema: "public", table: "agent_tasks" },
+        { event: "*", schema: "public", table: "work_items" },
         (payload) => {
           if (payload.eventType === "DELETE") {
             setTasks((prev) => prev.filter((t) => t.id !== (payload.old as TaskRow).id));
@@ -105,7 +106,10 @@ export function useOfficeAgents(
       if (!realtimeConnected && !pollRef.current) {
         pollRef.current = setInterval(async () => {
           const [tasksRes, memRes] = await Promise.all([
-            supabase.from("agent_tasks").select("*").order("created_at", { ascending: false }),
+            supabase
+              .from("work_items")
+              .select("id, title, owner_agent, target_agent_id, status, created_at, started_at, completed_at")
+              .order("created_at", { ascending: false }),
             supabase
               .from("memories")
               .select("agent, date, content, created_at")

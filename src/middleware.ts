@@ -11,8 +11,6 @@ function isPublicPath(pathname: string) {
     pathname.startsWith("/api/agent/") ||
     pathname.startsWith("/api/memory/") ||
     pathname.startsWith("/api/work-items/") ||
-    pathname === "/api/tasks/notify" ||
-    pathname === "/api/tasks/promote-scheduled" ||
     pathname === "/api/projects/materialize-queued" ||
     pathname === "/api/projects/plan-pending"
   );
