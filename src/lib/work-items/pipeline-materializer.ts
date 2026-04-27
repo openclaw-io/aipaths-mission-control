@@ -12,6 +12,8 @@ export type PipelineWorkInput = {
   action: string;
   trigger: string;
   reviewNotes?: string;
+  mapRelationType?: string;
+  payloadRelationType?: string;
 };
 
 const OPEN_STATUSES = ["draft", "ready", "blocked", "in_progress"];
@@ -35,7 +37,9 @@ export async function findOpenPipelineWorkItem(
 }
 
 export async function createPipelineWorkItem(db: SupabaseClient, input: PipelineWorkInput) {
-  const existing = await findOpenPipelineWorkItem(db, input.pipelineItemId, input.relationType);
+  const payloadRelationType = input.payloadRelationType || input.relationType;
+  const mapRelationType = input.mapRelationType || input.relationType;
+  const existing = await findOpenPipelineWorkItem(db, input.pipelineItemId, payloadRelationType);
   if (existing) {
     return { workItem: existing, created: false };
   }
@@ -44,7 +48,8 @@ export async function createPipelineWorkItem(db: SupabaseClient, input: Pipeline
     trigger: input.trigger,
     pipeline_type: input.pipelineType,
     pipeline_item_id: input.pipelineItemId,
-    relation_type: input.relationType,
+    relation_type: payloadRelationType,
+    map_relation_type: mapRelationType,
     action: input.action,
     review_notes: input.reviewNotes,
   };
@@ -72,7 +77,7 @@ export async function createPipelineWorkItem(db: SupabaseClient, input: Pipeline
   const { error: mapError } = await db.from("pipeline_work_map").insert({
     pipeline_item_id: input.pipelineItemId,
     work_item_id: workItem.id,
-    relation_type: input.relationType,
+    relation_type: mapRelationType,
   });
   if (mapError) throw mapError;
 
@@ -84,7 +89,8 @@ export async function createPipelineWorkItem(db: SupabaseClient, input: Pipeline
     to_status: null,
     payload: {
       work_item_id: workItem.id,
-      relation_type: input.relationType,
+      relation_type: payloadRelationType,
+      map_relation_type: mapRelationType,
       source_type: "pipeline_item",
       target_agent_id: input.ownerAgent,
       trigger: input.trigger,
