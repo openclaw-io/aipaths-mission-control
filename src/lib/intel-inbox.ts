@@ -453,7 +453,7 @@ async function ensurePrimaryDestinationWorkItem(params: {
   summary: string;
   notes?: string | null;
 }) {
-  const relationType = params.destination.key === "news" ? "draft" : "investigate";
+  const relationType = params.destination.key === "news" ? "distribute_community" : "investigate";
 
   const { data: existingMap, error: existingMapError } = await params.db
     .from("pipeline_work_map")
@@ -504,7 +504,7 @@ async function ensurePrimaryDestinationWorkItem(params: {
       source_type: "pipeline_item",
       target_agent_id: params.destination.director,
       trigger: "intel_inbox_promote",
-      action: `develop_${params.destination.pipelineType}`,
+      action: params.destination.key === "news" ? "draft_community_news" : `develop_${params.destination.pipelineType}`,
       repaired_missing_map: true,
     },
   });
