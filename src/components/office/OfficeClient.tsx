@@ -11,7 +11,8 @@ import type { SpriteAgent } from "@/lib/types/office";
 interface TaskRow {
   id: string;
   title: string;
-  agent: string;
+  owner_agent: string | null;
+  target_agent_id: string | null;
   status: string;
   created_at: string;
   started_at: string | null;

@@ -43,7 +43,7 @@ src/
 ## Data Flow
 
 ```
-Supabase (agent_tasks, agent_memory)
+Supabase (work_items, memories[type=journal])
   ↓ SSR fetch (page.tsx)
   ↓ Props: initialTasks, initialMemory
   ↓ useOfficeAgents hook
@@ -56,9 +56,13 @@ Supabase (agent_tasks, agent_memory)
 
 ## Realtime Strategy
 
-1. Primary: Supabase Realtime (`postgres_changes` on `agent_tasks` + `agent_memory`)
-2. Fallback: If channel doesn't reach "SUBSCRIBED" in 5s, start polling every 10s
+1. Primary: Supabase Realtime (`postgres_changes` on `work_items` + `memories` filtered to `type=journal`)
+2. Fallback: If channel doesn't reach "SUBSCRIBED" in 5s, start polling every 10s from `work_items` and `memories` where `type='journal'`
 3. Prerequisite: Enable Realtime on both tables in Supabase dashboard
+
+## Memory Source
+
+Pixel Office reads active agent work from canonical `work_items`, attributing rows by `target_agent_id || owner_agent`. It reads memory bubbles from `memories` rows where `type='journal'`, ordered by `date` descending and then `created_at` descending. The older `agent_tasks` and `agent_memory` tables are legacy for this surface.
 
 ## Office Layout
 

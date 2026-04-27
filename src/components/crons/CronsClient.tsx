@@ -64,19 +64,6 @@ export default function CronsClient({ crons: initialCrons, logs }: CronsClientPr
   const [selectedCrons, setSelectedCrons] = useState<Set<string>>(new Set());
   const [visibleLogs, setVisibleLogs] = useState(30);
 
-  async function handleToggleCron(cronName: string, currentEnabled: boolean) {
-    // Optimistic update
-    setCrons((prev) =>
-      prev.map((c) => c.cron_name === cronName ? { ...c, enabled: !currentEnabled } : c)
-    );
-    const res = await fetch(`/api/crons/${encodeURIComponent(cronName)}/toggle`, { method: "POST" });
-    if (!res.ok) {
-      // Revert on failure
-      setCrons((prev) =>
-        prev.map((c) => c.cron_name === cronName ? { ...c, enabled: currentEnabled } : c)
-      );
-    }
-  }
 
   // Filter crons by tab
   const filteredCrons = activeTab === "all"
@@ -235,20 +222,16 @@ export default function CronsClient({ crons: initialCrons, logs }: CronsClientPr
                       <div className="text-xs text-gray-400">
                         {cron.last_run_at ? timeAgo(cron.last_run_at) : "Never"}
                       </div>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleToggleCron(cron.cron_name, cron.enabled);
-                        }}
-                        className={`rounded-md px-2 py-1 text-xs font-medium transition ${
+                      <span
+                        className={`rounded-md px-2 py-1 text-xs font-medium ${
                           cron.enabled
-                            ? "bg-green-500/20 text-green-400 hover:bg-green-500/30"
-                            : "bg-gray-700/50 text-gray-500 hover:bg-gray-700"
+                            ? "bg-green-500/20 text-green-400"
+                            : "bg-gray-700/50 text-gray-500"
                         }`}
-                        title={cron.enabled ? "Click to pause" : "Click to resume"}
+                        title="Read-only launchd inventory. Enable/disable via LaunchAgent changes, not this UI."
                       >
-                        {cron.enabled ? "● Active" : "○ Paused"}
-                      </button>
+                        {cron.enabled ? "● Registered" : "○ Disabled/retired"}
+                      </span>
                     </div>
                     {/* Scheduler config row */}
                     {cron.cron_name === "task-scheduler" && cron.config && (

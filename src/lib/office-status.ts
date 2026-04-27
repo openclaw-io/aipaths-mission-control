@@ -4,7 +4,8 @@ import type { AgentStatus, SpriteAgent, SpriteAnimation } from "@/lib/types/offi
 interface TaskRow {
   id: string;
   title: string;
-  agent: string;
+  owner_agent: string | null;
+  target_agent_id: string | null;
   status: string;
   created_at: string;
   started_at: string | null;
@@ -80,9 +81,11 @@ export function buildSpriteAgents(
   const todayMemory = new Map<string, MemoryRow>();
 
   for (const t of tasks) {
-    const list = tasksByAgent.get(t.agent) ?? [];
+    const taskAgent = t.target_agent_id || t.owner_agent;
+    if (!taskAgent) continue;
+    const list = tasksByAgent.get(taskAgent) ?? [];
     list.push(t);
-    tasksByAgent.set(t.agent, list);
+    tasksByAgent.set(taskAgent, list);
   }
 
   for (const m of memoryEntries) {

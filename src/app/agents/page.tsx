@@ -24,10 +24,8 @@ export default async function AgentsPage() {
   // Fetch all data in bulk
   const [tasksRes, usageRes, activityRes] = await Promise.all([
     supabaseAdmin
-      .from("agent_tasks")
-      .select("agent, status, created_at")
-      .not("tags", "cs", '{"epic"}')
-      .not("tags", "cs", '{"project"}'),
+      .from("work_items")
+      .select("owner_agent, target_agent_id, status, created_at"),
     supabaseAdmin
       .from("usage_logs")
       .select("agent, cost_usd, input_tokens, output_tokens"),
@@ -46,7 +44,7 @@ export default async function AgentsPage() {
   const agentStats: Record<string, AgentStats> = {};
 
   for (const agent of AGENTS) {
-    const tasks = allTasks.filter((t) => t.agent === agent.id);
+    const tasks = allTasks.filter((t) => (t.target_agent_id || t.owner_agent) === agent.id);
     const done = tasks.filter((t) => t.status === "done").length;
     const failed = tasks.filter((t) => t.status === "failed").length;
     const successRate = done + failed > 0 ? Math.round((done / (done + failed)) * 100) : 100;

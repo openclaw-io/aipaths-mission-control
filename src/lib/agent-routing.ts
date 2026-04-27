@@ -7,6 +7,7 @@ export const AGENT_ROUTING = {
   community: { agentId: "community", channelId: "1473373793375490058" },
   editor: { agentId: "editor", channelId: "1473373703197691934" },
   legal: { agentId: "legal", channelId: "1473373703197691934" },
+  systems: { agentId: "systems", channelId: "1493166685543206924" },
 } as const;
 
 export type RoutedAgent = keyof typeof AGENT_ROUTING;

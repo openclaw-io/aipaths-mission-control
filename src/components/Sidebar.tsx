@@ -9,9 +9,15 @@ const NAV_ITEMS = [
   { href: "/", label: "Overview", emoji: "📊" },
   { href: "/office", label: "Office", emoji: "🏢" },
   { href: "/agents", label: "Agents", emoji: "🤖" },
-  { href: "/tasks", label: "Tasks", emoji: "📋" },
+  { href: "/work-items", label: "Work Queue", emoji: "⚙️" },
   { href: "/projects", label: "Projects", emoji: "📐" },
   { href: "/email-campaigns", label: "Email Campaigns", emoji: "📧" },
+  { href: "/blogs", label: "Blogs", emoji: "✍️" },
+  { href: "/youtube", label: "YouTube", emoji: "🎬" },
+  { href: "/guides", label: "Guías", emoji: "📚" },
+  { href: "/community", label: "Community", emoji: "🏘️" },
+  { href: "/intel", label: "Intel Inbox", emoji: "🧠" },
+  { href: "/execution-window", label: "Execution Window", emoji: "🕒" },
   { href: "/costs", label: "Costs", emoji: "💰" },
   { href: "/crons", label: "Crons", emoji: "🕐" },
   { href: "/memory", label: "Memory", emoji: "🧠" },
@@ -36,7 +42,7 @@ export default function Sidebar() {
   }
 
   return (
-    <aside className="fixed left-0 top-0 flex h-screen w-64 flex-col border-r border-white/10 bg-[#111118]">
+    <aside className="fixed left-0 top-0 z-40 flex h-screen w-64 flex-col border-r border-white/10 bg-[#111118]">
       {/* Header */}
       <div className="border-b border-white/10 px-6 py-5">
         <h1 className="text-lg font-bold text-white">🛰️ Mission Control</h1>

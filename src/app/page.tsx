@@ -13,7 +13,7 @@ export default async function OverviewPage() {
     tasksDoneTodayRes,
     activeAgentsRes,
     activeProjectsRes,
-    allProjectTasksRes,
+    projectWorkItemsRes,
     failedTasksRes,
     cronHealthRes,
     activityRes,
@@ -24,34 +24,31 @@ export default async function OverviewPage() {
       .from("usage_logs")
       .select("cost_usd")
       .eq("date", today),
-    // 2. Tasks completed today
+    // 2. Work items completed today
     supabaseAdmin
-      .from("agent_tasks")
+      .from("work_items")
       .select("*", { count: "exact", head: true })
       .eq("status", "done")
       .gte("completed_at", `${today}T00:00:00`),
-    // 3. Active agents (distinct agents with in_progress tasks)
+    // 3. Active agents (distinct agents with in_progress work items)
     supabaseAdmin
-      .from("agent_tasks")
-      .select("agent")
+      .from("work_items")
+      .select("owner_agent, target_agent_id")
       .eq("status", "in_progress")
-      .not("tags", "cs", '{"epic"}'),
-    // 4. Active projects
+      .or("target_agent_id.not.is.null,owner_agent.not.is.null"),
+    // 4. Active canonical projects
     supabaseAdmin
-      .from("agent_tasks")
-      .select("id, title, status, tags")
-      .contains("tags", ["project"])
-      .neq("status", "done"),
-    // 5. All tasks for project progress
+      .from("projects")
+      .select("id, name, status")
+      .not("status", "in", "(completed,canceled,archived)"),
+    // 5. Work items linked to projects for progress
     supabaseAdmin
-      .from("agent_tasks")
-      .select("id, status, parent_id, tags, title")
-      .not("tags", "cs", '{"epic"}')
-      .not("tags", "cs", '{"project"}'),
-    // 6. Failed tasks (last 24h)
+      .from("project_work_items")
+      .select("project_id, work_items(id, status)"),
+    // 6. Failed work items (last 24h)
     supabaseAdmin
-      .from("agent_tasks")
-      .select("id, title, agent, completed_at, error")
+      .from("work_items")
+      .select("id, title, owner_agent, target_agent_id, completed_at, updated_at, payload")
       .eq("status", "failed")
       .gte("completed_at", yesterday)
       .order("completed_at", { ascending: false })
@@ -70,27 +67,32 @@ export default async function OverviewPage() {
     supabaseAdmin
       .from("cron_health")
       .select("config")
-      .eq("cron_name", "task-scheduler")
+      .eq("cron_name", "work-item-scheduler")
       .single(),
   ]);
 
   // Process data
   const todayCost = (todayCostRes.data || []).reduce((s, r) => s + Number(r.cost_usd), 0);
   const tasksDoneToday = tasksDoneTodayRes.count || 0;
-  const activeAgents = [...new Set((activeAgentsRes.data || []).map((r) => r.agent))];
+  const activeAgents = [
+    ...new Set((activeAgentsRes.data || []).map((r) => r.target_agent_id || r.owner_agent).filter(Boolean)),
+  ];
 
-  // Project progress
-  const allLeafTasks = allProjectTasksRes.data || [];
+  // Project progress from canonical project_work_items -> work_items links
+  const linkedWorkItemsByProject = new Map<string, Array<{ status: string | null }>>();
+  for (const link of projectWorkItemsRes.data || []) {
+    const workItem = Array.isArray(link.work_items) ? link.work_items[0] : link.work_items;
+    if (!workItem) continue;
+    const existing = linkedWorkItemsByProject.get(link.project_id) || [];
+    existing.push(workItem as { status: string | null });
+    linkedWorkItemsByProject.set(link.project_id, existing);
+  }
+
   const projectProgress = (activeProjectsRes.data || []).map((project) => {
-    // Find epics under this project
-    const epicIds = allLeafTasks
-      .filter((t) => t.parent_id === project.id && t.tags?.includes("epic"))
-      .map((t) => t.id);
-    // Find leaf tasks under those epics
-    const leafTasks = allLeafTasks.filter((t) => t.parent_id && epicIds.includes(t.parent_id) && !t.title.startsWith("AI: Plan"));
-    const done = leafTasks.filter((t) => t.status === "done").length;
-    const total = leafTasks.length || epicIds.length; // fallback to epic count
-    return { id: project.id, title: project.title, done, total };
+    const linkedItems = linkedWorkItemsByProject.get(project.id) || [];
+    const done = linkedItems.filter((item) => item.status === "done").length;
+    const total = linkedItems.length;
+    return { id: project.id, title: project.name || project.id, done, total };
   });
 
   // Cron summary
@@ -116,7 +118,17 @@ export default async function OverviewPage() {
       cronError={cronError}
       cronTotal={cronTotal}
       projectProgress={projectProgress}
-      failedTasks={(failedTasksRes.data || []) as Array<{ id: string; title: string; agent: string; completed_at: string; error: string | null }>}
+      failedTasks={(failedTasksRes.data || []).map((task) => {
+        const payload = (task.payload || {}) as Record<string, unknown>;
+        const error = payload.error || payload.dispatch_failure_reason || null;
+        return {
+          id: task.id,
+          title: task.title,
+          agent: task.target_agent_id || task.owner_agent || "unknown",
+          completed_at: task.completed_at || task.updated_at || new Date().toISOString(),
+          error: typeof error === "string" ? error : null,
+        };
+      })}
       errorCrons={errorCrons.map((c) => ({ name: c.cron_name, error: c.last_error, lastRun: c.last_run_at }))}
       initialActivity={activityRes.data || []}
     />

@@ -5,19 +5,18 @@ export const dynamic = "force-dynamic";
 
 /**
  * GET /api/agents/sessions
- * Returns which agents are currently active (have in_progress tasks)
+ * Returns which agents are currently active (have in_progress work items)
  * and their latest activity.
  */
 export async function GET() {
   const supabase = createServiceClient();
 
-  // Get in_progress tasks (indicates active agent)
+  // Get in_progress work_items (canonical execution queue; indicates active agent)
   const { data: activeTasks } = await supabase
-    .from("agent_tasks")
-    .select("agent, title, started_at")
+    .from("work_items")
+    .select("owner_agent, target_agent_id, title, started_at")
     .eq("status", "in_progress")
-    .not("tags", "cs", '{"epic"}')
-    .not("tags", "cs", '{"project"}');
+    .or("target_agent_id.not.is.null,owner_agent.not.is.null");
 
   // Get latest activity per agent (last 1 hour)
   const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
@@ -39,7 +38,10 @@ export async function GET() {
   }> = {};
 
   for (const task of activeTasks || []) {
-    sessions[task.agent] = {
+    const agent = task.target_agent_id || task.owner_agent;
+    if (!agent) continue;
+
+    sessions[agent] = {
       active: true,
       currentTask: task.title,
       startedAt: task.started_at,

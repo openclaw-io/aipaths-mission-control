@@ -1,8 +1,29 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 
+const PUBLIC_PATHS = new Set(["/login"]);
+
+function isPublicPath(pathname: string) {
+  if (PUBLIC_PATHS.has(pathname)) return true;
+
+  return (
+    pathname.startsWith("/api/health") ||
+    pathname.startsWith("/api/agent/") ||
+    pathname.startsWith("/api/memory/") ||
+    pathname.startsWith("/api/work-items/") ||
+    pathname === "/api/projects/materialize-queued" ||
+    pathname === "/api/projects/plan-pending"
+  );
+}
+
 export async function middleware(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });
+  const pathname = request.nextUrl.pathname;
+  const isPublic = isPublicPath(pathname);
+
+  if (isPublic) {
+    return supabaseResponse;
+  }
 
   const supabase = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -25,36 +46,27 @@ export async function middleware(request: NextRequest) {
     }
   );
 
-  const { data: { user } } = await supabase.auth.getUser();
+  try {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
 
-  // Allow health check API without auth (called by client component)
-  if (request.nextUrl.pathname.startsWith("/api/health")) {
+    if (!user) {
+      const url = request.nextUrl.clone();
+      url.pathname = "/login";
+      url.searchParams.set("next", pathname);
+      return NextResponse.redirect(url);
+    }
+
+    return supabaseResponse;
+  } catch (error) {
+    console.error("[middleware] supabase auth.getUser failed:", error);
+
+    // Treat transient Supabase/session lookup failures as degraded auth,
+    // not a hard navigation redirect. Redirect loops here looked like
+    // intermittent reloads/server errors in the UI.
     return supabaseResponse;
   }
-
-  // Allow agent API, memory search, and internal server-to-server calls without cookie auth
-  if (
-    request.nextUrl.pathname.startsWith("/api/agent/") ||
-    request.nextUrl.pathname.startsWith("/api/memory/") ||
-    request.nextUrl.pathname === "/api/tasks/notify" ||
-    request.nextUrl.pathname === "/api/tasks/promote-scheduled"
-  ) {
-    return supabaseResponse;
-  }
-
-  if (!user && !request.nextUrl.pathname.startsWith("/login")) {
-    const url = request.nextUrl.clone();
-    url.pathname = "/login";
-    return NextResponse.redirect(url);
-  }
-
-  if (user && request.nextUrl.pathname.startsWith("/login")) {
-    const url = request.nextUrl.clone();
-    url.pathname = "/";
-    return NextResponse.redirect(url);
-  }
-
-  return supabaseResponse;
 }
 
 export const config = {
