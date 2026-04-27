@@ -1,6 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
 import { ContentInboxClient } from "@/components/content/ContentInboxClient";
-import { getIntelInboxDetail, listIntelInbox } from "@/lib/intel-inbox";
+import { getIntelInboxDetail, getIntelInboxHealth, listIntelInbox } from "@/lib/intel-inbox";
 
 export const dynamic = "force-dynamic";
 
@@ -34,6 +34,7 @@ export default async function IntelInboxPage({
   const statusParam = typeof resolvedSearchParams.status === "string" ? resolvedSearchParams.status : "new";
   const assetParam = typeof resolvedSearchParams.primaryAssetType === "string" ? resolvedSearchParams.primaryAssetType : "all";
   const ownerParam = typeof resolvedSearchParams.ownerAgent === "string" ? resolvedSearchParams.ownerAgent : "all";
+  const includeOlderNew = resolvedSearchParams.older === "1" || resolvedSearchParams.includeOlder === "1";
   const initialStatus = statusParam in STATUS_PRESETS ? statusParam : "new";
 
   const selectedIdeaId = typeof resolvedSearchParams.idea === "string" ? resolvedSearchParams.idea : null;
@@ -42,6 +43,8 @@ export default async function IntelInboxPage({
     status: STATUS_PRESETS[initialStatus as keyof typeof STATUS_PRESETS],
     lane: assetParam === "all" ? null : assetParam,
     owner: ownerParam === "all" ? null : ownerParam,
+    includeOlderNew,
+    freshDays: 3,
     limit: 50,
     offset: 0,
   });
@@ -56,6 +59,7 @@ export default async function IntelInboxPage({
     ? selectedIdeaId
     : null;
   const initialDetail = initialSelectedId ? await getIntelInboxDetail(initialSelectedId) : null;
+  const health = await getIntelInboxHealth();
 
   return (
     <div>
@@ -70,6 +74,8 @@ export default async function IntelInboxPage({
           initialStatusFilter={initialStatus}
           initialAssetFilter={assetParam}
           initialOwnerFilter={ownerParam}
+          initialIncludeOlderNew={includeOlderNew}
+          health={health}
           filterSourceItems={allForFilters.items}
           initialSelectedId={initialSelectedId}
           initialDetail={initialDetail}

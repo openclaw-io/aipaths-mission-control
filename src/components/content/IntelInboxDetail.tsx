@@ -28,8 +28,18 @@ function getSourceLabel(detail: IntelInboxDetail | null) {
       return url;
     }
   }
-  return detail?.rawSource?.sourceContext || detail?.item.lane || "Intel source";
+  return detail?.rawSource?.sourceContext || detail?.item.sourceLabel || detail?.item.lane || "Intel source";
 }
+
+const SOURCE_BADGE = {
+  youtube: "border-red-400/30 bg-red-500/10 text-red-100",
+  reddit: "border-orange-400/30 bg-orange-500/10 text-orange-100",
+  web: "border-sky-400/30 bg-sky-500/10 text-sky-100",
+  producthunt: "border-purple-400/30 bg-purple-500/10 text-purple-100",
+  github: "border-emerald-400/30 bg-emerald-500/10 text-emerald-100",
+  hackernews: "border-amber-400/30 bg-amber-500/10 text-amber-100",
+  other: "border-gray-600 bg-white/5 text-gray-300",
+} as const;
 
 export function IntelInboxDetail({
   detail,
@@ -51,6 +61,7 @@ export function IntelInboxDetail({
   const item = detail?.item ?? null;
   const sourceUrl = detail?.rawSource?.canonicalUrl || detail?.rawSource?.url || null;
   const sourceLabel = getSourceLabel(detail);
+  const sourceBadgeClass = item ? SOURCE_BADGE[item.sourceKind] || SOURCE_BADGE.other : SOURCE_BADGE.other;
 
   useEffect(() => {
     if (!detail?.item) return;
@@ -110,6 +121,9 @@ export function IntelInboxDetail({
             <div className="flex flex-wrap items-center gap-2 text-xs text-gray-400">
               <span className="rounded-full border border-sky-400/30 bg-sky-500/10 px-2.5 py-1 font-semibold uppercase tracking-wide text-sky-200">
                 Intel Inbox
+              </span>
+              <span className={`rounded-full border px-2.5 py-1 font-semibold uppercase tracking-wide ${sourceBadgeClass}`}>
+                {item.sourceLabel}
               </span>
               {item.isLatestRun ? (
                 <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 font-medium uppercase tracking-wide text-emerald-200">
@@ -264,9 +278,9 @@ function MetaPill({ label, value }: { label: string; value: string }) {
 
 function IntelDrawerShell({ onClose, children }: { onClose: () => void; children: ReactNode }) {
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/70 backdrop-blur-sm" onClick={onClose}>
+    <div className="fixed inset-y-0 right-0 left-64 z-50 flex justify-end bg-black/70 backdrop-blur-sm" onClick={onClose}>
       <aside
-        className="flex h-full w-full max-w-4xl flex-col border-l border-gray-800 bg-[#0f0f16] shadow-2xl"
+        className="flex h-full w-full max-w-4xl min-w-0 flex-col border-l border-gray-800 bg-[#0f0f16] shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         {children}

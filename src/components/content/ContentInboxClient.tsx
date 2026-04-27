@@ -6,7 +6,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { IntelInboxDetail } from "./IntelInboxDetail";
 import { IntelInboxList } from "./IntelInboxList";
-import type { IntelInboxDetail as IntelInboxDetailType, IntelInboxListItem } from "@/lib/intel-inbox";
+import type { IntelInboxDetail as IntelInboxDetailType, IntelInboxHealth, IntelInboxListItem } from "@/lib/intel-inbox";
 
 type DetailResponse = IntelInboxDetailType;
 type ActionPayload = {
@@ -22,6 +22,8 @@ export function ContentInboxClient({
   initialStatusFilter,
   initialAssetFilter,
   initialOwnerFilter,
+  initialIncludeOlderNew,
+  health,
   filterSourceItems,
   initialSelectedId,
   initialDetail,
@@ -31,6 +33,8 @@ export function ContentInboxClient({
   initialStatusFilter: string;
   initialAssetFilter: string;
   initialOwnerFilter: string;
+  initialIncludeOlderNew: boolean;
+  health: IntelInboxHealth;
   filterSourceItems: IntelInboxListItem[];
   initialSelectedId: string | null;
   initialDetail: DetailResponse | null;
@@ -48,6 +52,7 @@ export function ContentInboxClient({
   const [statusFilter, setStatusFilter] = useState(initialStatusFilter);
   const [assetFilter, setAssetFilter] = useState(initialAssetFilter);
   const [ownerFilter, setOwnerFilter] = useState(initialOwnerFilter);
+  const [includeOlderNew, setIncludeOlderNew] = useState(initialIncludeOlderNew);
   const [toast, setToast] = useState<string | null>(null);
 
   const assetOptions = useMemo(() => {
@@ -68,6 +73,7 @@ export function ContentInboxClient({
     if (statusFilter !== "new") params.set("status", statusFilter);
     if (assetFilter !== "all") params.set("primaryAssetType", assetFilter);
     if (ownerFilter !== "all") params.set("ownerAgent", ownerFilter);
+    if (statusFilter === "new" && includeOlderNew) params.set("older", "1");
 
     const nextSearch = params.toString();
     const currentParams = new URLSearchParams(searchParams.toString());
@@ -89,7 +95,7 @@ export function ContentInboxClient({
     setDetail(null);
     setLoadingList(true);
     router.replace(next);
-  }, [statusFilter, assetFilter, ownerFilter, router, pathname, searchParams]);
+  }, [statusFilter, assetFilter, ownerFilter, includeOlderNew, router, pathname, searchParams]);
 
   useEffect(() => {
     setItems(initialItems);
@@ -196,6 +202,22 @@ export function ContentInboxClient({
           <span>{total} intel item{total !== 1 ? "s" : ""}</span>
           <span>·</span>
           <span>Inbox de señales enriquecidas para revisar y decidir</span>
+          {statusFilter === "new" ? (
+            <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-xs text-emerald-200">
+              Fresh: últimos 3 días
+            </span>
+          ) : null}
+          <span
+            title={health.lastError || undefined}
+            className={`rounded-full border px-2.5 py-1 text-xs ${
+              health.status === "ok"
+                ? "border-sky-500/30 bg-sky-500/10 text-sky-200"
+                : "border-amber-500/30 bg-amber-500/10 text-amber-200"
+            }`}
+          >
+            Competitors: {health.enabledCompetitors} · {health.latestCompetitorRunStatus || "unknown"}
+            {health.unresolvedCompetitors || health.failingSources ? ` · ${health.unresolvedCompetitors + health.failingSources} issues` : ""}
+          </span>
           <div className="ml-auto flex flex-wrap gap-2">
            <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="rounded-lg border border-gray-800 bg-[#0d0d14] px-3 py-2 text-sm text-white">
              <option value="new">New / sin decidir</option>
@@ -216,6 +238,17 @@ export function ContentInboxClient({
                <option key={option} value={option}>{option}</option>
              ))}
            </select>
+           {statusFilter === "new" ? (
+             <label className="inline-flex items-center gap-2 rounded-lg border border-gray-800 bg-[#0d0d14] px-3 py-2 text-sm text-gray-300">
+               <input
+                 type="checkbox"
+                 checked={includeOlderNew}
+                 onChange={(e) => setIncludeOlderNew(e.target.checked)}
+                 className="h-4 w-4 accent-sky-500"
+               />
+               Show older
+             </label>
+           ) : null}
           </div>
         </div>
         <div className="mt-3 flex flex-wrap gap-2 text-xs text-gray-500">

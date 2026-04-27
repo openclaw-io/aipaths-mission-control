@@ -36,6 +36,8 @@ export type IntelInboxListItem = {
   title: string;
   summary: string;
   miniDescription: string;
+  sourceKind: "youtube" | "reddit" | "web" | "producthunt" | "github" | "hackernews" | "other";
+  sourceLabel: string;
   lane: string | null;
   primaryTopic: string | null;
   suggestedOwner: string | null;
@@ -51,6 +53,16 @@ export type IntelInboxListItem = {
   updatedAt: string;
   createdAt: string;
   isLatestRun: boolean;
+};
+
+export type IntelInboxHealth = {
+  status: "ok" | "warn";
+  latestCompetitorRunAt: string | null;
+  latestCompetitorRunStatus: string | null;
+  enabledCompetitors: number;
+  unresolvedCompetitors: number;
+  failingSources: number;
+  lastError: string | null;
 };
 
 export type IntelInboxDetail = {
@@ -142,10 +154,12 @@ function buildReadableSummary(params: {
   whyItMatters: string | null;
   rawTitle: string | null;
   rawContentText: string | null;
+  transcriptSummary?: string | null;
 }) {
   const title = params.title.trim();
   const summary = (params.summaryShort || "").trim();
   const why = (params.whyItMatters || "").trim();
+  const transcriptSummary = (params.transcriptSummary || "").trim();
   const rawTitle = (params.rawTitle || "").trim();
   const rawContent = (params.rawContentText || "").trim();
 
@@ -162,6 +176,8 @@ function buildReadableSummary(params: {
     }
     return first;
   }
+
+  if (transcriptSummary) return transcriptSummary;
 
   const leadSource = summary || rawTitle || title;
   const detailSource = why;
@@ -188,6 +204,78 @@ function buildMiniDescription(text: string) {
   if (!clean) return "Sin resumen breve";
   if (clean.length <= 150) return clean;
   return `${clean.slice(0, 147).trimEnd()}...`;
+}
+
+function normalizedComparableText(value: unknown) {
+  return String(value || "")
+    .replace(/&[#a-z0-9]+;/gi, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function isEditorialSummaryReady(params: {
+  title: unknown;
+  summaryDisplay: unknown;
+  summaryShort: unknown;
+  whyItMatters: unknown;
+  headlineShort: unknown;
+  transcriptSummary?: unknown;
+}) {
+  const title = normalizedComparableText(params.title);
+  const summaryDisplay = normalizedComparableText(params.summaryDisplay);
+  const summaryShort = normalizedComparableText(params.summaryShort);
+  const why = normalizedComparableText(params.whyItMatters);
+  const headline = normalizedComparableText(params.headlineShort);
+  const transcript = normalizedComparableText(params.transcriptSummary);
+  const summary = transcript || summaryDisplay || summaryShort;
+
+  if (!summary || summary.length < 80) return false;
+  if (!why || why.length < 50) return false;
+  if (!headline || headline.length < 12 || headline.length > 140) return false;
+  if (title && summary === title) return false;
+  if (title && summary.length > 80 && title.includes(summary.slice(0, 80))) return false;
+  if (/señal técnica relevante\.?$/i.test(summary)) return false;
+  if (/sin resumen|no summary|summary pending/i.test(summary)) return false;
+  return true;
+}
+
+function hostnameFromUrl(value: unknown) {
+  if (typeof value !== "string" || !value.trim()) return null;
+  try {
+    return new URL(value).hostname.replace(/^www\./, "");
+  } catch {
+    return null;
+  }
+}
+
+function classifySourceKind(params: { lane?: unknown; url?: unknown; canonicalUrl?: unknown; sourceContext?: unknown; rawJson?: unknown }) {
+  const host = hostnameFromUrl(params.canonicalUrl) || hostnameFromUrl(params.url) || "";
+  const lane = typeof params.lane === "string" ? params.lane.toLowerCase() : "";
+  const sourceContext = typeof params.sourceContext === "string" ? params.sourceContext.toLowerCase() : "";
+  const raw = toObject(params.rawJson);
+  const rawSource = typeof raw.source === "string" ? raw.source.toLowerCase() : "";
+
+  if (lane === "competitor" || host.includes("youtube.com") || host.includes("youtu.be")) return "youtube" as const;
+  if (host.includes("reddit.com") || sourceContext.includes("reddit") || rawSource === "reddit") return "reddit" as const;
+  if (host.includes("producthunt.com") || sourceContext.includes("product hunt") || rawSource === "producthunt") return "producthunt" as const;
+  if (host.includes("github.com") || sourceContext.includes("github")) return "github" as const;
+  if (host.includes("ycombinator.com") || sourceContext.includes("hacker news") || rawSource === "hackernews") return "hackernews" as const;
+  if (lane === "industry" || host) return "web" as const;
+  return "other" as const;
+}
+
+function sourceLabelFromKind(kind: ReturnType<typeof classifySourceKind>, fallback?: string | null) {
+  if (fallback) return fallback;
+  switch (kind) {
+    case "youtube": return "YouTube";
+    case "reddit": return "Reddit";
+    case "producthunt": return "Product Hunt";
+    case "github": return "GitHub";
+    case "hackernews": return "Hacker News";
+    case "web": return "Web";
+    default: return "Fuente";
+  }
 }
 
 function normalizeDestinationKey(value: unknown): IntelDestinationKey | null {
@@ -517,6 +605,56 @@ function isDuplicatePipelineItemError(error: unknown) {
   return code === "23505";
 }
 
+async function fetchTranscriptSummariesByRawItemId(
+  db: ReturnType<typeof createServiceClient> | typeof supabaseAdmin,
+  rawItemIds: number[]
+) {
+  const uniqueRawIds = Array.from(new Set(rawItemIds.filter(Number.isFinite)));
+  if (!uniqueRawIds.length) return new Map<number, string>();
+
+  const { data: rawRows, error: rawError } = await db
+    .from("intel_items_raw")
+    .select("id,external_id,raw_json")
+    .in("id", uniqueRawIds);
+  if (rawError) throw rawError;
+
+  const videoByRawId = new Map<number, string>();
+  for (const row of (rawRows || []) as Array<Record<string, unknown>>) {
+    const rawId = Number(row.id);
+    const rawJson = toObject(row.raw_json);
+    const videoId = String(rawJson.videoId || row.external_id || "").trim();
+    if (Number.isFinite(rawId) && videoId) videoByRawId.set(rawId, videoId);
+  }
+
+  const videoIds = Array.from(new Set(videoByRawId.values()));
+  if (!videoIds.length) return new Map<number, string>();
+
+  const { data: transcriptRows, error: transcriptError } = await db
+    .from("competitor_transcripts")
+    .select("video_id,summary_short,summary_status,summarized_at,updated_at")
+    .in("video_id", videoIds)
+    .eq("summary_status", "summarized");
+  if (transcriptError) throw transcriptError;
+
+  const summaryByVideo = new Map<string, Record<string, unknown>>();
+  for (const row of (transcriptRows || []) as Array<Record<string, unknown>>) {
+    const videoId = String(row.video_id || "");
+    const summary = typeof row.summary_short === "string" ? row.summary_short.trim() : "";
+    if (!videoId || !summary) continue;
+    const current = summaryByVideo.get(videoId);
+    const currentUpdated = String(current?.summarized_at || current?.updated_at || "");
+    const nextUpdated = String(row.summarized_at || row.updated_at || "");
+    if (!current || nextUpdated > currentUpdated) summaryByVideo.set(videoId, row);
+  }
+
+  const summaryByRawId = new Map<number, string>();
+  for (const [rawId, videoId] of videoByRawId.entries()) {
+    const summary = summaryByVideo.get(videoId)?.summary_short;
+    if (typeof summary === "string" && summary.trim()) summaryByRawId.set(rawId, summary.trim());
+  }
+  return summaryByRawId;
+}
+
 async function fetchLatestRunIds(db: ReturnType<typeof createServiceClient> | typeof supabaseAdmin) {
   const { data, error } = await db
     .from("intel_items_enriched")
@@ -537,12 +675,60 @@ async function fetchLatestRunIds(db: ReturnType<typeof createServiceClient> | ty
   );
 }
 
+export async function getIntelInboxHealth(): Promise<IntelInboxHealth> {
+  const db = supabaseAdmin;
+
+  const [{ data: runs, error: runsError }, { data: competitors, error: competitorsError }, { data: sources, error: sourcesError }] = await Promise.all([
+    db
+      .from("intel_runs")
+      .select("id,status,started_at,finished_at,error_summary,metadata_json")
+      .order("id", { ascending: false })
+      .limit(20),
+    db
+      .from("competitor_channels")
+      .select("id,name,enabled,channel_id"),
+    db
+      .from("intel_sources")
+      .select("id,name,enabled,config_json")
+      .eq("lane", "competitor"),
+  ]);
+
+  if (runsError) throw runsError;
+  if (competitorsError) throw competitorsError;
+  if (sourcesError) throw sourcesError;
+
+  const latestCompetitorRun = ((runs || []) as Array<Record<string, unknown>>).find((run) => {
+    const metadata = toObject(run.metadata_json);
+    return metadata.lane === "competitor" || toObject(metadata.health_summary).competitor;
+  });
+  const enabledCompetitors = ((competitors || []) as Array<Record<string, unknown>>).filter((row) => row.enabled !== false);
+  const unresolvedCompetitors = enabledCompetitors.filter((row) => !row.channel_id).length;
+  const failingSources = ((sources || []) as Array<Record<string, unknown>>).filter((row) => {
+    if (row.enabled === false) return false;
+    const health = toObject(toObject(row.config_json).health);
+    return health.quarantine === true || Number(health.consecutive_failures || 0) > 0;
+  });
+  const lastError = String(latestCompetitorRun?.error_summary || "").trim() || null;
+
+  return {
+    status: unresolvedCompetitors > 0 || failingSources.length > 0 || lastError ? "warn" : "ok",
+    latestCompetitorRunAt: latestCompetitorRun ? String(latestCompetitorRun.finished_at || latestCompetitorRun.started_at || "") || null : null,
+    latestCompetitorRunStatus: latestCompetitorRun ? String(latestCompetitorRun.status || "") || null : null,
+    enabledCompetitors: enabledCompetitors.length,
+    unresolvedCompetitors,
+    failingSources: failingSources.length,
+    lastError,
+  };
+}
+
 export async function listIntelInbox(options?: {
   status?: IntelInboxStatus | "all";
   lane?: string | null;
   owner?: string | null;
   limit?: number;
   offset?: number;
+  includeOlderNew?: boolean;
+  freshDays?: number;
 }) {
   const db = supabaseAdmin;
   const limit = options?.limit ?? 50;
@@ -575,6 +761,27 @@ export async function listIntelInbox(options?: {
 
   if (reviewsError) throw reviewsError;
 
+  const rawIds = rows.map((row) => Number(row.raw_item_id)).filter(Number.isFinite);
+  const { data: rawRows, error: rawRowsError } = rawIds.length
+    ? await db
+        .from("intel_items_raw")
+        .select("id,lane,url,canonical_url,source_context,raw_json")
+        .in("id", rawIds)
+    : { data: [], error: null };
+
+  if (rawRowsError) throw rawRowsError;
+
+  const rawById = new Map<number, Record<string, unknown>>(
+    ((rawRows || []) as Array<Record<string, unknown>>).map((row) => [Number(row.id), row])
+  );
+
+  const transcriptSummaryByRawId = await fetchTranscriptSummariesByRawItemId(
+    db,
+    rows
+      .filter((row) => row.lane === "competitor")
+      .map((row) => Number(row.raw_item_id))
+  );
+
   const reviewByItem = new Map<number, Record<string, unknown>>();
   for (const review of (reviews || []) as Array<Record<string, unknown>>) {
     const enrichedItemId = Number(review.enriched_item_id);
@@ -589,14 +796,36 @@ export async function listIntelInbox(options?: {
     if (nextUpdated > currentUpdated) reviewByItem.set(enrichedItemId, review);
   }
 
+  const freshCutoffMs = Date.now() - (options?.freshDays ?? 3) * 24 * 60 * 60 * 1000;
+
   const filteredItems: IntelInboxListItem[] = rows
     .map((row) => {
       const id = Number(row.id);
       const metadata = toObject(row.metadata_json);
       const review = reviewByItem.get(id);
       const title = String(row.promote_title || metadata.headline_short || row.summary_short || `Intel item ${id}`);
+      const rawSource = rawById.get(Number(row.raw_item_id)) || null;
+      const sourceKind = classifySourceKind({
+        lane: rawSource?.lane || row.lane,
+        url: rawSource?.url,
+        canonicalUrl: rawSource?.canonical_url,
+        sourceContext: rawSource?.source_context,
+        rawJson: rawSource?.raw_json,
+      });
+      const sourceLabel = sourceLabelFromKind(sourceKind, hostnameFromUrl(rawSource?.canonical_url) || hostnameFromUrl(rawSource?.url));
+      const transcriptSummary = transcriptSummaryByRawId.get(Number(row.raw_item_id)) || null;
+      const headlineShort = typeof metadata.headline_short === "string" ? metadata.headline_short : null;
+      const readyForInbox = isEditorialSummaryReady({
+        title,
+        summaryDisplay: row.summary_display,
+        summaryShort: row.summary_short,
+        whyItMatters: row.why_it_matters,
+        headlineShort,
+        transcriptSummary,
+      });
       const summary =
-        typeof row.summary_display === "string" && row.summary_display.trim()
+        transcriptSummary ||
+        (typeof row.summary_display === "string" && row.summary_display.trim()
           ? row.summary_display.trim()
           : buildReadableSummary({
               title,
@@ -604,7 +833,8 @@ export async function listIntelInbox(options?: {
               whyItMatters: typeof row.why_it_matters === "string" ? row.why_it_matters : null,
               rawTitle: null,
               rawContentText: null,
-            });
+              transcriptSummary,
+            }));
 
       return {
         id: String(id),
@@ -612,6 +842,8 @@ export async function listIntelInbox(options?: {
         title,
         summary,
         miniDescription: buildMiniDescription(summary),
+        sourceKind,
+        sourceLabel,
         lane: typeof row.lane === "string" ? row.lane : null,
         primaryTopic: typeof row.primary_topic === "string" ? row.primary_topic : null,
         suggestedOwner: typeof row.suggested_owner === "string" ? row.suggested_owner : null,
@@ -631,9 +863,18 @@ export async function listIntelInbox(options?: {
         updatedAt: String(review?.updated_at || row.created_at || new Date().toISOString()),
         createdAt: String(row.created_at || new Date().toISOString()),
         isLatestRun: latestRunIds.has(id),
+        readyForInbox,
       };
     })
+    .filter((item) => item.readyForInbox)
     .filter((item) => (options?.status && options.status !== "all" ? item.reviewStatus === options.status : true))
+    .filter((item) => {
+      if (options?.includeOlderNew) return true;
+      if ((options?.status || "new") !== "new") return true;
+      if (item.reviewStatus !== "new") return true;
+      const createdAtMs = new Date(item.createdAt).getTime();
+      return Number.isFinite(createdAtMs) ? createdAtMs >= freshCutoffMs : true;
+    })
     .sort((a, b) => {
       if (a.isLatestRun !== b.isLatestRun) return a.isLatestRun ? -1 : 1;
       if (b.overallScore !== a.overallScore) return b.overallScore - a.overallScore;
@@ -723,8 +964,12 @@ export async function getIntelInboxDetail(id: string) {
 
   const metadata = toObject(enriched.metadata_json);
   const title = String(enriched.promote_title || metadata.headline_short || enriched.summary_short || `Intel item ${enriched.id}`);
+  const transcriptSummary = Number.isFinite(rawItemId)
+    ? (await fetchTranscriptSummariesByRawItemId(db, [rawItemId])).get(rawItemId) || null
+    : null;
   const readableSummary =
-    typeof enriched.summary_display === "string" && enriched.summary_display.trim()
+    transcriptSummary ||
+    (typeof enriched.summary_display === "string" && enriched.summary_display.trim()
       ? enriched.summary_display.trim()
       : buildReadableSummary({
           title,
@@ -732,7 +977,17 @@ export async function getIntelInboxDetail(id: string) {
           whyItMatters: enriched.why_it_matters || null,
           rawTitle: rawSource?.title || null,
           rawContentText: rawSource?.contentText || null,
-        });
+          transcriptSummary,
+        }));
+
+  const sourceKind = classifySourceKind({
+    lane: rawSource?.lane || enriched.lane,
+    url: rawSource?.url,
+    canonicalUrl: rawSource?.canonicalUrl,
+    sourceContext: rawSource?.sourceContext,
+    rawJson: rawSource?.rawJson,
+  });
+  const sourceLabel = sourceLabelFromKind(sourceKind, hostnameFromUrl(rawSource?.canonicalUrl) || hostnameFromUrl(rawSource?.url));
 
   const parsedNotes = parseStoredReviewNotes(review?.notes);
   const reviewDestinations = parsedNotes.promotionMeta?.destinations.map((entry) => entry.key) || [];
@@ -751,6 +1006,8 @@ export async function getIntelInboxDetail(id: string) {
       title,
       summary: readableSummary,
       miniDescription: buildMiniDescription(readableSummary),
+      sourceKind,
+      sourceLabel,
       lane: enriched.lane || null,
       primaryTopic: enriched.primary_topic || null,
       suggestedOwner: enriched.suggested_owner || null,
