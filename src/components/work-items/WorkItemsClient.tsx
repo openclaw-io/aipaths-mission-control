@@ -283,7 +283,10 @@ function CalendarTab({ grouped }: { grouped: Array<readonly [string, WorkItem[]]
   const rangeEnd = new Date(weekStart);
   rangeEnd.setDate(weekStart.getDate() + 34);
 
+  const todayKey = today.toISOString().slice(0, 10);
+  const [selectedDay, setSelectedDay] = useState(todayKey);
   const itemsByDay = new Map(grouped);
+  const selectedItems = (itemsByDay.get(selectedDay) || []).sort(sortBySchedule);
   const days = Array.from({ length: 35 }, (_, index) => {
     const day = new Date(weekStart);
     day.setDate(weekStart.getDate() + index);
@@ -305,10 +308,16 @@ function CalendarTab({ grouped }: { grouped: Array<readonly [string, WorkItem[]]
         {days.map((day) => {
           const key = day.toISOString().slice(0, 10);
           const dayItems = itemsByDay.get(key) || [];
-          const isToday = key === today.toISOString().slice(0, 10);
+          const isToday = key === todayKey;
+          const isSelected = key === selectedDay;
           return (
-            <div key={key} className="min-h-32 border-b border-r border-gray-800 bg-[#0d0d14] p-2">
-              <div className={`mb-2 flex h-6 w-6 items-center justify-center rounded-full text-xs ${isToday ? "bg-blue-500 text-white" : "text-gray-500"}`}>{day.getDate()}</div>
+            <button
+              key={key}
+              type="button"
+              onClick={() => setSelectedDay(key)}
+              className={`min-h-32 border-b border-r border-gray-800 bg-[#0d0d14] p-2 text-left transition hover:bg-[#151521] ${isSelected ? "ring-1 ring-blue-500/60" : ""}`}
+            >
+              <div className={`mb-2 flex h-6 w-6 items-center justify-center rounded-full text-xs ${isToday ? "bg-blue-500 text-white" : isSelected ? "bg-white/10 text-white" : "text-gray-500"}`}>{day.getDate()}</div>
               <div className="space-y-1">
                 {dayItems.slice(0, 4).map((item) => (
                   <div key={item.id} className="rounded border border-blue-500/20 bg-blue-500/10 px-2 py-1 text-[11px] text-blue-100">
@@ -318,9 +327,40 @@ function CalendarTab({ grouped }: { grouped: Array<readonly [string, WorkItem[]]
                 ))}
                 {dayItems.length > 4 && <div className="text-[11px] text-gray-500">+{dayItems.length - 4} more</div>}
               </div>
-            </div>
+            </button>
           );
         })}
+      </div>
+
+      <div className="mt-4 rounded-xl border border-gray-800 bg-[#0d0d14] p-4">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <div>
+            <h3 className="font-semibold text-white">
+              {new Intl.DateTimeFormat("en-GB", { weekday: "long", month: "long", day: "2-digit" }).format(new Date(`${selectedDay}T12:00:00`))}
+            </h3>
+            <p className="text-xs text-gray-600">Scheduled work items for selected day</p>
+          </div>
+          <span className="rounded-full bg-white/5 px-2 py-0.5 text-xs text-gray-400">{selectedItems.length}</span>
+        </div>
+        {selectedItems.length === 0 ? (
+          <p className="py-6 text-center text-xs text-gray-700">No scheduled work items for this day.</p>
+        ) : (
+          <div className="divide-y divide-gray-900">
+            {selectedItems.map((item) => (
+              <div key={item.id} className="grid gap-3 py-3 text-sm md:grid-cols-[120px_1fr_160px]">
+                <div className="text-xs text-gray-500">{new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit" }).format(new Date(item.scheduled_for!))}</div>
+                <div>
+                  <div className="font-medium text-white">{item.title}</div>
+                  <div className="mt-1 text-xs text-gray-500">{item.id.slice(0, 8)} · {pretty(item.source_type)} · {pretty(item.kind)}</div>
+                </div>
+                <div className="flex items-center gap-2 md:justify-end">
+                  <span className="text-xs text-gray-400">{agentFor(item)}</span>
+                  <StatusPill status={item.status} />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </section>
   );
