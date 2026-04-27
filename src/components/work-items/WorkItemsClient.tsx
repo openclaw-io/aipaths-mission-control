@@ -64,6 +64,13 @@ function formatDate(value: string | null | undefined) {
   }).format(new Date(value));
 }
 
+function localDateKey(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 function minutesSince(value: string | null | undefined) {
   if (!value) return null;
   return Math.max(0, Math.round((Date.now() - new Date(value).getTime()) / 60000));
@@ -157,7 +164,7 @@ export function WorkItemsClient({ initialItems, initialEvents }: { initialItems:
   const scheduledByDay = useMemo(() => {
     const groups = new Map<string, WorkItem[]>();
     for (const item of scheduledLater) {
-      const key = item.scheduled_for!.slice(0, 10);
+      const key = localDateKey(new Date(item.scheduled_for!));
       groups.set(key, [...(groups.get(key) || []), item]);
     }
     return Array.from(groups.entries())
@@ -283,7 +290,7 @@ function CalendarTab({ grouped }: { grouped: Array<readonly [string, WorkItem[]]
   const rangeEnd = new Date(weekStart);
   rangeEnd.setDate(weekStart.getDate() + 34);
 
-  const todayKey = today.toISOString().slice(0, 10);
+  const todayKey = localDateKey(today);
   const [selectedDay, setSelectedDay] = useState(todayKey);
   const itemsByDay = new Map(grouped);
   const selectedItems = (itemsByDay.get(selectedDay) || []).sort(sortBySchedule);
@@ -306,7 +313,7 @@ function CalendarTab({ grouped }: { grouped: Array<readonly [string, WorkItem[]]
           <div key={label} className="border-b border-r border-gray-800 px-2 py-2 font-medium uppercase tracking-wide">{label}</div>
         ))}
         {days.map((day) => {
-          const key = day.toISOString().slice(0, 10);
+          const key = localDateKey(day);
           const dayItems = itemsByDay.get(key) || [];
           const isToday = key === todayKey;
           const isSelected = key === selectedDay;
