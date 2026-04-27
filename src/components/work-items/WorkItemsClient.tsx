@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { createClient } from "@/lib/supabase/client";
 
-type Tab = "live" | "calendar" | "recurring" | "logs";
+type Tab = "live" | "calendar" | "suggestions" | "recurring" | "logs";
 
 export interface WorkItem {
   id: string;
@@ -104,6 +104,10 @@ function payloadString(payload: Record<string, unknown> | null, key: string) {
   return typeof value === "string" ? value : null;
 }
 
+function payloadBool(payload: Record<string, unknown> | null, key: string) {
+  return payload?.[key] === true;
+}
+
 function sortBySchedule(a: WorkItem, b: WorkItem) {
   const at = a.scheduled_for ? new Date(a.scheduled_for).getTime() : 0;
   const bt = b.scheduled_for ? new Date(b.scheduled_for).getTime() : 0;
@@ -185,7 +189,8 @@ export function WorkItemsClient({ initialItems, initialEvents, initialRules = []
 
   const readyNow = filteredItems.filter((item) => item.status === "ready" && (!item.scheduled_for || new Date(item.scheduled_for).getTime() <= now)).sort(sortBySchedule);
   const scheduledLater = filteredItems.filter((item) => ["ready", "draft", "blocked"].includes(item.status) && item.scheduled_for && new Date(item.scheduled_for).getTime() > now).sort(sortBySchedule);
-  const blocked = filteredItems.filter((item) => item.status === "blocked").sort(sortBySchedule);
+  const suggestions = filteredItems.filter((item) => payloadBool(item.payload, "requires_human_approval") && ["blocked", "draft"].includes(item.status)).sort(sortBySchedule);
+  const blocked = filteredItems.filter((item) => item.status === "blocked" && !payloadBool(item.payload, "requires_human_approval")).sort(sortBySchedule);
   const inProgress = filteredItems.filter((item) => item.status === "in_progress").sort((a, b) => new Date(a.started_at || a.created_at).getTime() - new Date(b.started_at || b.created_at).getTime());
   const failed = filteredItems.filter((item) => item.status === "failed").sort((a, b) => new Date(b.completed_at || b.updated_at || b.created_at).getTime() - new Date(a.completed_at || a.updated_at || a.created_at).getTime());
 
@@ -210,6 +215,7 @@ export function WorkItemsClient({ initialItems, initialEvents, initialRules = []
   const tabs: Array<{ id: Tab; label: string; count?: number }> = [
     { id: "live", label: "Live Board", count: readyNow.length + blocked.length + inProgress.length + failed.length },
     { id: "calendar", label: "Calendar", count: scheduledLater.length },
+    { id: "suggestions", label: "Suggestions", count: suggestions.length },
     { id: "recurring", label: "Recurring Tasks", count: rules.length },
     { id: "logs", label: "Logs", count: events.length },
   ];
@@ -245,6 +251,7 @@ export function WorkItemsClient({ initialItems, initialEvents, initialRules = []
         setItems((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, status: "ready", started_at: null, completed_at: null, updated_at: new Date().toISOString() } : candidate));
       }} />}
       {tab === "calendar" && <CalendarTab grouped={scheduledByDay} onOpen={setSelectedItemId} />}
+      {tab === "suggestions" && <SuggestionsTab items={suggestions} onOpen={setSelectedItemId} onUpdated={updateItem} />}
       {tab === "recurring" && <RecurringTasksTab rules={rules} onRulesChange={setRules} />}
       {tab === "logs" && <LogsTab events={events} items={items} onOpen={setSelectedItemId} />}
       {selectedItem && <WorkItemDrawer item={selectedItem} events={events.filter((event) => event.entity_id === selectedItem.id)} onClose={() => setSelectedItemId(null)} onUpdated={updateItem} />}
@@ -318,6 +325,86 @@ function ProgressTab({ items, events, onOpen }: { items: WorkItem[]; events: Wor
                   </div>
                 )}
               </button>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function SuggestionsTab({ items, onOpen, onUpdated }: { items: WorkItem[]; onOpen: (id: string) => void; onUpdated: (item: WorkItem) => void }) {
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function resolveSuggestion(item: WorkItem, action: "approve" | "dismiss") {
+    setBusyId(item.id);
+    setError(null);
+    try {
+      const res = await fetch(`/api/work-items/${item.id}/suggestion`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, reason: action === "approve" ? "approved_from_suggestions_tab" : "dismissed_from_suggestions_tab" }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      onUpdated((await res.json()) as WorkItem);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Suggestion action failed");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <section className="mt-6 rounded-2xl border border-amber-500/20 bg-gradient-to-br from-amber-500/10 via-[#111118] to-[#111118] p-4">
+      <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold text-white">Suggestions</h2>
+          <p className="mt-1 text-xs text-amber-100/50">Human-in-the-loop recommendations. Approve to queue; dismiss to close.</p>
+        </div>
+        <span className="rounded-full border border-amber-400/20 bg-amber-500/10 px-2.5 py-1 text-xs text-amber-100">{items.length} pending</span>
+      </div>
+      {error && <p className="mb-3 rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-200">{error}</p>}
+      {items.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-amber-500/20 bg-black/10 px-4 py-10 text-center">
+          <div className="text-sm font-medium text-amber-100/80">No pending suggestions</div>
+          <div className="mt-1 text-xs text-amber-100/40">Agents can park risky follow-up here for approval before execution.</div>
+        </div>
+      ) : (
+        <div className="grid gap-3 xl:grid-cols-2">
+          {items.map((item) => {
+            const risk = payloadString(item.payload, "risk") || "unknown";
+            const proposedAction = payloadString(item.payload, "proposed_action") || pretty(item.kind);
+            const approvalPrompt = payloadString(item.payload, "approval_prompt") || payloadString(item.payload, "summary") || "Review this recommendation before queueing.";
+            return (
+              <article key={item.id} className="overflow-hidden rounded-2xl border border-amber-500/20 bg-[#0d0d14] transition hover:border-amber-400/40">
+                <button type="button" onClick={() => onOpen(item.id)} className="block w-full border-b border-amber-500/10 p-4 text-left">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="truncate text-base font-semibold text-white">{item.title}</div>
+                      <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-gray-500">
+                        <span>{agentFor(item)}</span>
+                        <span>·</span>
+                        <span>{pretty(item.source_type)}</span>
+                        <span>·</span>
+                        <span>{formatDate(item.created_at)}</span>
+                      </div>
+                    </div>
+                    <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[11px] ${risk === "high" ? "border-red-400/30 bg-red-500/10 text-red-100" : risk === "medium" ? "border-amber-400/30 bg-amber-500/10 text-amber-100" : "border-green-400/30 bg-green-500/10 text-green-100"}`}>{risk} risk</span>
+                  </div>
+                </button>
+                <div className="space-y-4 p-4">
+                  <p className="rounded-xl border border-gray-800 bg-black/20 px-3 py-3 text-sm leading-relaxed text-gray-300">{approvalPrompt}</p>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <MiniMetric label="Proposed action" value={proposedAction} />
+                    <MiniMetric label="Status after approval" value="ready" />
+                  </div>
+                  <div className="flex flex-wrap justify-end gap-2 border-t border-amber-500/10 pt-3">
+                    <button type="button" onClick={() => resolveSuggestion(item, "dismiss")} disabled={busyId === item.id} className="rounded-lg border border-gray-600 bg-white/5 px-3 py-2 text-sm font-medium text-gray-200 hover:bg-white/10 disabled:opacity-50">Dismiss</button>
+                    <button type="button" onClick={() => resolveSuggestion(item, "approve")} disabled={busyId === item.id} className="rounded-lg border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-sm font-medium text-amber-100 hover:bg-amber-500/20 disabled:opacity-50">{busyId === item.id ? "Saving…" : "Approve & queue"}</button>
+                  </div>
+                </div>
+              </article>
             );
           })}
         </div>
