@@ -339,13 +339,14 @@ function getDestinationSuggestions(params: {
   metadata?: Record<string, unknown>;
 }): IntelDestinationKey[] {
   const metadata = params.metadata || {};
-  const rawCandidates = [
+  const explicitCandidates = [
     params.suggestedDestination,
-    params.promoteType,
     metadata.suggested_destination,
     ...(Array.isArray(metadata.suggested_destinations) ? metadata.suggested_destinations : []),
   ];
-  return uniqueDestinationKeys(rawCandidates);
+  const explicit = uniqueDestinationKeys(explicitCandidates);
+  if (explicit.length > 0) return explicit;
+  return uniqueDestinationKeys([params.promoteType]);
 }
 
 function getLegacyFallbackDestinations(params: {
