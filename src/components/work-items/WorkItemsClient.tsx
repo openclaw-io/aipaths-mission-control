@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { createClient } from "@/lib/supabase/client";
 
-type Tab = "live" | "calendar" | "recurring" | "logs";
+type Tab = "live" | "calendar" | "recurring";
 
 export interface WorkItem {
   id: string;
@@ -58,6 +58,19 @@ export interface RecurringWorkRule {
   recurring_work_occurrences?: Array<{ id: string; scheduled_for: string; work_item_id: string | null; status: string }>;
 }
 
+
+const AGENT_ACCENTS: Record<string, { border: string; bg: string; text: string; mutedBorder: string; mutedBg: string; mutedText: string; hoverBorder: string }> = {
+  content: { border: "border-l-cyan-300/70", bg: "bg-cyan-300/8", text: "text-cyan-100", mutedBorder: "border-l-cyan-200/25", mutedBg: "bg-cyan-200/[0.035]", mutedText: "text-cyan-100/45", hoverBorder: "hover:border-cyan-200/30" },
+  dev: { border: "border-l-emerald-300/70", bg: "bg-emerald-300/8", text: "text-emerald-100", mutedBorder: "border-l-emerald-200/25", mutedBg: "bg-emerald-200/[0.035]", mutedText: "text-emerald-100/45", hoverBorder: "hover:border-emerald-200/30" },
+  community: { border: "border-l-violet-300/70", bg: "bg-violet-300/8", text: "text-violet-100", mutedBorder: "border-l-violet-200/25", mutedBg: "bg-violet-200/[0.035]", mutedText: "text-violet-100/45", hoverBorder: "hover:border-violet-200/30" },
+  marketing: { border: "border-l-yellow-300/70", bg: "bg-yellow-300/8", text: "text-yellow-100", mutedBorder: "border-l-yellow-200/25", mutedBg: "bg-yellow-200/[0.035]", mutedText: "text-yellow-100/45", hoverBorder: "hover:border-yellow-200/30" },
+  strategist: { border: "border-l-orange-300/70", bg: "bg-orange-300/8", text: "text-orange-100", mutedBorder: "border-l-orange-200/25", mutedBg: "bg-orange-200/[0.035]", mutedText: "text-orange-100/45", hoverBorder: "hover:border-orange-200/30" },
+  systems: { border: "border-l-sky-300/70", bg: "bg-sky-300/8", text: "text-sky-100", mutedBorder: "border-l-sky-200/25", mutedBg: "bg-sky-200/[0.035]", mutedText: "text-sky-100/45", hoverBorder: "hover:border-sky-200/30" },
+  youtube: { border: "border-l-rose-300/70", bg: "bg-rose-300/8", text: "text-rose-100", mutedBorder: "border-l-rose-200/25", mutedBg: "bg-rose-200/[0.035]", mutedText: "text-rose-100/45", hoverBorder: "hover:border-rose-200/30" },
+};
+
+const DEFAULT_ACCENT = { border: "border-l-slate-300/60", bg: "bg-slate-300/8", text: "text-slate-100", mutedBorder: "border-l-slate-200/25", mutedBg: "bg-slate-200/[0.035]", mutedText: "text-slate-100/45", hoverBorder: "hover:border-slate-200/30" };
+
 const STATUS_STYLES: Record<string, string> = {
   draft: "bg-slate-500/20 text-slate-300 border-slate-500/20",
   ready: "bg-blue-500/20 text-blue-300 border-blue-500/20",
@@ -74,6 +87,28 @@ function pretty(value: string | null | undefined) {
 
 function agentFor(item: WorkItem) {
   return item.target_agent_id || item.owner_agent || "unassigned";
+}
+
+
+function agentAccent(agent: string) {
+  return AGENT_ACCENTS[agent] || DEFAULT_ACCENT;
+}
+
+function isCompletedForCalendar(item: WorkItem) {
+  return item.status === "done" || item.status === "canceled";
+}
+
+function isScheduledInPast(item: WorkItem, now: number) {
+  return !!item.scheduled_for && new Date(item.scheduled_for).getTime() < now;
+}
+
+function calendarItemSort() {
+  return (a: WorkItem, b: WorkItem) => {
+    const at = a.scheduled_for ? new Date(a.scheduled_for).getTime() : 0;
+    const bt = b.scheduled_for ? new Date(b.scheduled_for).getTime() : 0;
+    if (at !== bt) return at - bt;
+    return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+  };
 }
 
 function formatDate(value: string | null | undefined) {
@@ -185,21 +220,21 @@ export function WorkItemsClient({ initialItems, initialEvents, initialRules = []
 
   const readyNow = filteredItems.filter((item) => item.status === "ready" && (!item.scheduled_for || new Date(item.scheduled_for).getTime() <= now)).sort(sortBySchedule);
   const scheduledLater = filteredItems.filter((item) => ["ready", "draft", "blocked"].includes(item.status) && item.scheduled_for && new Date(item.scheduled_for).getTime() > now).sort(sortBySchedule);
+  const calendarItems = useMemo(() => filteredItems.filter((item) => item.scheduled_for && !["draft"].includes(item.status)).sort(calendarItemSort()), [filteredItems]);
   const blocked = filteredItems.filter((item) => item.status === "blocked" && item.payload?.requires_human_approval !== true).sort(sortBySchedule);
   const inProgress = filteredItems.filter((item) => item.status === "in_progress").sort((a, b) => new Date(a.started_at || a.created_at).getTime() - new Date(b.started_at || b.created_at).getTime());
   const failed = filteredItems.filter((item) => item.status === "failed").sort((a, b) => new Date(b.completed_at || b.updated_at || b.created_at).getTime() - new Date(a.completed_at || a.updated_at || a.created_at).getTime());
 
   const scheduledByDay = useMemo(() => {
     const groups = new Map<string, WorkItem[]>();
-    for (const item of scheduledLater) {
+    for (const item of calendarItems) {
       const key = localDateKey(new Date(item.scheduled_for!));
       groups.set(key, [...(groups.get(key) || []), item]);
     }
     return Array.from(groups.entries())
       .sort(([a], [b]) => a.localeCompare(b))
-      .slice(0, 21)
-      .map(([day, dayItems]) => [day, dayItems.sort(sortBySchedule)] as const);
-  }, [scheduledLater]);
+      .map(([day, dayItems]) => [day, dayItems.sort(calendarItemSort())] as const);
+  }, [calendarItems]);
 
   const selectedItem = selectedItemId ? items.find((item) => item.id === selectedItemId) || null : null;
 
@@ -211,7 +246,6 @@ export function WorkItemsClient({ initialItems, initialEvents, initialRules = []
     { id: "live", label: "Live Board", count: readyNow.length + blocked.length + inProgress.length + failed.length },
     { id: "calendar", label: "Calendar", count: scheduledLater.length },
     { id: "recurring", label: "Recurring Tasks", count: rules.length },
-    { id: "logs", label: "Logs", count: events.length },
   ];
 
   return (
@@ -241,12 +275,11 @@ export function WorkItemsClient({ initialItems, initialEvents, initialRules = []
         </select>
       </div>
 
-      {tab === "live" && <LiveBoardTab inProgress={inProgress} readyNow={readyNow} blocked={blocked} failed={failed} events={events} onOpen={setSelectedItemId} onRequeue={(item) => {
+      {tab === "live" && <LiveBoardTab inProgress={inProgress} readyNow={readyNow} blocked={blocked} failed={failed} events={events} items={items} onOpen={setSelectedItemId} onRequeue={(item) => {
         setItems((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, status: "ready", started_at: null, completed_at: null, updated_at: new Date().toISOString() } : candidate));
       }} />}
-      {tab === "calendar" && <CalendarTab grouped={scheduledByDay} onOpen={setSelectedItemId} />}
+      {tab === "calendar" && <CalendarTab grouped={scheduledByDay} onOpen={setSelectedItemId} now={now} />}
       {tab === "recurring" && <RecurringTasksTab rules={rules} onRulesChange={setRules} />}
-      {tab === "logs" && <LogsTab events={events} items={items} onOpen={setSelectedItemId} />}
       {selectedItem && <WorkItemDrawer item={selectedItem} events={events.filter((event) => event.entity_id === selectedItem.id)} onClose={() => setSelectedItemId(null)} onUpdated={updateItem} />}
     </div>
   );
@@ -258,6 +291,7 @@ function LiveBoardTab({
   blocked,
   failed,
   events,
+  items,
   onOpen,
   onRequeue,
 }: {
@@ -266,6 +300,7 @@ function LiveBoardTab({
   blocked: WorkItem[];
   failed: WorkItem[];
   events: WorkEvent[];
+  items: WorkItem[];
   onOpen: (id: string) => void;
   onRequeue: (item: WorkItem) => void;
 }) {
@@ -277,6 +312,7 @@ function LiveBoardTab({
         <QueueColumn title="Blocked" subtitle="Waiting dependencies" items={blocked} onOpen={onOpen} />
         <FailedColumn items={failed} onOpen={onOpen} onRequeue={onRequeue} />
       </div>
+      <RecentActivity events={events} items={items} onOpen={onOpen} />
     </div>
   );
 }
@@ -326,7 +362,7 @@ function ProgressTab({ items, events, onOpen }: { items: WorkItem[]; events: Wor
   );
 }
 
-function CalendarTab({ grouped, onOpen }: { grouped: Array<readonly [string, WorkItem[]]>; onOpen: (id: string) => void }) {
+function CalendarTab({ grouped, onOpen, now }: { grouped: Array<readonly [string, WorkItem[]]>; onOpen: (id: string) => void; now: number }) {
   const today = new Date();
   const weekStart = new Date(today);
   weekStart.setHours(0, 0, 0, 0);
@@ -337,7 +373,7 @@ function CalendarTab({ grouped, onOpen }: { grouped: Array<readonly [string, Wor
   const todayKey = localDateKey(today);
   const [selectedDay, setSelectedDay] = useState(todayKey);
   const itemsByDay = new Map(grouped);
-  const selectedItems = (itemsByDay.get(selectedDay) || []).sort(sortBySchedule);
+  const selectedItems = (itemsByDay.get(selectedDay) || []).sort(calendarItemSort());
   const days = Array.from({ length: 35 }, (_, index) => {
     const day = new Date(weekStart);
     day.setDate(weekStart.getDate() + index);
@@ -345,70 +381,64 @@ function CalendarTab({ grouped, onOpen }: { grouped: Array<readonly [string, Wor
   });
 
   return (
-    <section className="mt-6 rounded-xl border border-gray-800 bg-[#111118] p-4">
+    <section className="mt-6 rounded-2xl border border-gray-800/80 bg-[#101017] p-4 shadow-[0_18px_60px_rgba(0,0,0,0.18)]">
       <div className="mb-4 flex items-center justify-between">
         <h2 className="text-lg font-semibold text-white">
           {new Intl.DateTimeFormat("en-GB", { month: "short", day: "2-digit" }).format(weekStart)} – {new Intl.DateTimeFormat("en-GB", { month: "short", day: "2-digit", year: "numeric" }).format(rangeEnd)}
         </h2>
-        <span className="text-xs text-gray-500">current week + 4 weeks · scheduled future work</span>
+        <span className="text-xs text-gray-600">current week + 4 weeks</span>
       </div>
-      <div className="grid grid-cols-7 border-l border-t border-gray-800 text-xs text-gray-500">
-        {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((label) => (
-          <div key={label} className="border-b border-r border-gray-800 px-2 py-2 font-medium uppercase tracking-wide">{label}</div>
-        ))}
-        {days.map((day) => {
-          const key = localDateKey(day);
-          const dayItems = itemsByDay.get(key) || [];
-          const isToday = key === todayKey;
-          const isSelected = key === selectedDay;
-          return (
-            <button
-              key={key}
-              type="button"
-              onClick={() => setSelectedDay(key)}
-              className={`min-h-32 border-b border-r border-gray-800 bg-[#0d0d14] p-2 text-left transition hover:bg-[#151521] ${isSelected ? "ring-1 ring-blue-500/60" : ""}`}
-            >
-              <div className={`mb-2 flex h-6 w-6 items-center justify-center rounded-full text-xs ${isToday ? "bg-blue-500 text-white" : isSelected ? "bg-white/10 text-white" : "text-gray-500"}`}>{day.getDate()}</div>
-              <div className="space-y-1">
-                {dayItems.slice(0, 4).map((item) => (
-                  <div key={item.id} className="rounded border border-blue-500/20 bg-blue-500/10 px-2 py-1 text-[11px] text-blue-100">
-                    <div className="truncate font-medium">{item.title}</div>
-                    <div className="mt-0.5 text-blue-200/60">{new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit" }).format(new Date(item.scheduled_for!))} · {agentFor(item)}</div>
-                  </div>
-                ))}
-                {dayItems.length > 4 && <div className="text-[11px] text-gray-500">+{dayItems.length - 4} more</div>}
-              </div>
-            </button>
-          );
-        })}
+      <div className="overflow-hidden rounded-xl border border-gray-800/80">
+        <div className="grid grid-cols-7 bg-[#0b0b11] text-[10px] font-medium uppercase tracking-[0.18em] text-gray-600">
+          {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((label) => (
+            <div key={label} className="border-r border-gray-800/70 px-2 py-2 last:border-r-0">{label}</div>
+          ))}
+        </div>
+        <div className="grid grid-cols-7 border-t border-gray-800/70">
+          {days.map((day) => {
+            const key = localDateKey(day);
+            const dayItems = itemsByDay.get(key) || [];
+            const isToday = key === todayKey;
+            const isSelected = key === selectedDay;
+            const isPastDay = day.getTime() < new Date(todayKey + "T00:00:00").getTime();
+            return (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setSelectedDay(key)}
+                className={`group flex min-h-32 flex-col items-start justify-start border-b border-r border-gray-800/70 bg-[#0d0d14] p-2 text-left align-top transition last:border-r-0 hover:bg-[#12121b] ${isSelected ? "bg-[#13131d] shadow-[inset_0_0_0_1px_rgba(148,163,184,0.18)]" : ""}`}
+              >
+                <div className="mb-2 flex w-full items-start justify-start">
+                  <div className={`flex h-5 min-w-5 items-center justify-center rounded-md px-1.5 text-[11px] transition ${isToday ? "bg-red-500/15 text-red-200 shadow-[inset_0_0_0_1px_rgba(248,113,113,0.22)]" : isSelected ? "bg-white/[0.06] text-gray-200" : isPastDay ? "text-gray-700" : "text-gray-500"}`}>{day.getDate()}</div>
+                </div>
+                <div className="w-full space-y-1.5">
+                  {dayItems.slice(0, 4).map((item) => (
+                    <CalendarMiniItem key={item.id} item={item} now={now} />
+                  ))}
+                  {dayItems.length > 4 && <div className="text-[11px] text-gray-600">+{dayItems.length - 4} more</div>}
+                </div>
+              </button>
+            );
+          })}
+        </div>
       </div>
 
-      <div className="mt-4 rounded-xl border border-gray-800 bg-[#0d0d14] p-4">
+      <div className="mt-4 rounded-xl border border-gray-800/80 bg-[#0d0d14] p-4">
         <div className="mb-3 flex items-center justify-between gap-3">
           <div>
             <h3 className="font-semibold text-white">
               {new Intl.DateTimeFormat("en-GB", { weekday: "long", month: "long", day: "2-digit" }).format(new Date(`${selectedDay}T12:00:00`))}
             </h3>
-            <p className="text-xs text-gray-600">Scheduled work items for selected day</p>
+            <p className="text-xs text-gray-600">Scheduled work ordered by time</p>
           </div>
           <span className="rounded-full bg-white/5 px-2 py-0.5 text-xs text-gray-400">{selectedItems.length}</span>
         </div>
         {selectedItems.length === 0 ? (
-          <p className="py-6 text-center text-xs text-gray-700">No scheduled work items for this day.</p>
+          <p className="py-6 text-center text-xs text-gray-700">No work scheduled for this day.</p>
         ) : (
-          <div className="divide-y divide-gray-900">
+          <div className="space-y-2">
             {selectedItems.map((item) => (
-              <button key={item.id} type="button" onClick={() => onOpen(item.id)} className="grid w-full gap-3 py-3 text-left text-sm transition hover:bg-white/[0.02] md:grid-cols-[120px_1fr_160px]">
-                <div className="text-xs text-gray-500">{new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit" }).format(new Date(item.scheduled_for!))}</div>
-                <div>
-                  <div className="font-medium text-white">{item.title}</div>
-                  <div className="mt-1 text-xs text-gray-500">{item.id.slice(0, 8)} · {pretty(item.source_type)} · {pretty(item.kind)}</div>
-                </div>
-                <div className="flex items-center gap-2 md:justify-end">
-                  <span className="text-xs text-gray-400">{agentFor(item)}</span>
-                  <StatusPill status={item.status} />
-                </div>
-              </button>
+              <CalendarDayItem key={item.id} item={item} now={now} onOpen={() => onOpen(item.id)} />
             ))}
           </div>
         )}
@@ -417,14 +447,76 @@ function CalendarTab({ grouped, onOpen }: { grouped: Array<readonly [string, Wor
   );
 }
 
+function CalendarMiniItem({ item, now }: { item: WorkItem; now: number }) {
+  const agent = agentFor(item);
+  const accent = agentAccent(agent);
+  const completed = isCompletedForCalendar(item);
+  const past = isScheduledInPast(item, now);
+  const muted = completed;
+  return (
+    <div
+      title={`${new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit" }).format(new Date(item.scheduled_for!))} · ${agent} · ${pretty(item.status)} · ${pretty(item.source_type)}`}
+      className={`rounded-md border border-transparent border-l-2 px-2 py-1 text-[11px] transition ${muted ? `${accent.mutedBorder} ${accent.mutedBg} ${accent.mutedText}` : `${accent.border} ${accent.bg} ${accent.text} ${accent.hoverBorder}`} ${past && !completed ? "opacity-85" : ""}`}
+    >
+      <div className="truncate font-medium">{item.title}</div>
+      <div className={`mt-0.5 ${muted ? "text-gray-500/70" : "text-gray-400/75"}`}>{new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit" }).format(new Date(item.scheduled_for!))}</div>
+    </div>
+  );
+}
 
-function RecurringTasksTab({ rules }: { rules: RecurringWorkRule[]; onRulesChange: (rules: RecurringWorkRule[]) => void }) {
+function CalendarDayItem({ item, now, onOpen }: { item: WorkItem; now: number; onOpen: () => void }) {
+  const agent = agentFor(item);
+  const accent = agentAccent(agent);
+  const completed = isCompletedForCalendar(item);
+  const past = isScheduledInPast(item, now);
+  const muted = completed;
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      title={`${agent} · ${pretty(item.status)} · ${item.id.slice(0, 8)}`}
+      className={`group grid w-full gap-3 rounded-xl border border-gray-800/80 border-l-2 px-3 py-3 text-left text-sm transition hover:border-gray-700 hover:bg-white/[0.025] md:grid-cols-[80px_1fr_120px] ${muted ? `${accent.mutedBorder} ${accent.mutedBg}` : `${accent.border} ${accent.bg}`} ${past && !completed ? "opacity-90" : ""}`}
+    >
+      <div className={`text-xs tabular-nums ${muted ? "text-gray-600" : "text-gray-400"}`}>{new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit" }).format(new Date(item.scheduled_for!))}</div>
+      <div className="min-w-0">
+        <div className={`truncate font-medium ${muted ? accent.mutedText : "text-white"}`}>{item.title}</div>
+        <div className="mt-1 hidden text-xs text-gray-500 group-hover:block">{agent} · {pretty(item.source_type)} · {pretty(item.kind)}</div>
+      </div>
+      <div className="flex items-center justify-end">
+        <StatusPill status={item.status} />
+      </div>
+    </button>
+  );
+}
+
+
+function RecurringTasksTab({ rules, onRulesChange }: { rules: RecurringWorkRule[]; onRulesChange: (rules: RecurringWorkRule[]) => void }) {
+  const [expandedRuleId, setExpandedRuleId] = useState<string | null>(null);
+  const [busyRuleId, setBusyRuleId] = useState<string | null>(null);
+
+  async function toggleRule(rule: RecurringWorkRule, nextEnabled: boolean) {
+    setBusyRuleId(rule.id);
+    try {
+      const res = await fetch("/api/work-items/recurring-rules", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: rule.id, enabled: nextEnabled }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+
+      const refreshed = await fetch("/api/work-items/recurring-rules").then((response) => response.ok ? response.json() : null);
+      if (refreshed?.rules) onRulesChange(refreshed.rules as RecurringWorkRule[]);
+    } finally {
+      setBusyRuleId(null);
+    }
+  }
+
   return (
     <section className="mt-6 rounded-2xl border border-gray-800 bg-[#111118] p-4">
       <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="text-lg font-semibold text-white">Recurring Tasks</h2>
-          <p className="mt-1 text-xs text-gray-500">Read-only rules that keep future work_items visible in Calendar.</p>
+          <p className="mt-1 text-xs text-gray-500">Pause, resume, and inspect rules that keep future work visible in Calendar.</p>
         </div>
         <span className="rounded-full border border-gray-700 bg-white/5 px-2.5 py-1 text-xs text-gray-300">{rules.length} rules</span>
       </div>
@@ -437,6 +529,8 @@ function RecurringTasksTab({ rules }: { rules: RecurringWorkRule[]; onRulesChang
       ) : (
         <div className="grid gap-3 xl:grid-cols-2">
           {rules.map((rule) => {
+            const expanded = expandedRuleId === rule.id;
+            const busy = busyRuleId === rule.id;
             const occurrences = [...(rule.recurring_work_occurrences || [])].sort((a, b) => new Date(a.scheduled_for).getTime() - new Date(b.scheduled_for).getTime());
             const nextOccurrence = occurrences.find((occurrence) => new Date(occurrence.scheduled_for).getTime() >= Date.now()) || occurrences[0];
             const cadenceLabel = rule.cadence_interval === 1
@@ -444,9 +538,9 @@ function RecurringTasksTab({ rules }: { rules: RecurringWorkRule[]; onRulesChang
               : `Every ${rule.cadence_interval} ${rule.cadence_unit}`;
 
             return (
-              <article key={rule.id} className="overflow-hidden rounded-2xl border border-gray-800 bg-[#0d0d14] transition hover:border-gray-700 hover:bg-[#10101a]">
-                <div className="border-b border-gray-800/80 p-4">
-                  <div className="flex items-start justify-between gap-3">
+              <article key={rule.id} className={`overflow-hidden rounded-2xl border border-gray-800 bg-[#0d0d14] transition hover:border-gray-700 hover:bg-[#10101a] ${rule.enabled ? "" : "opacity-70"}`}>
+                <div className="p-4">
+                  <button type="button" onClick={() => setExpandedRuleId(expanded ? null : rule.id)} className="flex w-full items-start justify-between gap-3 text-left">
                     <div className="min-w-0">
                       <div className="truncate text-base font-semibold text-white">{rule.title}</div>
                       <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-gray-500">
@@ -454,32 +548,62 @@ function RecurringTasksTab({ rules }: { rules: RecurringWorkRule[]; onRulesChang
                         <span>{cadenceLabel}</span>
                         <span>·</span>
                         <span>{rule.time_of_day} {rule.timezone}</span>
+                        <span>·</span>
+                        <span>{nextOccurrence ? `next ${formatDate(nextOccurrence.scheduled_for)}` : "no future runs"}</span>
                       </div>
                     </div>
-                    <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[11px] ${rule.enabled ? "border-green-500/20 bg-green-500/10 text-green-200" : "border-gray-700 bg-gray-800 text-gray-400"}`}>{rule.enabled ? "enabled" : "paused"}</span>
-                  </div>
+                    <div className="flex shrink-0 items-center gap-3">
+                      <AppleSwitch
+                        enabled={rule.enabled}
+                        busy={busy}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void toggleRule(rule, !rule.enabled);
+                        }}
+                      />
+                      <span className={`text-xs text-gray-500 transition ${expanded ? "rotate-180" : ""}`}>⌄</span>
+                    </div>
+                  </button>
                 </div>
 
-                <div className="space-y-4 p-4">
-                  <p className="rounded-xl border border-gray-800 bg-black/20 px-3 py-3 text-sm leading-relaxed text-gray-300">{rule.instruction}</p>
+                {expanded && (
+                  <div className="space-y-4 border-t border-gray-800/80 p-4">
+                    <p className="rounded-xl border border-gray-800 bg-black/20 px-3 py-3 text-sm leading-relaxed text-gray-300">{rule.instruction}</p>
 
-                  <div className="grid gap-2 sm:grid-cols-3">
-                    <MiniMetric label="Next run" value={nextOccurrence ? formatDate(nextOccurrence.scheduled_for) : "—"} />
-                    <MiniMetric label="Horizon" value={`${rule.horizon_days} days`} />
-                    <MiniMetric label="Scheduled" value={`${occurrences.length} items`} />
-                  </div>
+                    <div className="grid gap-2 sm:grid-cols-3">
+                      <MiniMetric label="Next run" value={nextOccurrence ? formatDate(nextOccurrence.scheduled_for) : "—"} />
+                      <MiniMetric label="Horizon" value={`${rule.horizon_days} days`} />
+                      <MiniMetric label="Scheduled" value={`${occurrences.length} items`} />
+                    </div>
 
-                  <div className="flex flex-wrap items-center gap-2 text-[11px] text-gray-500">
-                    <span>source: recurring rule</span>
-                    {rule.last_materialized_at && <><span>·</span><span>last materialized {formatDate(rule.last_materialized_at)}</span></>}
+                    <div className="flex flex-wrap items-center gap-2 text-[11px] text-gray-500">
+                      <span>source: recurring rule</span>
+                      {rule.last_materialized_at && <><span>·</span><span>last materialized {formatDate(rule.last_materialized_at)}</span></>}
+                      {!rule.enabled && <><span>·</span><span>paused</span></>}
+                    </div>
                   </div>
-                </div>
+                )}
               </article>
             );
           })}
         </div>
       )}
     </section>
+  );
+}
+
+function AppleSwitch({ enabled, busy, onClick }: { enabled: boolean; busy: boolean; onClick: (event: React.MouseEvent<HTMLButtonElement>) => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={busy}
+      aria-pressed={enabled}
+      aria-label={enabled ? "Pause recurring task" : "Resume recurring task"}
+      className={`relative h-6 w-11 rounded-full transition disabled:cursor-wait disabled:opacity-60 ${enabled ? "bg-green-400/80" : "bg-gray-700"}`}
+    >
+      <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition ${enabled ? "left-5" : "left-0.5"}`} />
+    </button>
   );
 }
 
@@ -492,34 +616,60 @@ function MiniMetric({ label, value }: { label: string; value: string }) {
   );
 }
 
-function LogsTab({ events, items, onOpen }: { events: WorkEvent[]; items: WorkItem[]; onOpen: (id: string) => void }) {
+function RecentActivity({ events, items, onOpen }: { events: WorkEvent[]; items: WorkItem[]; onOpen: (id: string) => void }) {
+  const [visibleCount, setVisibleCount] = useState(10);
   const itemById = new Map(items.map((item) => [item.id, item]));
+  const usefulEvents = events.filter((event) => event.event_type !== "recurring_work.materialized");
+  const visibleEvents = usefulEvents.slice(0, visibleCount);
+  const hasMore = visibleCount < usefulEvents.length;
+
   return (
-    <section className="mt-6 rounded-xl border border-gray-800 bg-[#111118] p-4">
-      <div className="mb-4 flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-white">Work logs</h2>
-        <span className="text-xs text-gray-500">latest {events.length}</span>
-      </div>
-      {events.length === 0 ? (
-        <p className="py-8 text-center text-sm text-gray-600">No work events found.</p>
-      ) : (
-        <div className="divide-y divide-gray-900">
-          {events.map((event) => {
-            const item = event.entity_id ? itemById.get(event.entity_id) : undefined;
-            return (
-              <button key={event.id} type="button" onClick={() => event.entity_id && onOpen(event.entity_id)} className="grid w-full gap-3 py-3 text-left text-sm transition hover:bg-white/[0.02] md:grid-cols-[180px_1fr_140px]">
-                <div className="text-xs text-gray-500">{formatDate(event.created_at)}</div>
-                <div>
-                  <div className="font-medium text-white">{pretty(event.event_type)}</div>
-                  <div className="mt-1 text-xs text-gray-500">
-                    {item?.title || payloadString(event.payload, "title") || event.entity_id || "—"}
-                  </div>
-                </div>
-                <div className="text-xs text-gray-400 md:text-right">{event.actor || payloadString(event.payload, "agent") || "system"}</div>
-              </button>
-            );
-          })}
+    <section className="rounded-2xl border border-gray-800 bg-[#111118] p-4">
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <div>
+          <h2 className="font-semibold text-white">Work activity</h2>
+          <p className="text-xs text-gray-500">Useful Work Queue events only</p>
         </div>
+        <span className="rounded-full bg-white/5 px-2 py-0.5 text-xs text-gray-400">{usefulEvents.length}</span>
+      </div>
+      {usefulEvents.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-gray-800 bg-black/10 px-3 py-4 text-center text-xs text-gray-600">No recent activity.</div>
+      ) : (
+        <>
+          <div className="divide-y divide-gray-900/80 overflow-hidden rounded-xl border border-gray-800/80 bg-[#0d0d14]">
+            {visibleEvents.map((event) => {
+              const item = event.entity_id ? itemById.get(event.entity_id) : undefined;
+              const canOpen = !!event.entity_id && !!item;
+              const content = (
+                <>
+                  <div className="text-xs tabular-nums text-gray-500">{formatDate(event.created_at)}</div>
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium text-gray-200">{pretty(event.event_type)}</div>
+                    <div className="mt-0.5 truncate text-xs text-gray-500">{item?.title || payloadString(event.payload, "title") || event.entity_id || "—"}</div>
+                  </div>
+                  <div className="text-xs text-gray-500 md:text-right">{event.actor || payloadString(event.payload, "agent") || "system"}</div>
+                </>
+              );
+
+              return canOpen ? (
+                <button key={event.id} type="button" onClick={() => onOpen(event.entity_id!)} className="grid w-full gap-3 px-3 py-2.5 text-left transition hover:bg-white/[0.025] md:grid-cols-[150px_1fr_120px]">
+                  {content}
+                </button>
+              ) : (
+                <div key={event.id} className="grid gap-3 px-3 py-2.5 md:grid-cols-[150px_1fr_120px]">
+                  {content}
+                </div>
+              );
+            })}
+          </div>
+          {hasMore && (
+            <div className="mt-3 flex justify-center">
+              <button type="button" onClick={() => setVisibleCount((current) => Math.min(current + 10, usefulEvents.length))} className="rounded-lg border border-gray-700 bg-white/[0.03] px-3 py-1.5 text-xs font-medium text-gray-300 transition hover:border-gray-600 hover:bg-white/[0.06] hover:text-white">
+                View more
+              </button>
+            </div>
+          )}
+        </>
       )}
     </section>
   );
