@@ -14,6 +14,8 @@ export type PipelineWorkInput = {
   reviewNotes?: string;
   mapRelationType?: string;
   payloadRelationType?: string;
+  scheduledFor?: string | null;
+  payloadExtra?: Record<string, unknown>;
 };
 
 const OPEN_STATUSES = ["draft", "ready", "blocked", "in_progress"];
@@ -52,6 +54,7 @@ export async function createPipelineWorkItem(db: SupabaseClient, input: Pipeline
     map_relation_type: mapRelationType,
     action: input.action,
     review_notes: input.reviewNotes,
+    ...(input.payloadExtra || {}),
   };
 
   const { data: workItem, error } = await db
@@ -67,6 +70,7 @@ export async function createPipelineWorkItem(db: SupabaseClient, input: Pipeline
       owner_agent: input.ownerAgent,
       target_agent_id: input.ownerAgent,
       requested_by: input.requestedBy,
+      scheduled_for: input.scheduledFor || null,
       payload,
     })
     .select("id, title, status, source_type, owner_agent, target_agent_id, payload")

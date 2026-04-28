@@ -1,4 +1,4 @@
-export type IntelDestinationKey = "blog" | "guide" | "email" | "video" | "short" | "news";
+export type IntelDestinationKey = "blog" | "guide" | "email" | "video" | "short" | "news" | "tool" | "startup";
 
 export type IntelDestinationConfig = {
   key: IntelDestinationKey;
@@ -7,7 +7,7 @@ export type IntelDestinationConfig = {
   pipelineType: "blog" | "doc" | "email_campaign" | "video" | "community_post";
 };
 
-export const INTEL_DESTINATION_ORDER: IntelDestinationKey[] = ["blog", "guide", "email", "video", "short", "news"];
+export const INTEL_DESTINATION_ORDER: IntelDestinationKey[] = ["blog", "guide", "email", "video", "short", "news", "tool", "startup"];
 
 export const INTEL_DESTINATION_CONFIG: Record<IntelDestinationKey, IntelDestinationConfig> = {
   blog: { key: "blog", label: "Blog", director: "content", pipelineType: "blog" },
@@ -16,6 +16,8 @@ export const INTEL_DESTINATION_CONFIG: Record<IntelDestinationKey, IntelDestinat
   video: { key: "video", label: "Video", director: "youtube", pipelineType: "video" },
   short: { key: "short", label: "Short", director: "youtube", pipelineType: "video" },
   news: { key: "news", label: "News", director: "community", pipelineType: "community_post" },
+  tool: { key: "tool", label: "Tool", director: "community", pipelineType: "community_post" },
+  startup: { key: "startup", label: "Startup", director: "community", pipelineType: "community_post" },
 };
 
 export const DESTINATION_ALIASES: Record<string, IntelDestinationKey> = {
@@ -37,6 +39,18 @@ export const DESTINATION_ALIASES: Record<string, IntelDestinationKey> = {
   news: "news",
   community: "news",
   community_post: "news",
+  tool: "tool",
+  tools: "tool",
+  ai_tool: "tool",
+  ai_tools: "tool",
+  herramienta: "tool",
+  herramientas: "tool",
+  startup: "startup",
+  startups: "startup",
+  project: "startup",
+  projects: "startup",
+  proyecto: "startup",
+  proyectos: "startup",
 };
 
 export const INTEL_DESTINATION_OPTIONS = INTEL_DESTINATION_ORDER.map((key) => ({

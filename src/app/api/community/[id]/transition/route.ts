@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/admin";
+import { resolveCommunityPublicationSlot, getCommunityPublicationSegment } from "@/lib/publication/scheduling";
 import { createPipelineWorkItem } from "@/lib/work-items/pipeline-materializer";
 
 export const dynamic = "force-dynamic";
@@ -74,22 +75,37 @@ function createRevisionInstruction(item: { title: string }, reviewNotes?: string
   ].join("\n");
 }
 
-function createScheduleInstruction(item: { id: string; title: string; metadata?: unknown }) {
-  const metadata = (item.metadata || {}) as Record<string, unknown>;
+function communityPublishTarget(metadata: Record<string, unknown>) {
   const target = (metadata.target || {}) as Record<string, unknown>;
+  const segment = getCommunityPublicationSegment(metadata);
+  if (typeof target.channel_id === "string" && typeof target.channel_name === "string") {
+    return { channelId: target.channel_id, channelName: target.channel_name };
+  }
+  if (segment === "content_launch") return { channelId: "1445797470662692864", channelName: "_📣anuncios" };
+  if (segment === "poll") return { channelId: "1283759728798994533", channelName: "📔_encuestas" };
+  if (segment === "tool_of_day") return { channelId: "1284277202073948181", channelName: "🦿_ai_tools" };
+  if (segment === "startup_of_day") return { channelId: "1445800588561486007", channelName: "📢_presenta_tu_proyecto" };
+  return { channelId: "1498256983122378883", channelName: "🛰️_radar_ia" };
+}
+
+function createPublishInstruction(item: { id: string; title: string; metadata?: unknown }, scheduledFor: string | null) {
+  const metadata = (item.metadata || {}) as Record<string, unknown>;
   const source = (metadata.source || {}) as Record<string, unknown>;
+  const target = communityPublishTarget(metadata);
   const copy = getCommunityCopy(item);
   return [
     `Community post item: ${item.title}`,
     `Pipeline item ID: ${item.id}`,
     "",
     "Task:",
-    "- Choose the publish date/time for this approved community post.",
-    "- Do not publish now.",
-    "- Complete this scheduling work item with scheduled_for as an ISO timestamp.",
-    "- Mission Control will create/update the future publish work item in Work Queue from that scheduled_for value.",
+    scheduledFor
+      ? `- Publish this approved community post at/after its scheduled Work Queue time: ${scheduledFor}.`
+      : "- Publish this approved content-launch announcement now.",
+    `- Publish to <#${target.channelId}> (${target.channelName}).`,
+    "- Use only the approved copy below; do not rewrite it unless required for formatting.",
+    "- Wrap raw URLs as <https://...> to suppress Discord embeds/previews.",
+    "- Complete this work item with current_url/published_at after publishing.",
     "",
-    `Target: ${String(target.channel_name || target.channel_id || "Discord")}`,
     source.url ? `Source URL: ${String(source.url)}` : "Source URL: (none)",
     "",
     "Approved copy:",
@@ -159,7 +175,9 @@ export async function POST(
   };
 
   let revisionWorkItemId: string | null = null;
-  let scheduleWorkItemId: string | null = null;
+  let publishWorkItemId: string | null = null;
+  let approvedScheduledFor: string | null = null;
+  let approvedScheduleSource: string | null = null;
   if (action === "request_changes") {
     try {
       const { workItem } = await createPipelineWorkItem(db, {
@@ -185,29 +203,59 @@ export async function POST(
 
   if (action === "approve") {
     try {
+      const metadataForSchedule = (item.metadata || {}) as Record<string, unknown>;
+      const slot = await resolveCommunityPublicationSlot(db, {
+        metadata: metadataForSchedule,
+        pipelineItemId: item.id,
+      });
+      approvedScheduledFor = slot?.scheduledFor || null;
+      approvedScheduleSource = slot?.source || (slot === null ? "immediate_content_launch" : null);
+      const target = communityPublishTarget(metadataForSchedule);
       const { workItem } = await createPipelineWorkItem(db, {
         pipelineItemId: item.id,
         pipelineType: "community_post",
-        title: `Schedule community post: ${item.title}`,
-        instruction: createScheduleInstruction(item),
+        title: `Publish community post: ${item.title}`,
+        instruction: createPublishInstruction(item, approvedScheduledFor),
         priority: item.priority || "medium",
         ownerAgent: "community",
         requestedBy: user.email || user.id,
-        relationType: "schedule",
-        action: "schedule_community_post",
-        trigger: "community_review_approved",
+        relationType: "publish",
+        action: "publish_community_post",
+        trigger: approvedScheduledFor ? "community_review_approved_scheduled" : "community_review_approved_immediate",
+        scheduledFor: approvedScheduledFor,
+        payloadExtra: {
+          schedule_kind: "publication",
+          community_segment: getCommunityPublicationSegment(metadataForSchedule),
+          target_channel_id: target.channelId,
+          target_channel_name: target.channelName,
+          log_channel_id: "1473660854800224316",
+          suppress_link_previews: true,
+        },
       });
-      scheduleWorkItemId = workItem?.id || null;
+      publishWorkItemId = workItem?.id || null;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      console.error("[community.transition] Failed to create schedule work item", err);
-      return NextResponse.json({ error: `Failed to create schedule work item: ${message}` }, { status: 500 });
+      console.error("[community.transition] Failed to create publish work item", err);
+      return NextResponse.json({ error: `Failed to create publish work item: ${message}` }, { status: 500 });
     }
   }
 
+  const nextStatus = action === "approve" && approvedScheduledFor ? "scheduled" : targetStatus;
   const updatePayload: Record<string, unknown> = {
-    status: targetStatus,
-    metadata,
+    status: nextStatus,
+    metadata: action === "approve"
+      ? {
+          ...metadata,
+          schedule: {
+            ...((metadata.schedule || {}) as Record<string, unknown>),
+            source: approvedScheduleSource,
+            scheduled_at: new Date().toISOString(),
+            scheduled_by: user.email || user.id,
+            scheduled_for: approvedScheduledFor,
+            publish_work_item_id: publishWorkItemId,
+          },
+        }
+      : metadata,
     updated_at: new Date().toISOString(),
   };
 
@@ -226,7 +274,7 @@ export async function POST(
   }
 
   if (revisionWorkItemId) void notifyWorkItem(revisionWorkItemId, "community");
-  if (scheduleWorkItemId) void notifyWorkItem(scheduleWorkItemId, "community");
+  if (publishWorkItemId && !approvedScheduledFor) void notifyWorkItem(publishWorkItemId, "community");
 
   await db.from("event_log").insert({
     domain: "community",
@@ -235,10 +283,12 @@ export async function POST(
     entity_id: id,
     actor: user.email || user.id,
     payload: {
-      status: targetStatus,
+      status: nextStatus,
       review_notes: action === "request_changes" ? String(reviewNotes).trim() : null,
       revision_work_item_id: revisionWorkItemId,
-      schedule_work_item_id: scheduleWorkItemId,
+      publish_work_item_id: publishWorkItemId,
+      scheduled_for: approvedScheduledFor,
+      schedule_source: approvedScheduleSource,
     },
   });
 

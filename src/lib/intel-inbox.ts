@@ -528,6 +528,26 @@ function buildDestinationInstruction(params: {
         "- Do not DM Gonza with the draft; the review surface is the Community pipeline card in Mission Control.",
       );
       break;
+    case "tool":
+      lines.push(
+        "Task:",
+        "- Draft a Spanish Tool of the Day-style post for the AIPaths Discord #ai-tools audience.",
+        "- Explain what the tool does, who should try it, one practical use case, and one caveat or validation note.",
+        "- Keep it useful and conversational, not sponsored-sounding. Do not publish directly.",
+        "- Save the final copy back to the Mission Control community pipeline item by completing this work item with output.copy.text or a result that contains the exact final copy.",
+        "- Do not DM Gonza with the draft; the review surface is the Community pipeline card in Mission Control.",
+      );
+      break;
+    case "startup":
+      lines.push(
+        "Task:",
+        "- Draft a Spanish Startup/Project of the Day-style post for the AIPaths Discord #presenta-tu-proyecto audience.",
+        "- Explain what the startup/project is building, why it matters, who can learn from it, and one question to invite discussion.",
+        "- Keep it founder/operator-oriented and practical. Avoid hype and do not publish directly.",
+        "- Save the final copy back to the Mission Control community pipeline item by completing this work item with output.copy.text or a result that contains the exact final copy.",
+        "- Do not DM Gonza with the draft; the review surface is the Community pipeline card in Mission Control.",
+      );
+      break;
   }
 
   lines.push(
@@ -581,7 +601,8 @@ async function ensurePrimaryDestinationWorkItem(params: {
   summary: string;
   notes?: string | null;
 }) {
-  const relationType = params.destination.key === "news" ? "distribute_community" : "investigate";
+  const isCommunityDestination = params.destination.director === "community";
+  const relationType = isCommunityDestination ? "distribute_community" : "investigate";
 
   const { data: existingMap, error: existingMapError } = await params.db
     .from("pipeline_work_map")
@@ -608,7 +629,7 @@ async function ensurePrimaryDestinationWorkItem(params: {
     ownerAgent: params.destination.director,
     requestedBy: params.reviewer,
     relationType,
-    action: params.destination.key === "news" ? "draft_community_news" : `develop_${params.destination.pipelineType}`,
+    action: isCommunityDestination ? `draft_community_${params.destination.key}` : `develop_${params.destination.pipelineType}`,
     trigger: "intel_inbox_promote",
     reviewNotes: params.notes || undefined,
   });
@@ -632,11 +653,34 @@ async function ensurePrimaryDestinationWorkItem(params: {
       source_type: "pipeline_item",
       target_agent_id: params.destination.director,
       trigger: "intel_inbox_promote",
-      action: params.destination.key === "news" ? "draft_community_news" : `develop_${params.destination.pipelineType}`,
+      action: isCommunityDestination ? `draft_community_${params.destination.key}` : `develop_${params.destination.pipelineType}`,
       repaired_missing_map: true,
     },
   });
   if (eventError) throw eventError;
+}
+
+
+function getCommunityDestinationTarget(destinationKey: IntelDestinationKey) {
+  if (destinationKey === "tool") {
+    return {
+      kind: "tool_of_day",
+      target: { channel_id: "1284277202073948181", channel_name: "🦿_ai_tools" },
+    };
+  }
+  if (destinationKey === "startup") {
+    return {
+      kind: "startup_of_day",
+      target: { channel_id: "1445800588561486007", channel_name: "📢_presenta_tu_proyecto" },
+    };
+  }
+  if (destinationKey === "news") {
+    return {
+      kind: "news",
+      target: { channel_id: "1498256983122378883", channel_name: "🛰️_radar_ia" },
+    };
+  }
+  return null;
 }
 
 function isDuplicatePipelineItemError(error: unknown) {
@@ -1295,6 +1339,7 @@ export async function promoteIntelInboxItem(params: {
     let created = false;
 
     if (!pipelineItem) {
+      const communityTarget = getCommunityDestinationTarget(destinationKey);
       const pipelineMetadata = {
         ...metadataShell,
         intel_source_type: "intel_inbox",
@@ -1302,6 +1347,8 @@ export async function promoteIntelInboxItem(params: {
         intel_raw_item_id: enriched.raw_item_id,
         intel_destination_key: destination.key,
         destination_label: destination.label,
+        kind: communityTarget?.kind || destination.key,
+        ...(communityTarget ? { target: communityTarget.target } : {}),
         collaborators,
         notify_agents: Array.from(new Set([destination.director, ...collaborators])),
         notes: reviewNotes,

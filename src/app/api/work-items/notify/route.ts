@@ -309,14 +309,27 @@ export async function POST(request: NextRequest) {
   const workPayload = (item.payload || {}) as Record<string, unknown>;
   const isCommunityPost = workPayload.pipeline_type === "community_post";
   const actionName = typeof workPayload.action === "string" ? workPayload.action : "";
-  const isCommunityDraft = isCommunityPost && ["draft_community_news", "develop_community_post", "draft_guide_announcement", "revise_community_announcement"].includes(actionName);
+  const isCommunityDraft = isCommunityPost && [
+    "draft_community_news",
+    "draft_community_tool",
+    "draft_community_startup",
+    "develop_community_post",
+    "draft_guide_announcement",
+    "revise_community_announcement",
+  ].includes(actionName);
   const isCommunitySchedule = isCommunityPost && actionName === "schedule_community_post";
   const isCommunityPublish = isCommunityPost && (actionName === "publish_community_post" || workPayload.relation_type === "publish");
+  const completionLogChannelId = typeof workPayload.log_channel_id === "string" ? workPayload.log_channel_id : "1473660854800224316";
 
   message += `\n## Execution context\nThis wake is running in a detached Mission Control work-item session, not a user chat thread. Do not assume you can reply in-context to a human. If you need to send an external message, use the appropriate tool explicitly.\n`;
 
+  message += `\n## Completion routing contract\nWhen the work is done, do not put the user-facing completion/update in your final assistant reply, because detached work-item final replies route to the owning director channel. If you need to notify Gonza or leave a visible completion log, send it explicitly via the Discord message tool to <#${completionLogChannelId}>. After sending that external update and marking the work item done, make your final assistant reply exactly: NO_REPLY.\n`;
+
   if (isCommunityDraft) {
     message += `\n## Community draft contract\nWrite the final community/news copy into the Mission Control pipeline card. Do not DM Gonza with the draft and do not publish it. Complete this work item only after PATCHing the final copy as output.copy.text or as a clearly labeled final copy in result; Mission Control will move the card to ready_for_review.\n`;
+  }
+  if (workPayload.relation_type === "distribute_community" && (workPayload.pipeline_type === "blog" || workPayload.pipeline_type === "doc" || workPayload.pipeline_type === "guide")) {
+    message += `\n## Content launch community draft contract\nThis is a content-launch announcement request, not a publishing request. Create or update a Community pipeline item containing the final Spanish Discord announcement copy and leave it in ready_for_review for Gonza approval. Do NOT publish to Discord. Do NOT schedule publication. Complete this work item only after the draft exists in Mission Control and is waiting for review.\n`;
   }
   if (isCommunitySchedule) {
     message += `\n## Community schedule contract\nChoose the publish date/time for this approved community post. Do not publish now. Complete this work item with scheduled_for (ISO timestamp); Mission Control will create/update the future publish work item in Work Queue, and the Work Queue scheduler will dispatch it when due.\n`;
@@ -324,7 +337,7 @@ export async function POST(request: NextRequest) {
   if (isCommunityPublish) {
     const targetChannelId = typeof workPayload.target_channel_id === "string" ? workPayload.target_channel_id : "1498256983122378883";
     const targetChannelName = typeof workPayload.target_channel_name === "string" ? workPayload.target_channel_name : "🛰️_radar_ia";
-    const logChannelId = typeof workPayload.log_channel_id === "string" ? workPayload.log_channel_id : "1473660854800224316";
+    const logChannelId = completionLogChannelId;
     message += `\n## Community publish contract\nPublish only the approved copy in <#${targetChannelId}> (${targetChannelName}). Do not publish news/radar items in #anuncios; #anuncios is only for blogs, guides, videos, and major content launches. Wrap every raw URL as <https://...> so Discord suppresses link previews/embeds. After publishing, complete this work item with current_url/published_at if available. Send the publication log/update to <#${logChannelId}>, not to your private director channel. Suggested log: “Anuncio: [title] — lo publiqué en #${targetChannelName}. Post: [ver post](<POST_URL>)”.\n`;
   }
 

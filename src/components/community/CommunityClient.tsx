@@ -26,22 +26,6 @@ const TABS: Array<{ key: TabKey; label: string }> = [
   { key: "parked", label: "Parked" },
 ];
 
-const STATUS_STYLES: Record<string, string> = {
-  draft: "bg-slate-500/20 text-slate-300",
-  ready_for_review: "bg-yellow-500/20 text-yellow-300",
-  approved: "bg-blue-500/20 text-blue-300",
-  scheduled: "bg-purple-500/20 text-purple-300",
-  published: "bg-green-500/20 text-green-300",
-  live: "bg-green-500/20 text-green-300",
-  changes_requested: "bg-orange-500/20 text-orange-300",
-  parked: "bg-slate-500/20 text-slate-300",
-  rejected: "bg-red-500/20 text-red-300",
-};
-
-function prettyStatus(status: string) {
-  return status.replaceAll("_", " ");
-}
-
 function prettyKind(kind?: string) {
   if (!kind) return "community post";
   return kind.replaceAll("_", " ");
@@ -91,11 +75,24 @@ function getScheduledDate(item: CommunityItem, workItems: LinkedWorkItem[]) {
   return getPublishWorkItem(item.id, workItems)?.scheduled_for || null;
 }
 
+function inferCommunityChannel(metadata: CommunityMetadata) {
+  const destinationKey = typeof (metadata as Record<string, unknown>).intel_destination_key === "string" ? (metadata as Record<string, string>).intel_destination_key : null;
+  const destinationLabel = typeof (metadata as Record<string, unknown>).destination_label === "string" ? String((metadata as Record<string, unknown>).destination_label).toLowerCase() : "";
+  const sourceType = metadata.source?.type;
+  const kind = metadata.kind;
+
+  if (destinationKey === "poll" || destinationLabel.includes("encuesta") || kind === "poll") return "#📔_encuestas";
+  if (destinationKey === "tool" || destinationLabel.includes("tool") || destinationLabel.includes("herramienta") || kind === "tool_of_day") return "#🦿_ai_tools";
+  if (destinationKey === "startup" || destinationLabel.includes("startup") || kind === "startup_of_day") return "#📢_presenta_tu_proyecto";
+  if (["blog", "guide", "doc", "video"].includes(String(sourceType || destinationKey || kind || ""))) return "#_📣anuncios";
+  if (destinationKey === "news" || destinationLabel === "news" || kind === "news" || (metadata as Record<string, unknown>).intel) return "#🛰️_radar_ia";
+  return "#🛰️_radar_ia";
+}
+
 function getPublishChannelLabel(workItem: LinkedWorkItem | null, metadata: CommunityMetadata) {
   const payload = workItem?.payload || {};
   if (typeof payload.target_channel_name === "string") return `#${payload.target_channel_name}`;
-  if (typeof payload.target_channel_id === "string") return `<#${payload.target_channel_id}>`;
-  return getChannelLabel(metadata);
+  return inferCommunityChannel(metadata);
 }
 
 function formatTime(value: string | null) {
@@ -123,13 +120,6 @@ function getTabDate(item: CommunityItem, tab: TabKey, workItems: LinkedWorkItem[
   if (tab === "scheduled") return getScheduledDate(item, workItems);
   if (tab === "published") return item.published_at;
   return null;
-}
-
-function tabCardLabel(tab: TabKey) {
-  if (tab === "review") return "Review";
-  if (tab === "scheduled") return "Publish";
-  if (tab === "published") return "Published";
-  return "Parked";
 }
 
 function formatDate(value: string | null) {
@@ -421,55 +411,50 @@ function CommunityQueueCard({
   const borderClass = expanded ? "border-blue-500 bg-blue-500/5" : "border-gray-800 bg-black/10 hover:border-gray-700";
 
   return (
-    <article className={`rounded-lg border p-4 transition ${borderClass}`}>
-      <div className="grid gap-4 lg:grid-cols-[88px_1fr_auto] lg:items-center">
-        <div className="rounded-xl border border-gray-800 bg-[#0a0a0f] px-3 py-2 text-center">
-          <p className="text-lg font-semibold text-white">{displayDate ? formatTime(displayDate) : tabCardLabel(tab)}</p>
-          <p className="mt-0.5 text-[11px] uppercase tracking-wide text-gray-600">{displayDate ? "London" : prettyStatus(item.status)}</p>
+    <article onClick={onToggle} className={`cursor-pointer rounded-lg border p-4 transition ${borderClass}`}>
+      <div className="grid gap-4 lg:grid-cols-[132px_1fr_auto] lg:items-center">
+        <div className="rounded-xl border border-sky-500/20 bg-sky-500/10 px-3 py-2 text-center">
+          <p className="truncate text-sm font-semibold text-sky-200">{channel}</p>
+          {displayDate ? (
+            <p className="mt-1 text-xs text-sky-200/70">{formatTime(displayDate)} London</p>
+          ) : (
+            <p className="mt-1 text-xs text-sky-200/70">canal interno</p>
+          )}
         </div>
 
         <div className="min-w-0">
           <h3 className="truncate font-medium text-white">{item.title}</h3>
-          <p className="mt-1 truncate text-sm font-medium text-sky-300">Canal: {channel}</p>
           <p className="mt-1 truncate text-sm text-gray-500">{getOneLineCopyPreview(metadata)}</p>
         </div>
 
-        <div className="flex flex-wrap justify-start gap-2 lg:justify-end" onClick={(event) => event.stopPropagation()}>
-          {tab === "review" && (
-            <button onClick={onReview} className="rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-blue-500">
-              Review
-            </button>
-          )}
-          <button onClick={onToggle} className="rounded-lg bg-white/10 px-3 py-2 text-sm font-medium text-white transition hover:bg-white/15">
-            {expanded ? "Hide copy" : "View copy"}
-          </button>
-          {(tab === "scheduled" || tab === "review") && (
-            <a href="/work-items" className="rounded-lg bg-white/10 px-3 py-2 text-sm font-medium text-white transition hover:bg-white/15">
-              Work Queue
-            </a>
-          )}
-          {metadata.source?.url && (
-            <a href={metadata.source.url} target="_blank" rel="noreferrer" className="rounded-lg bg-white/10 px-3 py-2 text-sm font-medium text-white transition hover:bg-white/15">
-              Source
-            </a>
-          )}
-          {item.current_url && (
-            <a href={item.current_url} target="_blank" rel="noreferrer" className="rounded-lg bg-white/10 px-3 py-2 text-sm font-medium text-white transition hover:bg-white/15">
-              Post
-            </a>
-          )}
-        </div>
+        <div className="hidden lg:block" />
       </div>
 
       {expanded && (
         <div className="mt-4 rounded-xl border border-gray-800 bg-black/20 p-4">
           <p className="text-xs font-medium uppercase tracking-wide text-gray-500">{tab === "published" ? "Published copy" : tab === "review" ? "Draft copy" : "Approved copy"}</p>
           {copy ? <CopyPreview copy={copy} /> : <p className="mt-3 text-sm text-gray-500">No copy saved yet.</p>}
-          <div className="mt-4 flex flex-wrap gap-3 text-sm">
-            <span className="text-gray-500">Canal: <span className="text-sky-300">{channel}</span></span>
-            <span className="text-gray-500">Estado task: <span className="text-gray-300">{taskStatus}</span></span>
-            {suppressPreviews && <span className="text-emerald-300">No link previews</span>}
-            {metadata.review?.notes && <span className="text-orange-300">Review notes saved</span>}
+          <div className="mt-4 flex flex-wrap gap-2 text-sm" onClick={(event) => event.stopPropagation()}>
+            {tab === "review" && (
+              <button onClick={onReview} className="rounded-lg bg-blue-600 px-3 py-2 font-medium text-white transition hover:bg-blue-500">
+                Abrir panel de aprobación
+              </button>
+            )}
+            {metadata.source?.url && (
+              <a href={metadata.source.url} target="_blank" rel="noreferrer" className="rounded-lg bg-white/10 px-3 py-2 font-medium text-white transition hover:bg-white/15">
+                Abrir fuente
+              </a>
+            )}
+            {item.current_url && (
+              <a href={item.current_url} target="_blank" rel="noreferrer" className="rounded-lg bg-white/10 px-3 py-2 font-medium text-white transition hover:bg-white/15">
+                Abrir post publicado
+              </a>
+            )}
+          </div>
+          <div className="mt-3 flex flex-wrap gap-3 text-xs text-gray-600">
+            <span>Task: {taskStatus}</span>
+            {suppressPreviews && <span>No link previews</span>}
+            {metadata.review?.notes && <span>Review notes saved</span>}
           </div>
         </div>
       )}
