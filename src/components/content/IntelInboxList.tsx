@@ -68,11 +68,15 @@ export function IntelInboxList({
   items,
   selectedId,
   onSelect,
+  onQuickDiscard,
+  discardingIds,
   loading,
 }: {
   items: IntelInboxListItem[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  onQuickDiscard: (id: string) => void;
+  discardingIds: Set<string>;
   loading: boolean;
 }) {
   if (loading) {
@@ -103,36 +107,60 @@ export function IntelInboxList({
           const selected = item.id === selectedId;
           const sourceTheme = getSourceTheme(item);
           return (
-            <button
+            <div
               key={item.id}
-              onClick={() => onSelect(item.id)}
-              className={`w-full border-b border-l-4 border-b-gray-800 px-4 py-4 text-left transition last:border-b-0 ${
+              className={`border-b border-l-4 border-b-gray-800 transition last:border-b-0 ${
                 selected ? sourceTheme.selected : sourceTheme.row
               }`}
             >
-              <div className="flex min-w-0 items-start justify-between gap-4">
-                <div className="min-w-0 flex-1 overflow-hidden">
-                  <div className="flex min-w-0 flex-wrap items-center gap-2">
-                    <div className="min-w-0 max-w-full truncate text-sm font-medium text-white">{item.title}</div>
-                    <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${sourceTheme.chip}`}>
-                      {sourceTheme.label}
-                    </span>
-                    {item.isLatestRun ? (
-                      <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-emerald-200">
-                        Latest run
+              <div className="flex min-w-0 items-start justify-between gap-4 px-4 py-4">
+                <button
+                  onClick={() => onSelect(item.id)}
+                  className="min-w-0 flex-1 text-left"
+                >
+                  <div className="min-w-0 overflow-hidden">
+                    <div className="flex min-w-0 flex-wrap items-center gap-2">
+                      <div className="min-w-0 max-w-full truncate text-sm font-medium text-white">{item.title}</div>
+                      <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${sourceTheme.chip}`}>
+                        {sourceTheme.label}
                       </span>
-                    ) : null}
+                      {item.discussionContext ? (
+                        <span className="rounded-full border border-orange-400/25 bg-orange-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-orange-100">
+                          {item.discussionContext}
+                        </span>
+                      ) : null}
+                      {item.isLatestRun ? (
+                        <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-emerald-200">
+                          Latest run
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="mt-1 line-clamp-2 max-w-full text-xs leading-5 text-gray-400">
+                      {item.miniDescription || "No summary yet"}
+                    </div>
                   </div>
-                  <div className="mt-1 line-clamp-2 max-w-full text-xs leading-5 text-gray-400">
-                    {item.miniDescription || "No summary yet"}
+                </button>
+                <div className="flex shrink-0 items-center gap-2 text-right">
+                  <div>
+                    <div className="text-xs font-semibold text-white">Score {formatScore(item.overallScore)}</div>
+                    <div className="mt-1 text-[11px] text-gray-500">{formatDate(item.createdAt)}</div>
                   </div>
-                </div>
-                <div className="shrink-0 text-right">
-                  <div className="text-xs font-semibold text-white">Score {formatScore(item.overallScore)}</div>
-                  <div className="mt-1 text-[11px] text-gray-500">{formatDate(item.createdAt)}</div>
+                  <button
+                    type="button"
+                    title="Descartar sin comentario"
+                    aria-label={`Descartar ${item.title}`}
+                    disabled={discardingIds.has(item.id)}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onQuickDiscard(item.id);
+                    }}
+                    className="grid h-8 w-8 place-items-center rounded-full border border-red-500/20 bg-red-500/[0.06] text-sm text-red-300 transition hover:border-red-400/50 hover:bg-red-500/15 hover:text-red-100 disabled:cursor-wait disabled:opacity-50"
+                  >
+                    {discardingIds.has(item.id) ? "…" : "🗑️"}
+                  </button>
                 </div>
               </div>
-            </button>
+            </div>
           );
         })}
       </div>

@@ -38,6 +38,7 @@ export type IntelInboxListItem = {
   miniDescription: string;
   sourceKind: "youtube" | "reddit" | "web" | "producthunt" | "github" | "hackernews" | "other";
   sourceLabel: string;
+  discussionContext: string | null;
   lane: string | null;
   primaryTopic: string | null;
   suggestedOwner: string | null;
@@ -63,6 +64,19 @@ export type IntelInboxHealth = {
   unresolvedCompetitors: number;
   failingSources: number;
   lastError: string | null;
+  pipeline: {
+    rawRecent: number;
+    enrichedRecent: number;
+    visibleInbox: number;
+    redditWithDiscussion: number;
+    youtubeTranscriptSummaries: number;
+    transcriptsFetched: number;
+    transcriptsSummarized: number;
+    transcriptsUnavailable: number;
+    transcriptsFailed: number;
+    duplicateSnapshotGroups: number;
+    duplicateSnapshotRows: number;
+  };
 };
 
 export type IntelInboxDetail = {
@@ -276,6 +290,32 @@ function sourceLabelFromKind(kind: ReturnType<typeof classifySourceKind>, fallba
     case "web": return "Web";
     default: return "Fuente";
   }
+}
+
+function countStoredComments(rawJson: unknown) {
+  const raw = toObject(rawJson);
+  const metadata = toObject(raw.metadata);
+  const candidates = [raw.comments, raw.top_comments, metadata.top_comments, metadata.comments];
+  for (const value of candidates) {
+    if (Array.isArray(value)) return value.length;
+  }
+  return 0;
+}
+
+function getDiscussionContext(params: {
+  sourceKind: ReturnType<typeof classifySourceKind>;
+  metadata?: Record<string, unknown>;
+  rawJson?: unknown;
+}) {
+  if (params.sourceKind === "youtube") {
+    return params.metadata?.transcript_summary_used ? "YouTube transcript" : "YouTube title only";
+  }
+  if (params.sourceKind !== "reddit") return null;
+  const used = toNumber(params.metadata?.comments_used);
+  const stored = countStoredComments(params.rawJson);
+  const count = Math.max(used, stored);
+  if (count <= 0) return "Reddit · sin comentarios cargados";
+  return `Reddit discussion · ${count} comentario${count === 1 ? "" : "s"}`;
 }
 
 function normalizeDestinationKey(value: unknown): IntelDestinationKey | null {
@@ -677,8 +717,18 @@ async function fetchLatestRunIds(db: ReturnType<typeof createServiceClient> | ty
 
 export async function getIntelInboxHealth(): Promise<IntelInboxHealth> {
   const db = supabaseAdmin;
+  const recentCutoff = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
 
-  const [{ data: runs, error: runsError }, { data: competitors, error: competitorsError }, { data: sources, error: sourcesError }] = await Promise.all([
+  const [
+    { data: runs, error: runsError },
+    { data: competitors, error: competitorsError },
+    { data: sources, error: sourcesError },
+    { count: rawRecent, error: rawRecentError },
+    { count: enrichedRecent, error: enrichedRecentError },
+    { data: enrichedMetaRows, error: enrichedMetaError },
+    { data: transcriptRows, error: transcriptRowsError },
+    { data: snapshotRows, error: snapshotRowsError },
+  ] = await Promise.all([
     db
       .from("intel_runs")
       .select("id,status,started_at,finished_at,error_summary,metadata_json")
@@ -691,11 +741,38 @@ export async function getIntelInboxHealth(): Promise<IntelInboxHealth> {
       .from("intel_sources")
       .select("id,name,enabled,config_json")
       .eq("lane", "competitor"),
+    db
+      .from("intel_items_raw")
+      .select("id", { count: "exact", head: true })
+      .gte("first_seen_at", recentCutoff),
+    db
+      .from("intel_items_enriched")
+      .select("id", { count: "exact", head: true })
+      .gte("created_at", recentCutoff),
+    db
+      .from("intel_items_enriched")
+      .select("id,lane,metadata_json,created_at")
+      .gte("created_at", recentCutoff)
+      .order("created_at", { ascending: false })
+      .limit(500),
+    db
+      .from("competitor_transcripts")
+      .select("id,fetch_status,summary_status"),
+    db
+      .from("competitor_video_snapshots")
+      .select("id,competitor_channel_id,video_id,snapshot_at")
+      .order("snapshot_at", { ascending: false })
+      .limit(5000),
   ]);
 
   if (runsError) throw runsError;
   if (competitorsError) throw competitorsError;
   if (sourcesError) throw sourcesError;
+  if (rawRecentError) throw rawRecentError;
+  if (enrichedRecentError) throw enrichedRecentError;
+  if (enrichedMetaError) throw enrichedMetaError;
+  if (transcriptRowsError) throw transcriptRowsError;
+  if (snapshotRowsError) throw snapshotRowsError;
 
   const latestCompetitorRun = ((runs || []) as Array<Record<string, unknown>>).find((run) => {
     const metadata = toObject(run.metadata_json);
@@ -710,14 +787,52 @@ export async function getIntelInboxHealth(): Promise<IntelInboxHealth> {
   });
   const lastError = String(latestCompetitorRun?.error_summary || "").trim() || null;
 
+  const enrichedMeta = ((enrichedMetaRows || []) as Array<Record<string, unknown>>).map((row) => ({
+    ...row,
+    metadata: toObject(row.metadata_json),
+  }));
+  const redditWithDiscussion = enrichedMeta.filter((row) => toNumber(row.metadata.comments_used) > 0).length;
+  const youtubeTranscriptSummaries = enrichedMeta.filter((row) => row.metadata.transcript_summary_used === true).length;
+
+  const transcripts = (transcriptRows || []) as Array<Record<string, unknown>>;
+  const transcriptsFetched = transcripts.filter((row) => row.fetch_status === "fetched").length;
+  const transcriptsSummarized = transcripts.filter((row) => row.summary_status === "summarized").length;
+  const transcriptsUnavailable = transcripts.filter((row) => row.fetch_status === "unavailable").length;
+  const transcriptsFailed = transcripts.filter((row) => row.fetch_status === "failed" || row.summary_status === "failed").length;
+
+  const snapshotGroups = new Map<string, number>();
+  for (const row of (snapshotRows || []) as Array<Record<string, unknown>>) {
+    const key = `${row.competitor_channel_id || "unknown"}:${row.video_id || ""}`;
+    snapshotGroups.set(key, (snapshotGroups.get(key) || 0) + 1);
+  }
+  const duplicateCounts = Array.from(snapshotGroups.values()).filter((count) => count > 1);
+  const duplicateSnapshotGroups = duplicateCounts.length;
+  const duplicateSnapshotRows = duplicateCounts.reduce((acc, count) => acc + count - 1, 0);
+
+  const visibleInbox = await listIntelInbox({ status: "all", includeOlderNew: true, limit: 1, offset: 0 }).then((result) => result.total).catch(() => 0);
+  const status = unresolvedCompetitors > 0 || failingSources.length > 0 || lastError || transcriptsFailed > 0 || duplicateSnapshotRows > 0 ? "warn" : "ok";
+
   return {
-    status: unresolvedCompetitors > 0 || failingSources.length > 0 || lastError ? "warn" : "ok",
+    status,
     latestCompetitorRunAt: latestCompetitorRun ? String(latestCompetitorRun.finished_at || latestCompetitorRun.started_at || "") || null : null,
     latestCompetitorRunStatus: latestCompetitorRun ? String(latestCompetitorRun.status || "") || null : null,
     enabledCompetitors: enabledCompetitors.length,
     unresolvedCompetitors,
     failingSources: failingSources.length,
     lastError,
+    pipeline: {
+      rawRecent: rawRecent || 0,
+      enrichedRecent: enrichedRecent || 0,
+      visibleInbox,
+      redditWithDiscussion,
+      youtubeTranscriptSummaries,
+      transcriptsFetched,
+      transcriptsSummarized,
+      transcriptsUnavailable,
+      transcriptsFailed,
+      duplicateSnapshotGroups,
+      duplicateSnapshotRows,
+    },
   };
 }
 
@@ -844,6 +959,7 @@ export async function listIntelInbox(options?: {
         miniDescription: buildMiniDescription(summary),
         sourceKind,
         sourceLabel,
+        discussionContext: getDiscussionContext({ sourceKind, metadata, rawJson: rawSource?.raw_json }),
         lane: typeof row.lane === "string" ? row.lane : null,
         primaryTopic: typeof row.primary_topic === "string" ? row.primary_topic : null,
         suggestedOwner: typeof row.suggested_owner === "string" ? row.suggested_owner : null,
@@ -1008,6 +1124,7 @@ export async function getIntelInboxDetail(id: string) {
       miniDescription: buildMiniDescription(readableSummary),
       sourceKind,
       sourceLabel,
+      discussionContext: getDiscussionContext({ sourceKind, metadata, rawJson: rawSource?.rawJson }),
       lane: enriched.lane || null,
       primaryTopic: enriched.primary_topic || null,
       suggestedOwner: enriched.suggested_owner || null,

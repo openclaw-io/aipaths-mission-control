@@ -1,7 +1,5 @@
 "use client";
 
-/* eslint-disable react-hooks/set-state-in-effect */
-
 import { useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { IntelInboxDetail } from "./IntelInboxDetail";
@@ -54,6 +52,7 @@ export function ContentInboxClient({
   const [ownerFilter, setOwnerFilter] = useState(initialOwnerFilter);
   const [includeOlderNew, setIncludeOlderNew] = useState(initialIncludeOlderNew);
   const [toast, setToast] = useState<string | null>(null);
+  const [discardingIds, setDiscardingIds] = useState<Set<string>>(() => new Set());
 
   const assetOptions = useMemo(() => {
     return Array.from(new Set(filterSourceItems.map((item) => item.lane).filter(Boolean) as string[])).sort();
@@ -164,6 +163,34 @@ export function ContentInboxClient({
     }
   }
 
+  async function quickDiscard(id: string) {
+    if (discardingIds.has(id)) return;
+    setDiscardingIds((current) => new Set(current).add(id));
+    try {
+      const res = await fetch(`/api/intel/inbox/${id}/discard`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        setToast(json?.error || "Could not dismiss intel item");
+        return;
+      }
+      setItems((current) => current.filter((item) => item.id !== id));
+      setTotal((current) => Math.max(0, current - 1));
+      if (selectedId === id) closeDetail();
+      setToast("Intel dismissed");
+      router.refresh();
+    } finally {
+      setDiscardingIds((current) => {
+        const next = new Set(current);
+        next.delete(id);
+        return next;
+      });
+    }
+  }
+
   async function handleAction(action: "promote" | "park" | "discard", payload?: ActionPayload) {
     if (!selectedId) return;
     const endpoint = `/api/intel/inbox/${selectedId}/${action}`;
@@ -251,6 +278,18 @@ export function ContentInboxClient({
            ) : null}
           </div>
         </div>
+        <div className="mt-3 grid gap-2 text-xs text-gray-500 sm:grid-cols-2 lg:grid-cols-4">
+          <span className="rounded-full border border-gray-800 px-2 py-1">Raw 3d: {health.pipeline.rawRecent}</span>
+          <span className="rounded-full border border-gray-800 px-2 py-1">Enriched 3d: {health.pipeline.enrichedRecent}</span>
+          <span className="rounded-full border border-gray-800 px-2 py-1">Inbox visible: {health.pipeline.visibleInbox}</span>
+          <span className="rounded-full border border-gray-800 px-2 py-1">Reddit ctx: {health.pipeline.redditWithDiscussion}</span>
+          <span className="rounded-full border border-gray-800 px-2 py-1">YT transcript ctx: {health.pipeline.youtubeTranscriptSummaries}</span>
+          <span className="rounded-full border border-gray-800 px-2 py-1">Transcripts: {health.pipeline.transcriptsSummarized}/{health.pipeline.transcriptsFetched} summarized</span>
+          <span className="rounded-full border border-gray-800 px-2 py-1">Unavailable/failed: {health.pipeline.transcriptsUnavailable}/{health.pipeline.transcriptsFailed}</span>
+          <span className={`rounded-full border px-2 py-1 ${health.pipeline.duplicateSnapshotRows ? "border-amber-500/30 text-amber-200" : "border-gray-800"}`}>
+            Snapshot dupes: {health.pipeline.duplicateSnapshotRows}
+          </span>
+        </div>
         <div className="mt-3 flex flex-wrap gap-2 text-xs text-gray-500">
           <span className="rounded-full border border-gray-800 px-2 py-1">Default view: new intel</span>
           <span className="rounded-full border border-gray-800 px-2 py-1">&quot;new&quot; = sin decisión de review</span>
@@ -263,6 +302,8 @@ export function ContentInboxClient({
           items={items}
           selectedId={selectedId}
           onSelect={openDetail}
+          onQuickDiscard={quickDiscard}
+          discardingIds={discardingIds}
           loading={loadingList}
         />
 

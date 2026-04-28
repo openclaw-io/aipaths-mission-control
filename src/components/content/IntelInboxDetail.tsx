@@ -125,6 +125,11 @@ export function IntelInboxDetail({
               <span className={`rounded-full border px-2.5 py-1 font-semibold uppercase tracking-wide ${sourceBadgeClass}`}>
                 {item.sourceLabel}
               </span>
+              {item.discussionContext ? (
+                <span className="rounded-full border border-orange-400/25 bg-orange-500/10 px-2.5 py-1 font-medium uppercase tracking-wide text-orange-100">
+                  {item.discussionContext}
+                </span>
+              ) : null}
               {item.isLatestRun ? (
                 <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 font-medium uppercase tracking-wide text-emerald-200">
                   Latest run
