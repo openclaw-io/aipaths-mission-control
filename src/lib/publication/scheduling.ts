@@ -7,7 +7,9 @@ export type PublicationSlotResult = {
   source: "explicit" | "existing" | "auto_allocated";
 };
 
-const DEFAULT_PUBLISH_HOURS_UTC = [9, 14, 17];
+// Default content publication slots: 13:00 and 20:00 Europe/London during BST.
+// Stored as UTC ISO timestamps for the Work Queue scheduler.
+const DEFAULT_PUBLISH_HOURS_UTC = [12, 19];
 const OPEN_PUBLICATION_STATUSES = ["draft", "ready", "blocked", "in_progress"];
 
 function isWeekend(date: Date) {
