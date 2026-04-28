@@ -181,7 +181,11 @@ export function IntelInboxDetail({
             </div>
 
             <div className="mt-4 grid gap-3 sm:grid-cols-2">
-              {INTEL_DESTINATION_OPTIONS.map((option) => {
+              {[...INTEL_DESTINATION_OPTIONS].sort((a, b) => {
+                const aSuggested = item.suggestedDestinations.includes(a.key) ? 0 : 1;
+                const bSuggested = item.suggestedDestinations.includes(b.key) ? 0 : 1;
+                return aSuggested - bSuggested;
+              }).map((option) => {
                 const active = selectedDestinations.includes(option.key);
                 return (
                   <button

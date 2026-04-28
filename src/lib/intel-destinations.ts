@@ -16,8 +16,8 @@ export const INTEL_DESTINATION_CONFIG: Record<IntelDestinationKey, IntelDestinat
   video: { key: "video", label: "Video", director: "youtube", pipelineType: "video" },
   short: { key: "short", label: "Short", director: "youtube", pipelineType: "video" },
   news: { key: "news", label: "News", director: "community", pipelineType: "community_post" },
-  tool: { key: "tool", label: "Tool", director: "community", pipelineType: "community_post" },
-  startup: { key: "startup", label: "Startup", director: "community", pipelineType: "community_post" },
+  tool: { key: "tool", label: "AI Tool", director: "community", pipelineType: "community_post" },
+  startup: { key: "startup", label: "Startup / Proyecto", director: "community", pipelineType: "community_post" },
 };
 
 export const DESTINATION_ALIASES: Record<string, IntelDestinationKey> = {
