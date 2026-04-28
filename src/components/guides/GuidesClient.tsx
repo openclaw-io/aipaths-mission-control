@@ -415,13 +415,20 @@ function ScheduledList({ items, workItems }: { items: GuideItem[]; workItems: Li
       {items.length === 0 ? (
         <p className="text-sm text-gray-600">No scheduled guides</p>
       ) : (
-        <div className="divide-y divide-gray-800">
-          {items.map((item) => (
-            <div key={item.id} className="py-4 first:pt-0 last:pb-0">
-              <p className="text-sm font-medium text-purple-300">{formatScheduledDate(getPublishSchedule(item, workItems))}</p>
-              <h3 className="mt-1 text-base font-semibold text-white">{item.title}</h3>
-            </div>
-          ))}
+        <div className="space-y-3">
+          {items.map((item) => {
+            const publishWorkItem = getPublishWorkItem(item, workItems);
+            return (
+              <div key={item.id} className="rounded-lg border border-gray-800 p-4">
+                <p className="text-sm font-medium text-purple-300">{formatScheduledDate(getPublishSchedule(item, workItems))}</p>
+                <h3 className="mt-1 text-base font-semibold text-white">{item.title}</h3>
+                <div className="mt-2 flex flex-wrap gap-2 text-xs text-gray-500">
+                  {publishWorkItem && <span>publish task: {publishWorkItem.owner_agent || "dev"} · {publishWorkItem.status}</span>}
+                  {publishWorkItem?.scheduled_for && <span>queued: {new Date(publishWorkItem.scheduled_for).toLocaleString("es-ES", { timeZone: "Europe/London" })}</span>}
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
     </section>

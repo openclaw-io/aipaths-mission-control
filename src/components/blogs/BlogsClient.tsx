@@ -6,7 +6,7 @@ import type { BlogItem, LinkedWorkItem } from "@/app/blogs/page";
 import { useRealtimeBlogs } from "@/hooks/useRealtimeBlogs";
 import { useRealtimeWorkItems } from "@/hooks/useRealtimeWorkItems";
 
-type TabKey = "inbox" | "scheduled" | "published" | "archived";
+type TabKey = "inbox" | "final_check" | "scheduled" | "published" | "archived";
 type SectionKey = "drafts" | "review";
 
 type BlogMetadata = {
@@ -14,10 +14,19 @@ type BlogMetadata = {
   draft_markdown?: string;
   draft_summary?: string;
   seo?: { meta_description?: string; primary_keyword?: string; secondary_keywords?: string[] };
+  localization?: {
+    en?: { title?: string; slug?: string; content_path?: string; draft_markdown?: string; markdown?: string; content?: string; body?: string; meta_description?: string };
+    en_ready?: boolean;
+    translated_at?: string;
+  };
+  hero_image?: { url?: string; media_path?: string; local_path?: string; path?: string; prompt?: string; status?: string; updated_at?: string; width?: number; height?: number; aspect_ratio?: string };
+  cover_image?: { url?: string; media_path?: string; local_path?: string; path?: string; prompt?: string; status?: string; updated_at?: string; width?: number; height?: number; aspect_ratio?: string };
+  final_check?: { status?: string; notes?: string; ready_at?: string; approved_at?: string };
 };
 
 const TABS: Array<{ key: TabKey; label: string }> = [
   { key: "inbox", label: "Inbox" },
+  { key: "final_check", label: "Final Check" },
   { key: "scheduled", label: "Scheduled" },
   { key: "published", label: "Published" },
   { key: "archived", label: "Archived" },
@@ -31,6 +40,8 @@ const INBOX_SECTIONS: Array<{ key: SectionKey; title: string; statuses: string[]
 const STATUS_STYLES: Record<string, string> = {
   draft: "bg-slate-500/20 text-slate-300",
   ready_for_review: "bg-yellow-500/20 text-yellow-300",
+  final_check: "bg-cyan-500/20 text-cyan-300",
+  localizing: "bg-blue-500/20 text-blue-300",
   scheduled: "bg-purple-500/20 text-purple-300",
   live: "bg-green-500/20 text-green-300",
   archived: "bg-gray-500/20 text-gray-300",
@@ -67,7 +78,9 @@ export function BlogsClient({ initialBlogs, initialWorkItems }: { initialBlogs: 
   const workItems = useRealtimeWorkItems(initialWorkItems);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [reviewId, setReviewId] = useState<string | null>(null);
+  const [finalCheckId, setFinalCheckId] = useState<string | null>(null);
   const [reviewNotes, setReviewNotes] = useState("");
+  const [finalCheckNotes, setFinalCheckNotes] = useState("");
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [tab, setTab] = useState<TabKey>("inbox");
 
@@ -81,6 +94,8 @@ export function BlogsClient({ initialBlogs, initialWorkItems }: { initialBlogs: 
   }, [blogs]);
 
   const selectedReviewItem = useMemo(() => blogs.find((item) => item.id === reviewId) || null, [blogs, reviewId]);
+  const selectedFinalCheckItem = useMemo(() => blogs.find((item) => item.id === finalCheckId) || null, [blogs, finalCheckId]);
+  const finalCheckItems = useMemo(() => blogs.filter((item) => item.status === "final_check"), [blogs]);
   const scheduledItems = useMemo(() => {
     return blogs
       .filter((item) => item.status === "scheduled")
@@ -91,6 +106,7 @@ export function BlogsClient({ initialBlogs, initialWorkItems }: { initialBlogs: 
 
   function openReview(item: BlogItem) {
     setSelectedId(null);
+    setFinalCheckId(null);
     setReviewId(item.id);
     setReviewNotes("");
   }
@@ -98,6 +114,18 @@ export function BlogsClient({ initialBlogs, initialWorkItems }: { initialBlogs: 
   function closeReview() {
     setReviewId(null);
     setReviewNotes("");
+  }
+
+  function openFinalCheck(item: BlogItem) {
+    setSelectedId(null);
+    setReviewId(null);
+    setFinalCheckId(item.id);
+    setFinalCheckNotes("");
+  }
+
+  function closeFinalCheck() {
+    setFinalCheckId(null);
+    setFinalCheckNotes("");
   }
 
   async function runAction(action: string, item: BlogItem, options?: { reviewNotes?: string }) {
@@ -117,6 +145,7 @@ export function BlogsClient({ initialBlogs, initialWorkItems }: { initialBlogs: 
       setBlogs((prev) => prev.map((blog) => (blog.id === item.id ? { ...blog, ...updatedItem } : blog)));
       setSelectedId(null);
       closeReview();
+      closeFinalCheck();
       router.refresh();
     } finally {
       setBusyAction(null);
@@ -132,6 +161,15 @@ export function BlogsClient({ initialBlogs, initialWorkItems }: { initialBlogs: 
     await runAction("request_changes", item, { reviewNotes: notes });
   }
 
+  async function requestFinalChanges(item: BlogItem) {
+    const notes = finalCheckNotes.trim();
+    if (!notes) {
+      alert("Add final-check notes before requesting changes.");
+      return;
+    }
+    await runAction("request_final_changes", item, { reviewNotes: notes });
+  }
+
   return (
     <div>
       <h1 className="text-2xl font-bold text-white">✍️ Blogs</h1>
@@ -145,6 +183,7 @@ export function BlogsClient({ initialBlogs, initialWorkItems }: { initialBlogs: 
               setTab(t.key);
               setSelectedId(null);
               closeReview();
+              closeFinalCheck();
             }}
             className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
               tab === t.key ? "bg-[#1a1a24] text-white" : "text-gray-500 hover:text-white"
@@ -220,6 +259,10 @@ export function BlogsClient({ initialBlogs, initialWorkItems }: { initialBlogs: 
         </div>
       )}
 
+      {tab === "final_check" && (
+        <FinalCheckList items={finalCheckItems} workItems={workItems} onOpen={openFinalCheck} />
+      )}
+
       {tab === "scheduled" && (
         <ScheduledList items={scheduledItems} workItems={workItems} />
       )}
@@ -230,6 +273,19 @@ export function BlogsClient({ initialBlogs, initialWorkItems }: { initialBlogs: 
 
       {tab === "archived" && (
         <SimpleList title="Archived" items={archivedItems} workItems={workItems} emptyLabel="No archived blogs" />
+      )}
+
+      {selectedFinalCheckItem && (
+        <FinalCheckDrawer
+          item={selectedFinalCheckItem}
+          notes={finalCheckNotes}
+          busyAction={busyAction}
+          onNotesChange={setFinalCheckNotes}
+          onClose={closeFinalCheck}
+          onApprove={() => runAction("approve_final", selectedFinalCheckItem)}
+          onRequestChanges={() => requestFinalChanges(selectedFinalCheckItem)}
+          onReject={() => runAction("reject", selectedFinalCheckItem)}
+        />
       )}
 
       {selectedReviewItem && (
@@ -244,6 +300,167 @@ export function BlogsClient({ initialBlogs, initialWorkItems }: { initialBlogs: 
           onRequestChanges={() => requestChanges(selectedReviewItem)}
         />
       )}
+    </div>
+  );
+}
+
+function FinalCheckList({ items, workItems, onOpen }: { items: BlogItem[]; workItems: LinkedWorkItem[]; onOpen: (item: BlogItem) => void }) {
+  return (
+    <section className="mt-6 rounded-xl border border-gray-800 bg-[#111118] p-4">
+      <div className="mb-4 flex items-center justify-between">
+        <div>
+          <h2 className="text-lg font-semibold text-white">Final Check</h2>
+          <p className="text-xs text-gray-500">Approved blogs with EN localization and hero image ready for final publication approval.</p>
+        </div>
+        <span className="text-xs text-gray-500">{items.length}</span>
+      </div>
+      {items.length === 0 ? (
+        <p className="text-sm text-gray-600">No blogs waiting for final check</p>
+      ) : (
+        <div className="space-y-3">
+          {items.map((item) => {
+            const metadata = getMetadata(item);
+            const primaryWorkItem = getPrimaryWorkItem(item.id, workItems);
+            const hero = getHeroImage(metadata);
+            const heroSrc = getHeroImageSrc(item, metadata);
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => onOpen(item)}
+                className="w-full rounded-lg border border-gray-800 p-3 text-left transition hover:border-gray-700 hover:bg-white/5 focus:outline-none focus:ring-1 focus:ring-cyan-500/60"
+              >
+                <div className="grid gap-4 md:grid-cols-[220px_1fr] md:items-center">
+                  <div className="overflow-hidden rounded-lg border border-gray-800 bg-black/30">
+                    {hero && heroSrc ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={heroSrc} alt="Blog thumbnail candidate" className="aspect-[1.91/1] w-full object-cover" />
+                    ) : (
+                      <div className="flex aspect-[1.91/1] items-center justify-center px-4 text-center text-xs text-gray-600">No thumbnail yet</div>
+                    )}
+                  </div>
+                  <div className="min-w-0">
+                    <h3 className="font-medium text-white">{item.title}</h3>
+                    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-gray-500">
+                      <span className={`rounded-full px-2 py-0.5 ${STATUS_STYLES[item.status] || "bg-gray-500/20 text-gray-300"}`}>{prettyStatus(item.status)}</span>
+                      <span>EN: {metadata.localization?.en_ready || metadata.localization?.en ? "ready" : "missing"}</span>
+                      <span>Thumbnail: {hero ? "ready" : "missing"}</span>
+                      {metadata.hero_image?.width && metadata.hero_image?.height && <span>{metadata.hero_image.width}×{metadata.hero_image.height}</span>}
+                      {primaryWorkItem && <span>task: {primaryWorkItem.owner_agent || "unknown"} · {primaryWorkItem.status}</span>}
+                    </div>
+                  </div>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function FinalCheckDrawer({
+  item,
+  notes,
+  busyAction,
+  onNotesChange,
+  onClose,
+  onApprove,
+  onRequestChanges,
+  onReject,
+}: {
+  item: BlogItem;
+  notes: string;
+  busyAction: string | null;
+  onNotesChange: (value: string) => void;
+  onClose: () => void;
+  onApprove: () => void;
+  onRequestChanges: () => void;
+  onReject: () => void;
+}) {
+  const metadata = getMetadata(item);
+  const esMarkdown = metadata.draft_markdown || metadata.draft_summary || "No Spanish draft content found.";
+  const enMarkdown = getEnglishMarkdown(metadata);
+  const hero = getHeroImage(metadata);
+  const heroSrc = getHeroImageSrc(item, metadata);
+  const [contentTab, setContentTab] = useState<"es" | "en">("en");
+  const currentMarkdown = contentTab === "es" ? esMarkdown : enMarkdown;
+
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/70 backdrop-blur-sm" onClick={onClose}>
+      <aside className="flex h-full w-full max-w-6xl flex-col border-l border-gray-800 bg-[#0f0f16] shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="border-b border-gray-800 bg-[#101018]/95 p-5">
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded-full bg-cyan-500/15 px-2.5 py-1 text-xs font-semibold uppercase tracking-wide text-cyan-300">Final check</span>
+                <span className="text-xs text-gray-500">EN localization + hero image before scheduling</span>
+              </div>
+              <h2 className="mt-3 text-2xl font-bold leading-tight text-white">{item.title}</h2>
+              <div className="mt-3 flex flex-wrap gap-2 text-xs text-gray-500">
+                {item.slug && <MetadataPill label="Slug" value={item.slug} />}
+                {metadata.localization?.en?.slug && <MetadataPill label="EN slug" value={metadata.localization.en.slug} />}
+                {metadata.hero_image?.status && <MetadataPill label="Hero" value={metadata.hero_image.status} />}
+              </div>
+            </div>
+            <button onClick={onClose} className="rounded-lg bg-white/10 px-3 py-2 text-sm text-white transition hover:bg-white/15">Close</button>
+          </div>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-6">
+          <div className="grid gap-5 xl:grid-cols-[360px_1fr]">
+            <section className="rounded-2xl border border-gray-800 bg-[#15151d] p-4">
+              <h3 className="text-sm font-semibold uppercase tracking-wide text-gray-400">Thumbnail</h3>
+              {hero ? (
+                heroSrc ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={heroSrc} alt="Blog thumbnail candidate" className="mt-4 aspect-[1.91/1] w-full rounded-xl border border-gray-800 object-cover" />
+                ) : (
+                  <div className="mt-4 rounded-xl border border-gray-800 bg-black/30 p-3 text-xs text-gray-400 break-all">{hero}</div>
+                )
+              ) : (
+                <div className="mt-4 rounded-xl border border-dashed border-gray-700 p-6 text-sm text-gray-500">No thumbnail stored yet.</div>
+              )}
+              <div className="mt-3 flex flex-wrap gap-2 text-xs text-gray-500">
+                {metadata.hero_image?.width && metadata.hero_image?.height && <MetadataPill label="Size" value={`${metadata.hero_image.width}×${metadata.hero_image.height}`} />}
+                {metadata.hero_image?.aspect_ratio && <MetadataPill label="Ratio" value={metadata.hero_image.aspect_ratio} />}
+                {metadata.hero_image?.status && <MetadataPill label="Status" value={metadata.hero_image.status} />}
+              </div>
+              {metadata.hero_image?.prompt && (
+                <div className="mt-4 rounded-xl border border-gray-800 bg-black/20 p-3">
+                  <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Prompt</p>
+                  <p className="mt-1 text-sm leading-6 text-gray-300">{metadata.hero_image.prompt}</p>
+                </div>
+              )}
+            </section>
+            <section>
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <h3 className="text-sm font-semibold uppercase tracking-wide text-gray-400">Content preview</h3>
+                <div className="rounded-lg border border-gray-800 bg-[#111118] p-1">
+                  <button type="button" onClick={() => setContentTab("es")} className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${contentTab === "es" ? "bg-white/10 text-white" : "text-gray-500 hover:text-white"}`}>ES</button>
+                  <button type="button" onClick={() => setContentTab("en")} className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${contentTab === "en" ? "bg-white/10 text-white" : "text-gray-500 hover:text-white"}`}>EN</button>
+                </div>
+              </div>
+              <MarkdownPreview markdown={currentMarkdown} />
+            </section>
+          </div>
+        </div>
+
+        <div className="border-t border-gray-800 bg-[#111118]/95 p-5 shadow-[0_-20px_45px_rgba(0,0,0,0.25)]">
+          <div className="grid gap-4 lg:grid-cols-[1fr_auto] lg:items-end">
+            <div>
+              <label className="text-sm font-medium text-white" htmlFor="final-check-notes">Final-check notes</label>
+              <p className="mt-1 text-xs text-gray-500">Required only when sending the translation/thumbnail back for changes.</p>
+              <textarea id="final-check-notes" value={notes} onChange={(event) => onNotesChange(event.target.value)} placeholder="Example: regenerate thumbnail simpler, tighten EN title..." className="mt-2 h-24 w-full rounded-xl border border-gray-800 bg-[#0a0a0f] p-3 text-sm text-white outline-none transition placeholder:text-gray-600 focus:border-blue-500" />
+            </div>
+            <div className="flex flex-wrap justify-end gap-2">
+              <ActionButton label="Approve final" busy={busyAction === `${item.id}:approve_final`} onClick={onApprove} />
+              <ActionButton label="Request changes" variant="secondary" busy={busyAction === `${item.id}:request_final_changes`} onClick={onRequestChanges} />
+              <ActionButton label="Reject" variant="danger" busy={busyAction === `${item.id}:reject`} onClick={onReject} />
+            </div>
+          </div>
+        </div>
+      </aside>
     </div>
   );
 }
@@ -376,6 +593,37 @@ function renderInline(text: string) {
   });
 }
 
+function getEnglishMarkdown(metadata: BlogMetadata) {
+  return (
+    metadata.localization?.en?.draft_markdown ||
+    metadata.localization?.en?.markdown ||
+    metadata.localization?.en?.content ||
+    metadata.localization?.en?.body ||
+    "No English localization found yet."
+  );
+}
+
+function getHeroImage(metadata: BlogMetadata) {
+  return (
+    metadata.hero_image?.url ||
+    metadata.cover_image?.url ||
+    metadata.hero_image?.media_path ||
+    metadata.cover_image?.media_path ||
+    metadata.hero_image?.local_path ||
+    metadata.cover_image?.local_path ||
+    metadata.hero_image?.path ||
+    metadata.cover_image?.path ||
+    null
+  );
+}
+
+function getHeroImageSrc(item: BlogItem, metadata: BlogMetadata) {
+  const directUrl = metadata.hero_image?.url || metadata.cover_image?.url;
+  if (directUrl) return directUrl;
+  const localPath = metadata.hero_image?.media_path || metadata.cover_image?.media_path || metadata.hero_image?.local_path || metadata.cover_image?.local_path || metadata.hero_image?.path || metadata.cover_image?.path;
+  return localPath ? `/api/blogs/${item.id}/hero-image` : null;
+}
+
 function getPublishWorkItem(item: BlogItem, workItems: LinkedWorkItem[]) {
   return workItems.find((workItem) => {
     const payload = workItem.payload || {};
@@ -415,13 +663,34 @@ function ScheduledList({ items, workItems }: { items: BlogItem[]; workItems: Lin
       {items.length === 0 ? (
         <p className="text-sm text-gray-600">No scheduled blogs</p>
       ) : (
-        <div className="divide-y divide-gray-800">
-          {items.map((item) => (
-            <div key={item.id} className="py-4 first:pt-0 last:pb-0">
-              <p className="text-sm font-medium text-purple-300">{formatScheduledDate(getPublishSchedule(item, workItems))}</p>
-              <h3 className="mt-1 text-base font-semibold text-white">{item.title}</h3>
-            </div>
-          ))}
+        <div className="space-y-3">
+          {items.map((item) => {
+            const metadata = getMetadata(item);
+            const hero = getHeroImage(metadata);
+            const heroSrc = getHeroImageSrc(item, metadata);
+            const publishWorkItem = getPublishWorkItem(item, workItems);
+            return (
+              <div key={item.id} className="grid gap-4 rounded-lg border border-gray-800 p-3 md:grid-cols-[180px_1fr] md:items-center">
+                <div className="overflow-hidden rounded-lg border border-gray-800 bg-black/30">
+                  {hero && heroSrc ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={heroSrc} alt="Scheduled blog thumbnail" className="aspect-[1.91/1] w-full object-cover" />
+                  ) : (
+                    <div className="flex aspect-[1.91/1] items-center justify-center px-4 text-center text-xs text-gray-600">No thumbnail yet</div>
+                  )}
+                </div>
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-purple-300">{formatScheduledDate(getPublishSchedule(item, workItems))}</p>
+                  <h3 className="mt-1 text-base font-semibold text-white">{item.title}</h3>
+                  <div className="mt-2 flex flex-wrap gap-2 text-xs text-gray-500">
+                    <span>Thumbnail: {hero ? "ready" : "missing"}</span>
+                    {publishWorkItem && <span>publish task: {publishWorkItem.owner_agent || "dev"} · {publishWorkItem.status}</span>}
+                    {publishWorkItem?.scheduled_for && <span>queued: {new Date(publishWorkItem.scheduled_for).toLocaleString("es-ES", { timeZone: "Europe/London" })}</span>}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
     </section>

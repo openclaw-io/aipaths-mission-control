@@ -66,6 +66,24 @@ function extractCommunityCopy(body: Record<string, unknown>) {
   return null;
 }
 
+
+function extractHeroImage(body: Record<string, unknown>) {
+  const outputHero = body.output && typeof body.output === "object" ? (body.output as Record<string, unknown>).hero_image || (body.output as Record<string, unknown>).cover_image || (body.output as Record<string, unknown>).thumbnail : null;
+  if (outputHero && typeof outputHero === "object" && !Array.isArray(outputHero)) return outputHero as JsonRecord;
+
+  const directHero = body.hero_image || body.cover_image || body.thumbnail;
+  if (directHero && typeof directHero === "object" && !Array.isArray(directHero)) return directHero as JsonRecord;
+
+  const imageUrl =
+    getNestedString(body.output, ["hero_image", "url"]) ||
+    getNestedString(body.output, ["cover_image", "url"]) ||
+    getNestedString(body.output, ["thumbnail", "url"]) ||
+    getNestedString(body.output, ["image", "url"]);
+  if (imageUrl) return { url: imageUrl };
+
+  return null;
+}
+
 function extractCommunityScheduledFor(body: Record<string, unknown>) {
   if (typeof body.scheduled_for === "string" && body.scheduled_for.trim()) return body.scheduled_for.trim();
   const outputScheduledFor = getNestedString(body.output, ["scheduled_for"]) || getNestedString(body.output, ["schedule", "scheduled_for"]);
@@ -647,77 +665,131 @@ export async function PATCH(
       const publishAction = isGuide ? "publish_guide" : "publish_blog";
       const { data: pipelineItem } = await db
         .from("pipeline_items")
-        .select("metadata, title, priority, scheduled_for")
+        .select("metadata, title, priority, scheduled_for, slug, requested_by")
         .eq("id", pipelineItemId)
         .single();
 
       const pipelineMetadata = (pipelineItem?.metadata || {}) as Record<string, unknown>;
       const localizationMetadata = (pipelineMetadata.localization || {}) as Record<string, unknown>;
+      const heroImage = isBlog ? extractHeroImage(body as Record<string, unknown>) : null;
+      const now = new Date().toISOString();
+      const defaultPublishSlot = (() => {
+        const slot = new Date();
+        slot.setUTCDate(slot.getUTCDate() + 1);
+        slot.setUTCHours(9, 0, 0, 0);
+        const day = slot.getUTCDay();
+        if (day === 6) slot.setUTCDate(slot.getUTCDate() + 2);
+        if (day === 0) slot.setUTCDate(slot.getUTCDate() + 1);
+        return slot.toISOString();
+      })();
+      const guideScheduledFor = isGuide ? (pipelineItem?.scheduled_for || defaultPublishSlot) : null;
 
       await db
         .from("pipeline_items")
         .update({
-          status: "scheduled",
+          status: isBlog ? "final_check" : "scheduled",
+          ...(isGuide && guideScheduledFor ? { scheduled_for: guideScheduledFor } : {}),
           metadata: {
             ...pipelineMetadata,
             localization: {
               ...localizationMetadata,
               en_ready: true,
-              translated_at: new Date().toISOString(),
+              translated_at: now,
             },
+            ...(isGuide && guideScheduledFor
+              ? {
+                  schedule: {
+                    ...(((pipelineMetadata.schedule || {}) as JsonRecord)),
+                    scheduled_for: guideScheduledFor,
+                    scheduled_at: now,
+                    scheduled_by: data.owner_agent || "content",
+                    source: pipelineItem?.scheduled_for ? "pipeline_item" : "auto_default",
+                  },
+                }
+              : {}),
+            ...(isBlog
+              ? {
+                  final_check: {
+                    ...(((pipelineMetadata.final_check || {}) as JsonRecord)),
+                    status: "ready",
+                    ready_at: now,
+                    source_work_item_id: data.id,
+                  },
+                  ...(heroImage
+                    ? {
+                        hero_image: {
+                          ...(((pipelineMetadata.hero_image || {}) as JsonRecord)),
+                          ...heroImage,
+                          status: (heroImage.status as string) || "generated",
+                          updated_at: now,
+                        },
+                      }
+                    : {}),
+                }
+              : {}),
           },
-          updated_at: new Date().toISOString(),
+          updated_at: now,
         })
         .eq("id", pipelineItemId);
 
-      const { data: publishWorkItem } = await db
-        .from("work_items")
-        .insert({
-          kind: "task",
-          source_type: "service",
-          source_id: pipelineItemId,
-          title: `Publish ${label}: ${pipelineItem?.title || existing.title}`,
-          instruction: [
-            `Pipeline ${label} item: ${pipelineItem?.title || existing.title}`,
-            "",
-            "Task:",
-            `- Publish the ${label} to the website`,
-            "- When done, update the work item with current_url and optional notes",
-            "- Mission Control will mark the pipeline item live and store published_at/current_url",
-          ].join("\n"),
-          // Publication work items are scheduled work. The scheduler should
-          // dispatch them only after a publication date is set and due; do not
-          // wake dev immediately from the localization completion hook.
-          status: pipelineItem?.scheduled_for ? "ready" : "draft",
-          scheduled_for: pipelineItem?.scheduled_for || null,
-          priority: pipelineItem?.priority || existing.priority || "medium",
-          owner_agent: "dev",
-          target_agent_id: "dev",
-          requested_by: existing.requested_by,
-          payload: {
-            trigger: "work_item_completion",
-            pipeline_type: pipelineType,
-            pipeline_item_id: pipelineItemId,
-            action: publishAction,
-          },
-        })
-        .select("id")
-        .single();
+      if (!isBlog) {
+        const { data: publishWorkItem } = await db
+          .from("work_items")
+          .insert({
+            kind: "task",
+            source_type: "service",
+            source_id: pipelineItemId,
+            title: `Publish ${label}: ${pipelineItem?.title || existing.title}`,
+            instruction: [
+              `Pipeline ${label} item: ${pipelineItem?.title || existing.title}`,
+              "",
+              "Task:",
+              `- Publish the ${label} to the website`,
+              "- When done, update the work item with current_url and optional notes",
+              "- Mission Control will mark the pipeline item live and store published_at/current_url",
+            ].join("\n"),
+            // Publication work items are scheduled work. The scheduler should
+            // dispatch them only after a publication date is set and due; do not
+            // wake dev immediately from the localization completion hook.
+            status: "ready",
+            scheduled_for: guideScheduledFor,
+            priority: pipelineItem?.priority || existing.priority || "medium",
+            owner_agent: "dev",
+            target_agent_id: "dev",
+            requested_by: existing.requested_by,
+            payload: {
+              trigger: "work_item_completion",
+              pipeline_type: pipelineType,
+              pipeline_item_id: pipelineItemId,
+              relation_type: "publish",
+              action: publishAction,
+            },
+          })
+          .select("id")
+          .single();
 
-      if (publishWorkItem?.id) {
-        await db.from("event_log").insert({
-          domain: "work",
-          event_type: "work_item.publication_scheduled",
-          entity_type: "work_item",
-          entity_id: publishWorkItem.id,
-          actor: "pipeline-publication",
-          payload: {
-            pipeline_type: pipelineType,
+        if (publishWorkItem?.id) {
+          const { error: mapError } = await db.from("pipeline_work_map").insert({
             pipeline_item_id: pipelineItemId,
-            action: publishAction,
-            scheduled_for: pipelineItem?.scheduled_for || null,
-          },
-        });
+            work_item_id: publishWorkItem.id,
+            relation_type: "publish",
+          });
+          if (mapError && !String(mapError.message || "").includes("duplicate")) throw mapError;
+
+          await db.from("event_log").insert({
+            domain: "work",
+            event_type: "work_item.publication_scheduled",
+            entity_type: "work_item",
+            entity_id: publishWorkItem.id,
+            actor: "pipeline-publication",
+            payload: {
+              pipeline_type: pipelineType,
+              pipeline_item_id: pipelineItemId,
+              action: publishAction,
+              scheduled_for: guideScheduledFor,
+            },
+          });
+        }
       }
     }
 

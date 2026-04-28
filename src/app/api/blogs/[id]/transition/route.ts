@@ -14,10 +14,19 @@ const BLOG_STATUSES = [
   "changes_requested",
   "approved",
   "localizing",
+  "final_check",
   "scheduled",
   "live",
   "archived",
 ] as const;
+
+type BlogTransitionItem = Record<string, unknown> & {
+  id: string;
+  title: string;
+  priority?: string | null;
+  scheduled_for?: string | null;
+  metadata?: Record<string, unknown> | null;
+};
 
 const ACTION_TARGET: Record<string, string> = {
   promote: "researching",
@@ -25,6 +34,8 @@ const ACTION_TARGET: Record<string, string> = {
   unpark: "draft",
   reject: "rejected",
   approve: "localizing",
+  approve_final: "scheduled",
+  request_final_changes: "localizing",
   request_changes: "changes_requested",
   move_to_review: "ready_for_review",
   mark_scheduled: "scheduled",
@@ -38,7 +49,8 @@ const ALLOWED: Record<string, string[]> = {
   researching: ["ready_for_review", "parked", "rejected"],
   ready_for_review: ["changes_requested", "localizing", "rejected"],
   changes_requested: ["ready_for_review", "rejected"],
-  localizing: ["scheduled", "ready_for_review"],
+  localizing: ["final_check", "scheduled", "ready_for_review"],
+  final_check: ["scheduled", "localizing", "rejected"],
   scheduled: ["live"],
   live: ["archived"],
 };
@@ -51,6 +63,8 @@ function createWorkItemTitle(action: string, title: string) {
       return `Revise blog draft: ${title}`;
     case "approve":
       return `Localize blog to EN: ${title}`;
+    case "request_final_changes":
+      return `Finalize blog package: ${title}`;
     default:
       return `Work on blog: ${title}`;
   }
@@ -86,7 +100,22 @@ function createWorkItemInstruction(action: string, item: { title: string }, revi
         "Task:",
         "- Create the English translation/localized version of the approved blog",
         "- Preserve meaning and quality, not just literal translation",
-        "- When localization is complete, move the pipeline item to scheduled",
+        "- Generate or prepare a clean hero/thumbnail candidate for the blog",
+        "- Store final-package details in the pipeline item metadata when possible: localization.en and hero_image",
+        "- When localization and thumbnail are complete, complete this work item; Mission Control will move the pipeline item to final_check",
+      ].join("\n");
+    case "request_final_changes":
+      return [
+        `Pipeline blog item: ${item.title}`,
+        "",
+        "Task:",
+        "- Revise the final publication package based on the final-check feedback",
+        "- Check the English translation/localized version",
+        "- Check or regenerate the blog hero/thumbnail candidate",
+        "- When ready, complete this work item; Mission Control will move the pipeline item back to final_check",
+        "",
+        "Final-check notes:",
+        reviewNotes || "(missing)",
       ].join("\n");
     default:
       return `Work on blog item: ${item.title}`;
@@ -108,6 +137,160 @@ async function notifyWorkItem(id: string, agent: string, title: string) {
   }).catch((err) => {
     console.error("[blogs.transition] Failed to notify work item", err);
   });
+}
+
+function getNestedString(source: unknown, path: string[]) {
+  let current = source as Record<string, unknown> | undefined;
+  for (const key of path) {
+    if (!current || typeof current !== "object") return null;
+    const next = current[key];
+    if (typeof next === "string" && key === path[path.length - 1]) return next.trim() || null;
+    current = next as Record<string, unknown> | undefined;
+  }
+  return null;
+}
+
+function nextBlogPublishSlot(now = new Date()) {
+  // Default fallback until the content calendar UI owns date selection:
+  // next weekday at 10:00 Europe/London, represented as UTC ISO.
+  const slot = new Date(now);
+  slot.setUTCDate(slot.getUTCDate() + 1);
+  slot.setUTCHours(9, 0, 0, 0); // 10:00 London during BST.
+  const day = slot.getUTCDay();
+  if (day === 6) slot.setUTCDate(slot.getUTCDate() + 2);
+  if (day === 0) slot.setUTCDate(slot.getUTCDate() + 1);
+  return slot.toISOString();
+}
+
+function resolvePublishScheduledFor(item: BlogTransitionItem) {
+  const metadata = item.metadata || {};
+  return (
+    item.scheduled_for ||
+    getNestedString(metadata, ["schedule", "scheduled_for"]) ||
+    getNestedString(metadata, ["final_check", "scheduled_for"]) ||
+    getNestedString(metadata, ["final_package", "publish_assets", "scheduled_for"]) ||
+    nextBlogPublishSlot()
+  );
+}
+
+function createPublishInstruction(item: BlogTransitionItem) {
+  const metadata = item.metadata || {};
+  const slug = typeof item.slug === "string" ? item.slug : null;
+  const heroPath =
+    getNestedString(metadata, ["hero_image", "media_path"]) ||
+    getNestedString(metadata, ["hero_image", "local_path"]) ||
+    getNestedString(metadata, ["hero_image", "url"]) ||
+    getNestedString(metadata, ["cover_image", "url"]);
+  const enSlug = getNestedString(metadata, ["localization", "en", "slug"]);
+
+  return [
+    `Pipeline blog item: ${item.title}`,
+    `Pipeline item ID: ${item.id}`,
+    slug ? `Blog slug/folder: ${slug}` : null,
+    enSlug ? `EN slug: ${enSlug}` : null,
+    heroPath ? `Approved hero/thumbnail source: ${heroPath}` : "Approved hero/thumbnail source: see pipeline metadata.hero_image",
+    "",
+    "Task:",
+    "- Publish only the final-check approved blog package to the website.",
+    "- Copy/store the approved hero image in the content repo standard path: public/images/blogs/[blog-folder]/hero.png.",
+    "- Set frontmatter coverImage to the GitHub raw URL for that hero.png.",
+    "- Use the approved Spanish copy, English localization, and hero/thumbnail from the pipeline item metadata/files.",
+    "- When done, complete this work item with current_url and optional notes.",
+    "- Mission Control will mark the pipeline item live and store published_at/current_url after verification.",
+  ].filter(Boolean).join("\n");
+}
+
+async function ensurePublishWorkItem(db: ReturnType<typeof createServiceClient>, item: BlogTransitionItem, requestedBy: string, scheduledFor: string) {
+  const { data: existingItems, error: existingError } = await db
+    .from("work_items")
+    .select("id, status, payload")
+    .in("source_type", ["pipeline_item", "service"])
+    .eq("source_id", item.id)
+    .in("status", ["draft", "ready", "blocked", "in_progress"])
+    .order("created_at", { ascending: false });
+
+  if (existingError) throw existingError;
+
+  const existingPublish = (existingItems || []).find((workItem: { payload?: Record<string, unknown> | null }) => {
+    const payload = workItem.payload || {};
+    return payload.action === "publish_blog" && payload.pipeline_item_id === item.id;
+  });
+
+  const publishPayload = {
+    ...((existingPublish?.payload || {}) as Record<string, unknown>),
+    trigger: "blog_final_check_approved",
+    pipeline_type: "blog",
+    pipeline_item_id: item.id,
+    relation_type: "publish",
+    action: "publish_blog",
+  };
+
+  if (existingPublish?.id) {
+    const { data: updatedPublish, error: updatePublishError } = await db
+      .from("work_items")
+      .update({
+        title: `Publish blog: ${item.title}`,
+        instruction: createPublishInstruction(item),
+        status: existingPublish.status === "in_progress" ? "in_progress" : "ready",
+        scheduled_for: scheduledFor,
+        priority: item.priority || "medium",
+        owner_agent: "dev",
+        target_agent_id: "dev",
+        requested_by: requestedBy,
+        payload: publishPayload,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", existingPublish.id)
+      .select("id, status, payload")
+      .single();
+
+    if (updatePublishError) throw updatePublishError;
+    return updatedPublish;
+  }
+
+  const { data: publishWorkItem, error: insertError } = await db
+    .from("work_items")
+    .insert({
+      kind: "task",
+      source_type: "service",
+      source_id: item.id,
+      title: `Publish blog: ${item.title}`,
+      instruction: createPublishInstruction(item),
+      status: "ready",
+      scheduled_for: scheduledFor,
+      priority: item.priority || "medium",
+      owner_agent: "dev",
+      target_agent_id: "dev",
+      requested_by: requestedBy,
+      payload: publishPayload,
+    })
+    .select("id, status, payload")
+    .single();
+
+  if (insertError) throw insertError;
+
+  const { error: mapError } = await db.from("pipeline_work_map").insert({
+    pipeline_item_id: item.id,
+    work_item_id: publishWorkItem.id,
+    relation_type: "publish",
+  });
+  if (mapError && !String(mapError.message || "").includes("duplicate")) throw mapError;
+
+  await db.from("event_log").insert({
+    domain: "work",
+    event_type: "work_item.publication_prepared",
+    entity_type: "work_item",
+    entity_id: publishWorkItem.id,
+    actor: "blog-final-check",
+    payload: {
+      pipeline_type: "blog",
+      pipeline_item_id: item.id,
+      action: "publish_blog",
+      scheduled_for: scheduledFor,
+    },
+  });
+
+  return publishWorkItem;
 }
 
 export async function POST(
@@ -143,7 +326,7 @@ export async function POST(
     return NextResponse.json({ error: `Action ${action} not allowed from ${item.status}` }, { status: 400 });
   }
 
-  if (action === "request_changes" && (!reviewNotes || !String(reviewNotes).trim())) {
+  if (["request_changes", "request_final_changes"].includes(action) && (!reviewNotes || !String(reviewNotes).trim())) {
     return NextResponse.json({ error: "reviewNotes is required" }, { status: 400 });
   }
 
@@ -158,14 +341,67 @@ export async function POST(
           },
         }
       : {}),
+    ...(action === "request_final_changes"
+      ? {
+          final_check: {
+            ...(((item.metadata || {}) as Record<string, unknown>).final_check as Record<string, unknown> | undefined || {}),
+            status: "changes_requested",
+            notes: String(reviewNotes).trim(),
+            last_requested_at: new Date().toISOString(),
+            last_requested_by: user.email || user.id,
+          },
+        }
+      : {}),
+    ...(action === "approve_final"
+      ? {
+          final_check: {
+            ...(((item.metadata || {}) as Record<string, unknown>).final_check as Record<string, unknown> | undefined || {}),
+            status: "approved",
+            approved_at: new Date().toISOString(),
+            approved_by: user.email || user.id,
+          },
+        }
+      : {}),
   };
+
+  const publishScheduledFor = action === "approve_final" ? resolvePublishScheduledFor(item) : null;
+  let publishWorkItemId: string | null = null;
+
+  if (action === "approve_final" && publishScheduledFor) {
+    try {
+      const publishWorkItem = await ensurePublishWorkItem(db, item, user.email || user.id, publishScheduledFor);
+      publishWorkItemId = publishWorkItem?.id || null;
+    } catch (err) {
+      return NextResponse.json({ error: err instanceof Error ? err.message : "Failed to create publish work item" }, { status: 500 });
+    }
+  }
 
   const updatePayload: Record<string, unknown> = {
     status: targetStatus,
     owner_agent: action === "approve" ? "content" : item.owner_agent || "content",
-    metadata,
+    metadata: action === "approve_final" && publishScheduledFor
+      ? {
+          ...metadata,
+          schedule: {
+            ...(((metadata.schedule || {}) as Record<string, unknown>)),
+            scheduled_for: publishScheduledFor,
+            scheduled_at: new Date().toISOString(),
+            scheduled_by: user.email || user.id,
+            source: item.scheduled_for ? "pipeline_item" : "auto_default",
+            publish_work_item_id: publishWorkItemId,
+          },
+          final_check: {
+            ...(((metadata.final_check || {}) as Record<string, unknown>)),
+            publish_work_item_id: publishWorkItemId,
+          },
+        }
+      : metadata,
     updated_at: new Date().toISOString(),
   };
+
+  if (action === "approve_final" && publishScheduledFor) {
+    updatePayload.scheduled_for = publishScheduledFor;
+  }
 
   if (action === "mark_live") {
     updatePayload.published_at = new Date().toISOString();
@@ -183,10 +419,10 @@ export async function POST(
     return NextResponse.json({ error: updateError.message }, { status: 500 });
   }
 
-  if (["promote", "request_changes", "approve"].includes(action)) {
+  if (["promote", "request_changes", "approve", "request_final_changes"].includes(action)) {
     const owner_agent = "content";
-    const relationType = action === "approve" ? "followup" : action === "promote" ? "investigate" : "followup";
-    const actionName = action === "approve" ? "localize_blog_to_en" : action === "promote" ? "develop_blog_draft" : "revise_blog_draft";
+    const relationType = action === "promote" ? "investigate" : "followup";
+    const actionName = action === "approve" || action === "request_final_changes" ? "localize_blog_to_en" : action === "promote" ? "develop_blog_draft" : "revise_blog_draft";
 
     const { workItem } = await createPipelineWorkItem(db, {
       pipelineItemId: item.id,
@@ -199,7 +435,7 @@ export async function POST(
       relationType,
       action: actionName,
       trigger: "manual_transition",
-      reviewNotes: action === "request_changes" ? String(reviewNotes).trim() : undefined,
+      reviewNotes: action === "request_changes" || action === "request_final_changes" ? String(reviewNotes).trim() : undefined,
     });
 
     if (workItem?.id) {
