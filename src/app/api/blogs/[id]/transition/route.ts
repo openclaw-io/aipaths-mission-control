@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/admin";
 import { createPipelineWorkItem } from "@/lib/work-items/pipeline-materializer";
+import { resolvePublicationSlot } from "@/lib/publication/scheduling";
 
 export const dynamic = "force-dynamic";
 
@@ -150,27 +151,17 @@ function getNestedString(source: unknown, path: string[]) {
   return null;
 }
 
-function nextBlogPublishSlot(now = new Date()) {
-  // Default fallback until the content calendar UI owns date selection:
-  // next weekday at 10:00 Europe/London, represented as UTC ISO.
-  const slot = new Date(now);
-  slot.setUTCDate(slot.getUTCDate() + 1);
-  slot.setUTCHours(9, 0, 0, 0); // 10:00 London during BST.
-  const day = slot.getUTCDay();
-  if (day === 6) slot.setUTCDate(slot.getUTCDate() + 2);
-  if (day === 0) slot.setUTCDate(slot.getUTCDate() + 1);
-  return slot.toISOString();
-}
-
-function resolvePublishScheduledFor(item: BlogTransitionItem) {
+async function resolveBlogPublishSchedule(db: ReturnType<typeof createServiceClient>, item: BlogTransitionItem) {
   const metadata = item.metadata || {};
-  return (
-    item.scheduled_for ||
-    getNestedString(metadata, ["schedule", "scheduled_for"]) ||
+  const explicitScheduledFor =
     getNestedString(metadata, ["final_check", "scheduled_for"]) ||
-    getNestedString(metadata, ["final_package", "publish_assets", "scheduled_for"]) ||
-    nextBlogPublishSlot()
-  );
+    getNestedString(metadata, ["final_package", "publish_assets", "scheduled_for"]);
+
+  return resolvePublicationSlot(db, {
+    explicitScheduledFor,
+    existingScheduledFor: item.scheduled_for || getNestedString(metadata, ["schedule", "scheduled_for"]),
+    pipelineItemId: item.id,
+  });
 }
 
 function createPublishInstruction(item: BlogTransitionItem) {
@@ -223,6 +214,7 @@ async function ensurePublishWorkItem(db: ReturnType<typeof createServiceClient>,
     pipeline_item_id: item.id,
     relation_type: "publish",
     action: "publish_blog",
+    schedule_kind: "publication",
   };
 
   if (existingPublish?.id) {
@@ -364,7 +356,8 @@ export async function POST(
       : {}),
   };
 
-  const publishScheduledFor = action === "approve_final" ? resolvePublishScheduledFor(item) : null;
+  const publishSchedule = action === "approve_final" ? await resolveBlogPublishSchedule(db, item) : null;
+  const publishScheduledFor = publishSchedule?.scheduledFor || null;
   let publishWorkItemId: string | null = null;
 
   if (action === "approve_final" && publishScheduledFor) {
@@ -387,7 +380,7 @@ export async function POST(
             scheduled_for: publishScheduledFor,
             scheduled_at: new Date().toISOString(),
             scheduled_by: user.email || user.id,
-            source: item.scheduled_for ? "pipeline_item" : "auto_default",
+            source: publishSchedule?.source || "auto_allocated",
             publish_work_item_id: publishWorkItemId,
           },
           final_check: {

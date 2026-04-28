@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { verifyPublishedContent } from "@/lib/content/live-verification";
 import { createPipelineWorkItem } from "@/lib/work-items/pipeline-materializer";
+import { resolvePublicationSlot } from "@/lib/publication/scheduling";
 import {
   YOUTUBE_GATE_ORDER,
   YOUTUBE_GATE_STATUSES,
@@ -217,6 +218,7 @@ async function ensureCommunityPublishWorkItem(db: ReturnType<typeof createServic
           pipeline_item_id: input.pipelineItemId,
           relation_type: "publish",
           action: "publish_community_post",
+          schedule_kind: "publication",
           target_channel_id: target.channelId,
           target_channel_name: target.channelName,
           log_channel_id: "1473660854800224316",
@@ -251,6 +253,7 @@ async function ensureCommunityPublishWorkItem(db: ReturnType<typeof createServic
         pipeline_item_id: input.pipelineItemId,
         relation_type: "publish",
         action: "publish_community_post",
+        schedule_kind: "publication",
         target_channel_id: target.channelId,
         target_channel_name: target.channelName,
         log_channel_id: "1473660854800224316",
@@ -673,16 +676,13 @@ export async function PATCH(
       const localizationMetadata = (pipelineMetadata.localization || {}) as Record<string, unknown>;
       const heroImage = isBlog ? extractHeroImage(body as Record<string, unknown>) : null;
       const now = new Date().toISOString();
-      const defaultPublishSlot = (() => {
-        const slot = new Date();
-        slot.setUTCDate(slot.getUTCDate() + 1);
-        slot.setUTCHours(9, 0, 0, 0);
-        const day = slot.getUTCDay();
-        if (day === 6) slot.setUTCDate(slot.getUTCDate() + 2);
-        if (day === 0) slot.setUTCDate(slot.getUTCDate() + 1);
-        return slot.toISOString();
-      })();
-      const guideScheduledFor = isGuide ? (pipelineItem?.scheduled_for || defaultPublishSlot) : null;
+      const guideSchedule = isGuide
+        ? await resolvePublicationSlot(db, {
+            existingScheduledFor: pipelineItem?.scheduled_for || getNestedString(pipelineMetadata, ["schedule", "scheduled_for"]),
+            pipelineItemId,
+          })
+        : null;
+      const guideScheduledFor = guideSchedule?.scheduledFor || null;
 
       await db
         .from("pipeline_items")
@@ -703,7 +703,7 @@ export async function PATCH(
                     scheduled_for: guideScheduledFor,
                     scheduled_at: now,
                     scheduled_by: data.owner_agent || "content",
-                    source: pipelineItem?.scheduled_for ? "pipeline_item" : "auto_default",
+                    source: guideSchedule?.source || "auto_allocated",
                   },
                 }
               : {}),
@@ -763,6 +763,7 @@ export async function PATCH(
               pipeline_item_id: pipelineItemId,
               relation_type: "publish",
               action: publishAction,
+              schedule_kind: "publication",
             },
           })
           .select("id")

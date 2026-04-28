@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { isPublicationWorkItem } from "@/lib/publication/scheduling";
 
 type Tab = "live" | "calendar" | "recurring";
 
@@ -220,7 +221,14 @@ export function WorkItemsClient({ initialItems, initialEvents, initialRules = []
 
   const readyNow = filteredItems.filter((item) => item.status === "ready" && (!item.scheduled_for || new Date(item.scheduled_for).getTime() <= now)).sort(sortBySchedule);
   const scheduledLater = filteredItems.filter((item) => ["ready", "draft", "blocked"].includes(item.status) && item.scheduled_for && new Date(item.scheduled_for).getTime() > now).sort(sortBySchedule);
-  const calendarItems = useMemo(() => filteredItems.filter((item) => item.scheduled_for && !["draft"].includes(item.status)).sort(calendarItemSort()), [filteredItems]);
+  const calendarItems = useMemo(() => filteredItems.filter((item) => {
+    if (!item.scheduled_for || ["draft"].includes(item.status)) return false;
+    const scheduleKind = payloadString(item.payload, "schedule_kind");
+    if (scheduleKind === "dispatch_retry") return false;
+    if (["publication", "calendar", "recurring"].includes(scheduleKind || "")) return true;
+    if (isPublicationWorkItem(item)) return true;
+    return payloadString(item.payload, "trigger") === "recurring_work_rule";
+  }).sort(calendarItemSort()), [filteredItems]);
   const blocked = filteredItems.filter((item) => item.status === "blocked" && item.payload?.requires_human_approval !== true).sort(sortBySchedule);
   const inProgress = filteredItems.filter((item) => item.status === "in_progress").sort((a, b) => new Date(a.started_at || a.created_at).getTime() - new Date(b.started_at || b.created_at).getTime());
   const failed = filteredItems.filter((item) => item.status === "failed").sort((a, b) => new Date(b.completed_at || b.updated_at || b.created_at).getTime() - new Date(a.completed_at || a.updated_at || a.created_at).getTime());

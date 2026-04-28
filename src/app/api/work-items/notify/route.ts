@@ -108,8 +108,8 @@ async function checkModelHealth(agentId = "systems") {
       }),
     });
     const text = await res.text().catch(() => "");
-    let body: any = null;
-    try { body = text ? JSON.parse(text) : null; } catch { body = null; }
+    let body: { choices?: Array<{ message?: { content?: unknown } }> } | null = null;
+    try { body = text ? JSON.parse(text) as { choices?: Array<{ message?: { content?: unknown } }> } : null; } catch { body = null; }
     const content = body?.choices?.[0]?.message?.content;
     const normalized = typeof content === "string" ? content.trim().toLowerCase() : "";
     const looksHealthy = res.ok && normalized === "ok";
@@ -174,6 +174,7 @@ async function restoreReady(reason) {
           dispatch_failure_reason: reason,
           dispatch_last_failed_at: new Date().toISOString(),
           dispatch_retry_scheduled_for: new Date(Date.now() + retryDelayMs).toISOString(),
+          schedule_kind: "dispatch_retry",
         },
         payload_increment: { wake_failure_count: 1 },
       }),
