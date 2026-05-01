@@ -504,22 +504,11 @@ function ReviewDrawer({
                 <span className="text-xs text-gray-500">{wordCount.toLocaleString()} words · {readMinutes} min read</span>
               </div>
               <h2 className="mt-3 text-2xl font-bold leading-tight text-white">{item.title}</h2>
-              <div className="mt-3 flex flex-wrap gap-2 text-xs text-gray-500">
-                {item.slug && <MetadataPill label="Slug" value={item.slug} />}
-                {metadata.seo?.primary_keyword && <MetadataPill label="Keyword" value={metadata.seo.primary_keyword} />}
-                {item.content_path && <MetadataPill label="Path" value={item.content_path} />}
-              </div>
             </div>
             <button onClick={onClose} className="rounded-lg bg-white/10 px-3 py-2 text-sm text-white transition hover:bg-white/15">
               Close
             </button>
           </div>
-          {metadata.seo?.meta_description && (
-            <div className="mt-4 rounded-xl border border-gray-800 bg-black/20 p-3">
-              <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Meta description</p>
-              <p className="mt-1 text-sm leading-6 text-gray-300">{metadata.seo.meta_description}</p>
-            </div>
-          )}
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-6">

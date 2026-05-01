@@ -136,6 +136,38 @@ function toNumber(value: unknown) {
   return 0;
 }
 
+function calibrateIntelScore(value: unknown) {
+  const score = Math.max(0, Math.min(1, toNumber(value)));
+  if (score <= 0.72) return score;
+  if (score <= 0.86) return 0.72 + (score - 0.72) * 0.78;
+  return 0.8292 + (score - 0.86) * 0.48;
+}
+
+function intelItemAgeDays(createdAt: unknown, nowMs = Date.now()) {
+  const ms = new Date(String(createdAt || '')).getTime();
+  if (!Number.isFinite(ms)) return 0;
+  return Math.max(0, (nowMs - ms) / (24 * 60 * 60 * 1000));
+}
+
+function looksLikeBetaOrPatchTitle(title: unknown) {
+  const text = String(title || '').toLowerCase();
+  return /\b(beta|alpha|rc|nightly|canary)\b/.test(text) || /\b\d{4}\.\d+\.\d+(?:[-.]beta|[-.]rc|[-.]alpha)?\b/.test(text);
+}
+
+function displayIntelScore(params: { score: unknown; createdAt: unknown; title?: unknown }) {
+  const age = intelItemAgeDays(params.createdAt);
+  let multiplier = 1;
+  if (age >= 7) multiplier = 0.72;
+  else if (age >= 4) multiplier = 0.8;
+  else if (age >= 2) multiplier = 0.88;
+  else if (age >= 1) multiplier = 0.94;
+
+  if (looksLikeBetaOrPatchTitle(params.title) && age >= 1) multiplier = Math.min(multiplier, 0.72);
+  if (looksLikeBetaOrPatchTitle(params.title) && age >= 3) multiplier = Math.min(multiplier, 0.6);
+
+  return Number((calibrateIntelScore(params.score) * multiplier).toFixed(4));
+}
+
 function toObject(value: unknown): Record<string, unknown> {
   if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
   return {};
@@ -1017,7 +1049,7 @@ export async function listIntelInbox(options?: {
         promoteType: typeof row.promote_type === "string" ? row.promote_type : null,
         promoteOwner: typeof row.promote_owner === "string" ? row.promote_owner : null,
         promoteStatusDefault: typeof row.promote_status_default === "string" ? row.promote_status_default : null,
-        overallScore: toNumber(row.overall_score),
+        overallScore: displayIntelScore({ score: row.overall_score, createdAt: row.created_at, title }),
         reviewStatus: normalizeStatus(review?.status),
         reviewId: review?.id ? String(review.id) : null,
         createdPipelineItemId: review?.created_pipeline_item_id ? String(review.created_pipeline_item_id) : null,
@@ -1182,7 +1214,7 @@ export async function getIntelInboxDetail(id: string) {
       promoteType: enriched.promote_type || null,
       promoteOwner: enriched.promote_owner || null,
       promoteStatusDefault: enriched.promote_status_default || null,
-      overallScore: toNumber(enriched.overall_score),
+      overallScore: displayIntelScore({ score: enriched.overall_score, createdAt: enriched.created_at, title }),
       reviewStatus: normalizeStatus(review?.status),
       reviewId: review?.id ? String(review.id) : null,
       createdPipelineItemId: review?.created_pipeline_item_id ? String(review.created_pipeline_item_id) : null,
