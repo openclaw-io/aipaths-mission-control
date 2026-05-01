@@ -390,6 +390,19 @@ function VideoCard({
           </div>
           {details.opportunityPromise && <p className="mt-2 line-clamp-3 text-xs leading-5 text-gray-400">{details.opportunityPromise}</p>}
         </>
+      ) : item.status === "title_thumbnail" ? (
+        <>
+          <div className="flex items-start justify-between gap-3">
+            <h3 className="min-w-0 line-clamp-2 text-sm font-semibold leading-5 text-white">{item.title}</h3>
+            {details.opportunityScore && (
+              <span className="shrink-0 rounded-full border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-[11px] font-semibold text-blue-200">
+                {details.opportunityScore}
+              </span>
+            )}
+          </div>
+          {details.opportunityPromise && <p className="mt-2 line-clamp-3 text-xs leading-5 text-gray-400">{details.opportunityPromise}</p>}
+          {openWorkCount > 0 && <p className="mt-2 text-[11px] text-gray-600">{openWorkCount} open work item{openWorkCount === 1 ? "" : "s"}</p>}
+        </>
       ) : (
         <>
           <div className="flex items-start justify-between gap-3">
