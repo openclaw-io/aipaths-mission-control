@@ -901,7 +901,7 @@ function PracticalSection({ title, value }: { title: string; value: unknown }) {
 function StructuredValue({ value }: { value: unknown }): ReactNode {
   if (!hasContent(value)) return null;
   if (typeof value === "string") {
-    return <p className="whitespace-pre-wrap">{value.trim()}</p>;
+    return looksLikeMarkdown(value) ? <MarkdownBrief value={value} /> : <p className="whitespace-pre-wrap">{value.trim()}</p>;
   }
   if (typeof value === "number" || typeof value === "boolean") {
     return <p>{String(value)}</p>;
@@ -933,6 +933,75 @@ function StructuredValue({ value }: { value: unknown }): ReactNode {
       ))}
     </div>
   );
+}
+
+
+function looksLikeMarkdown(value: string) {
+  return /^#{1,3}\s+/m.test(value) || /^-\s+/m.test(value) || /^\d+\.\s+/m.test(value);
+}
+
+function MarkdownBrief({ value }: { value: string }) {
+  const lines = value.trim().split(/\r?\n/);
+  const elements: ReactNode[] = [];
+  let listItems: string[] = [];
+
+  const flushList = () => {
+    if (listItems.length === 0) return;
+    const items = listItems;
+    listItems = [];
+    elements.push(
+      <ul key={`list-${elements.length}`} className="ml-5 list-disc space-y-1 text-gray-300">
+        {items.map((item, index) => (
+          <li key={index}>{renderInlineMarkdown(item)}</li>
+        ))}
+      </ul>,
+    );
+  };
+
+  lines.forEach((rawLine) => {
+    const line = rawLine.trim();
+    if (!line) {
+      flushList();
+      return;
+    }
+
+    if (line.startsWith("### ")) {
+      flushList();
+      elements.push(<h4 key={`h4-${elements.length}`} className="pt-3 text-sm font-semibold text-blue-200">{renderInlineMarkdown(line.slice(4))}</h4>);
+      return;
+    }
+    if (line.startsWith("## ")) {
+      flushList();
+      elements.push(<h3 key={`h3-${elements.length}`} className="text-base font-semibold text-white">{renderInlineMarkdown(line.slice(3))}</h3>);
+      return;
+    }
+    if (line.startsWith("# ")) {
+      flushList();
+      elements.push(<h3 key={`h3-${elements.length}`} className="text-lg font-semibold text-white">{renderInlineMarkdown(line.slice(2))}</h3>);
+      return;
+    }
+    if (line.startsWith("- ")) {
+      listItems.push(line.slice(2));
+      return;
+    }
+
+    flushList();
+    elements.push(<p key={`p-${elements.length}`} className="text-gray-300">{renderInlineMarkdown(line)}</p>);
+  });
+  flushList();
+
+  return <div className="space-y-2">{elements}</div>;
+}
+
+function renderInlineMarkdown(value: string): ReactNode {
+  const parts = value.split(/(\*\*[^*]+\*\*)/g).filter(Boolean);
+  if (parts.length === 1) return value;
+  return parts.map((part, index) => {
+    if (part.startsWith("**") && part.endsWith("**")) {
+      return <strong key={index} className="font-semibold text-white">{part.slice(2, -2)}</strong>;
+    }
+    return part;
+  });
 }
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
