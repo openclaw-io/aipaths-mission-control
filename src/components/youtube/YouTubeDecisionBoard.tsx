@@ -44,6 +44,7 @@ type ItemDetails = {
   ideaSection: JsonRecord | null;
   titleSection: JsonRecord | null;
   thumbnailSection: JsonRecord | null;
+  opportunityBrief: unknown;
   researchSection: JsonRecord | null;
   bulletsSection: JsonRecord | null;
   publicationSection: JsonRecord | null;
@@ -570,6 +571,7 @@ function getItemDetails(item: VideoPipelineItem): ItemDetails {
   const youtubeV0 = toRecord(metadata.youtube_v0);
   const selectedTitle = firstStringFromPaths([youtubeV0, metadata], [
     ["selected_title"],
+    ["title_lab", "selected_title"],
     ["title", "selected"],
     ["title", "selected_title"],
     ["packaging", "selected_title"],
@@ -610,6 +612,8 @@ function getItemDetails(item: VideoPipelineItem): ItemDetails {
   const titleSection = compactRecord({
     selected_title: selectedTitle,
     candidates: firstPresent(
+      getValueAt(youtubeV0, ["title_lab", "candidates"]),
+      getValueAt(youtubeV0, ["title_lab", "recommended_shortlist"]),
       youtubeV0.title_candidates,
       youtubeV0.titles,
       metadata.title_candidates,
@@ -618,16 +622,25 @@ function getItemDetails(item: VideoPipelineItem): ItemDetails {
       getValueAt(metadata, ["packaging", "titles"]),
       getValueAt(metadata, ["title_packaging", "candidates"]),
     ),
-    notes: firstPresent(youtubeV0.title_notes, metadata.title_notes, getValueAt(metadata, ["packaging", "title_notes"])),
+    notes: firstPresent(getValueAt(youtubeV0, ["title_lab", "notes"]), youtubeV0.title_notes, metadata.title_notes, getValueAt(metadata, ["packaging", "title_notes"])),
   });
 
   const thumbnailSection = compactRecord({
     notes: firstPresent(youtubeV0.thumbnail_notes, metadata.thumbnail_notes, getValueAt(metadata, ["packaging", "thumbnail_notes"])),
-    thumbnail: firstPresent(youtubeV0.thumbnail, metadata.thumbnail, getValueAt(metadata, ["packaging", "thumbnail"])),
+    thumbnail: firstPresent(getValueAt(youtubeV0, ["title_lab", "thumbnail_directions"]), youtubeV0.thumbnail, metadata.thumbnail, getValueAt(metadata, ["packaging", "thumbnail"])),
     upload: firstPresent(youtubeV0.thumbnail_upload, metadata.thumbnail_upload, metadata.thumbnail_fields, getValueAt(metadata, ["production", "thumbnail_upload"])),
   });
 
+  const opportunityBrief = firstPresent(
+    youtubeV0.opportunity_brief_md,
+    youtubeV0.opportunity_brief,
+    getValueAt(youtubeV0, ["light_research", "opportunity_brief_md"]),
+    getValueAt(youtubeV0, ["light_research", "opportunity_brief"]),
+  );
+
   const researchSection = compactRecord({
+    opportunity_brief: opportunityBrief,
+    light_research: firstPresent(youtubeV0.light_research, metadata.light_research),
     deep_research: firstPresent(youtubeV0.deep_research, metadata.deep_research),
     report: firstPresent(youtubeV0.report, metadata.report, metadata.research_report),
     research: firstPresent(youtubeV0.research, metadata.research, metadata.evidence),
@@ -668,6 +681,7 @@ function getItemDetails(item: VideoPipelineItem): ItemDetails {
     ideaSection,
     titleSection,
     thumbnailSection,
+    opportunityBrief,
     researchSection,
     bulletsSection,
     publicationSection,
@@ -784,9 +798,10 @@ function getCurrentStageSection(item: VideoPipelineItem, details: ItemDetails) {
       title: "Elegir package: título y thumbnail",
       hint: "Acá conviene ver candidatos, título elegido y dirección visual.",
       blocks: [
+        { label: "Opportunity brief", value: details.opportunityBrief, wide: true },
         { label: "Título elegido", value: details.selectedTitle },
-        { label: "Candidatos", value: firstPresent(packaging.title_options, details.titleSection), wide: true },
-        { label: "Thumbnail direction", value: firstPresent(packaging.thumbnail_direction, details.thumbnailSection), wide: true },
+        { label: "Candidatos", value: firstPresent(getValueAt(toRecord(item.metadata), ["youtube_v0", "title_lab", "candidates"]), getValueAt(toRecord(item.metadata), ["youtube_v0", "title_lab", "recommended_shortlist"]), packaging.title_options, details.titleSection), wide: true },
+        { label: "Thumbnail direction", value: firstPresent(getValueAt(toRecord(item.metadata), ["youtube_v0", "title_lab", "thumbnail_directions"]), packaging.thumbnail_direction, details.thumbnailSection), wide: true },
       ],
     };
   }
