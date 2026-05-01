@@ -45,6 +45,8 @@ type ItemDetails = {
   titleSection: JsonRecord | null;
   thumbnailSection: JsonRecord | null;
   opportunityBrief: unknown;
+  opportunityPromise: string | null;
+  opportunityScore: string | null;
   researchSection: JsonRecord | null;
   bulletsSection: JsonRecord | null;
   publicationSection: JsonRecord | null;
@@ -378,8 +380,15 @@ function VideoCard({
     >
       {compact ? (
         <>
-          <h3 className="line-clamp-2 text-sm font-semibold leading-5 text-white">{item.title}</h3>
-          {details.shortDescription && <p className="mt-2 line-clamp-3 text-xs leading-5 text-gray-400">{details.shortDescription}</p>}
+          <div className="flex items-start justify-between gap-3">
+            <h3 className="min-w-0 line-clamp-2 text-sm font-semibold leading-5 text-white">{item.title}</h3>
+            {details.opportunityScore && (
+              <span className="shrink-0 rounded-full border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-[11px] font-semibold text-blue-200">
+                {details.opportunityScore}
+              </span>
+            )}
+          </div>
+          {details.opportunityPromise && <p className="mt-2 line-clamp-3 text-xs leading-5 text-gray-400">{details.opportunityPromise}</p>}
         </>
       ) : (
         <>
@@ -637,6 +646,8 @@ function getItemDetails(item: VideoPipelineItem): ItemDetails {
     getValueAt(youtubeV0, ["light_research", "opportunity_brief_md"]),
     getValueAt(youtubeV0, ["light_research", "opportunity_brief"]),
   );
+  const opportunityPromise = getOpportunityPromise(youtubeV0, metadata, opportunityBrief) || shortDescription;
+  const opportunityScore = getOpportunityScore(youtubeV0, metadata, opportunityBrief);
 
   const researchSection = compactRecord({
     opportunity_brief: opportunityBrief,
@@ -682,6 +693,8 @@ function getItemDetails(item: VideoPipelineItem): ItemDetails {
     titleSection,
     thumbnailSection,
     opportunityBrief,
+    opportunityPromise,
+    opportunityScore,
     researchSection,
     bulletsSection,
     publicationSection,
@@ -689,6 +702,49 @@ function getItemDetails(item: VideoPipelineItem): ItemDetails {
   };
 }
 
+
+
+function getOpportunityPromise(youtubeV0: JsonRecord, metadata: JsonRecord, opportunityBrief: unknown) {
+  const direct = firstStringFromPaths([toRecord(youtubeV0.opportunity_brief), toRecord(getValueAt(youtubeV0, ["light_research", "opportunity_brief"])), youtubeV0, metadata], [
+    ["promise"],
+    ["promesa"],
+    ["viewer_promise"],
+  ]);
+  if (direct) return direct;
+  const markdown = typeof opportunityBrief === "string" ? opportunityBrief : null;
+  return markdown ? extractMarkdownSection(markdown, "Promesa") : null;
+}
+
+function getOpportunityScore(youtubeV0: JsonRecord, metadata: JsonRecord, opportunityBrief: unknown) {
+  const score = firstPresent(
+    getValueAt(youtubeV0, ["opportunity_brief", "score"]),
+    getValueAt(youtubeV0, ["light_research", "opportunity_brief", "score"]),
+    youtubeV0.opportunity_score,
+    metadata.opportunity_score,
+  );
+  if (typeof score === "number") return `${score}/10`;
+  if (typeof score === "string" && score.trim()) return score.includes("/10") ? score.trim() : `${score.trim()}/10`;
+
+  const markdown = typeof opportunityBrief === "string" ? opportunityBrief : null;
+  const section = markdown ? extractMarkdownSection(markdown, "Score inicial") : null;
+  const match = section?.match(/(10|[0-9](?:\.\d+)?)\s*\/\s*10/);
+  return match ? `${match[1]}/10` : null;
+}
+
+function extractMarkdownSection(markdown: string, heading: string) {
+  const lines = markdown.split(/\r?\n/);
+  const escapedHeading = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const headingPattern = new RegExp(`^#{1,4}\\s+${escapedHeading}\\s*$`, "i");
+  const start = lines.findIndex((line) => headingPattern.test(line.trim()));
+  if (start === -1) return null;
+  const collected: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    if (/^#{1,4}\s+/.test(line.trim())) break;
+    if (line.trim()) collected.push(line.trim());
+  }
+  const value = collected.join(" ").trim();
+  return value || null;
+}
 
 function getShortDescription(metadata: JsonRecord, youtubeV0: JsonRecord) {
   const intel = toRecord(metadata.intel);
