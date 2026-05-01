@@ -178,6 +178,138 @@ async function createPublishedSnapshotWorkItems(input: {
   return results;
 }
 
+
+function createStageAutomationInstruction(input: {
+  title: string;
+  stage: string;
+  note: string | null;
+  existingSummary: string | null;
+}) {
+  if (input.stage === "title_thumbnail") {
+    return [
+      `YouTube pipeline item: ${input.title}`,
+      "Automation: light research before title/thumbnail work",
+      "",
+      "Task:",
+      "- Do a brief research pass, not a full report.",
+      "- Identify why this idea may be worth pursuing for AIPaths.",
+      "- Capture the likely viewer problem, demand signal, and strongest angle.",
+      "- Propose 5-8 title candidates and 1-3 thumbnail directions.",
+      "- Save the result into metadata.youtube_v0.light_research and metadata.youtube_v0.title_lab if your tooling supports it.",
+      "- Keep it concise enough for Gonza to decide whether to promote the idea.",
+      "",
+      `Existing context: ${input.existingSummary || "(none)"}`,
+      `Human note: ${input.note || "(none)"}`,
+    ].join("\n");
+  }
+
+  if (input.stage === "research" || input.stage === "researching") {
+    return [
+      `YouTube pipeline item: ${input.title}`,
+      "Automation: deep research report",
+      "",
+      "Task:",
+      "- Do the deeper research pass after the idea/package has been selected.",
+      "- Check competitor videos, transcript summaries when available, audience demand, supply gap, and AIPaths differentiation.",
+      "- Produce a structured research report with: market evidence, competing angles, content gaps, best AIPaths promise, risks, and recommendation.",
+      "- Save the result into metadata.youtube_v0.deep_research if your tooling supports it.",
+      "- Finish with a clear recommendation for whether to move to bullets.",
+      "",
+      `Existing context: ${input.existingSummary || "(none)"}`,
+      `Human note: ${input.note || "(none)"}`,
+    ].join("\n");
+  }
+
+  if (input.stage === "bullets") {
+    return [
+      `YouTube pipeline item: ${input.title}`,
+      "Automation: chapter bullets for recording",
+      "",
+      "Task:",
+      "- Convert the selected idea, title/package, and research into chronological chapter bullets.",
+      "- Do not write a full script.",
+      "- Separate the video into practical chapters with concise bullets per chapter.",
+      "- Include opening promise, key proof/demo beats, transitions, and CTA.",
+      "- Save the result into metadata.youtube_v0.bullet_points if your tooling supports it.",
+      "- Finish with a recording-readiness note.",
+      "",
+      `Existing context: ${input.existingSummary || "(none)"}`,
+      `Human note: ${input.note || "(none)"}`,
+    ].join("\n");
+  }
+
+  return null;
+}
+
+function getStageAutomationConfig(stage: string) {
+  if (stage === "title_thumbnail") {
+    return {
+      relationType: "youtube_light_research",
+      titlePrefix: "Light research + packaging",
+      action: "youtube_light_research",
+      trigger: "youtube_stage_title_thumbnail",
+    };
+  }
+  if (stage === "research" || stage === "researching") {
+    return {
+      relationType: "youtube_deep_research",
+      titlePrefix: "Deep research report",
+      action: "youtube_deep_research",
+      trigger: "youtube_stage_research",
+    };
+  }
+  if (stage === "bullets") {
+    return {
+      relationType: "youtube_bullet_points",
+      titlePrefix: "Create chapter bullets",
+      action: "youtube_bullet_points",
+      trigger: "youtube_stage_bullets",
+    };
+  }
+  return null;
+}
+
+async function createStageAutomationWorkItem(input: {
+  db: ReturnType<typeof createServiceClient>;
+  pipelineItemId: string;
+  title: string;
+  stage: string;
+  priority: string | null;
+  requestedBy: string;
+  note: string | null;
+  existingSummary: string | null;
+}) {
+  const config = getStageAutomationConfig(input.stage);
+  if (!config) return null;
+
+  const instruction = createStageAutomationInstruction({
+    title: input.title,
+    stage: input.stage,
+    note: input.note,
+    existingSummary: input.existingSummary,
+  });
+  if (!instruction) return null;
+
+  return createPipelineWorkItem(input.db, {
+    pipelineItemId: input.pipelineItemId,
+    pipelineType: "video",
+    title: `${config.titlePrefix}: ${input.title}`,
+    instruction,
+    priority: input.priority || "medium",
+    ownerAgent: "youtube",
+    requestedBy: input.requestedBy,
+    relationType: config.relationType,
+    mapRelationType: "followup",
+    payloadRelationType: config.relationType,
+    action: config.action,
+    trigger: config.trigger,
+    payloadExtra: {
+      youtube_stage: input.stage,
+      automation_kind: config.relationType,
+    },
+  });
+}
+
 function createWorkItemInstruction(input: {
   title: string;
   gateKey: YouTubeGateKey;
@@ -261,6 +393,13 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     ]) || extractYouTubeVideoId(existingYoutubeUrl);
     const videoId = getBodyString(body, ["video_id", "videoId", "youtube_video_id"]) || extractYouTubeVideoId(youtubeUrl) || existingVideoId || null;
     const note = trimToNull(body.note ?? body.reason);
+    const existingSummary = firstStringFromPaths([youtubeV0, metadata, toRecord(metadata.intel), toRecord(metadata.analysis)], [
+      ["summary"],
+      ["summary_short"],
+      ["why_it_matters"],
+      ["core_hypothesis"],
+      ["notes"],
+    ]);
     const v0History = Array.isArray(youtubeV0.history) ? youtubeV0.history : [];
     const publishedAt = requestedStage === "published" ? item.published_at || now : item.published_at;
     const nextYoutubeV0 = {
@@ -310,6 +449,17 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       return NextResponse.json({ error: updateError.message }, { status: 500 });
     }
 
+    const stageAutomationWorkItem = await createStageAutomationWorkItem({
+      db,
+      pipelineItemId: item.id,
+      title: item.title,
+      stage: requestedStage,
+      priority: item.priority,
+      requestedBy: user.email || user.id,
+      note,
+      existingSummary,
+    });
+
     const snapshotWorkItems = requestedStage === "published" && (youtubeUrl || videoId)
       ? await createPublishedSnapshotWorkItems({
         db,
@@ -323,7 +473,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       })
       : [];
 
-    return NextResponse.json({ item: updated, snapshotWorkItems });
+    return NextResponse.json({ item: updated, stageAutomationWorkItem, snapshotWorkItems });
   }
 
   const currentDecision = getNextDecision(metadata);

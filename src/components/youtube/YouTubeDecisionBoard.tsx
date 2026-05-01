@@ -40,6 +40,7 @@ type ItemDetails = {
   youtubeUrl: string | null;
   videoId: string | null;
   nextAction: string | null;
+  shortDescription: string | null;
   ideaSection: JsonRecord | null;
   titleSection: JsonRecord | null;
   thumbnailSection: JsonRecord | null;
@@ -206,6 +207,7 @@ export function YouTubeDecisionBoard({ initialItems, initialWorkItems }: { initi
       if (updatedItem) {
         setItems((current) => current.map((existing) => (existing.id === updatedItem.id ? updatedItem : existing)));
       }
+      setSelectedId(null);
       router.refresh();
     } finally {
       setBusy(false);
@@ -341,6 +343,7 @@ function WorkflowLane({
               selected={model.item.id === selectedId}
               openWorkCount={model.workItems.filter((workItem) => OPEN_WORK_STATUSES.has(workItem.status)).length}
               onSelect={() => onSelect(model.item.id)}
+              compact={compactGrid}
             />
           ))
         )}
@@ -355,12 +358,14 @@ function VideoCard({
   selected,
   openWorkCount,
   onSelect,
+  compact = false,
 }: {
   item: VideoPipelineItem;
   details: ItemDetails;
   selected: boolean;
   openWorkCount: number;
   onSelect: () => void;
+  compact?: boolean;
 }) {
   return (
     <button
@@ -370,21 +375,31 @@ function VideoCard({
         selected ? "border-blue-500 bg-blue-500/10" : "border-gray-800 bg-black/20 hover:border-gray-700 hover:bg-white/5"
       }`}
     >
-      <div className="flex items-start justify-between gap-3">
-        <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${STATUS_STYLES[item.status] || "border-gray-700 bg-gray-700/10 text-gray-300"}`}>
-          {formatStatus(item.status)}
-        </span>
-        <span className="shrink-0 text-[11px] text-gray-600">{formatDate(item.updated_at)}</span>
-      </div>
-      <h3 className="mt-3 line-clamp-3 text-sm font-semibold leading-5 text-white">{item.title}</h3>
+      {compact ? (
+        <>
+          <h3 className="line-clamp-2 text-sm font-semibold leading-5 text-white">{item.title}</h3>
+          {details.shortDescription && <p className="mt-2 line-clamp-3 text-xs leading-5 text-gray-400">{details.shortDescription}</p>}
+        </>
+      ) : (
+        <>
+          <div className="flex items-start justify-between gap-3">
+            <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${STATUS_STYLES[item.status] || "border-gray-700 bg-gray-700/10 text-gray-300"}`}>
+              {formatStatus(item.status)}
+            </span>
+            <span className="shrink-0 text-[11px] text-gray-600">{formatDate(item.updated_at)}</span>
+          </div>
+          <h3 className="mt-3 line-clamp-3 text-sm font-semibold leading-5 text-white">{item.title}</h3>
 
-      <div className="mt-3 space-y-2 text-xs leading-5 text-gray-400">
-        {details.sourceLabel && <InfoLine label="Source" value={details.sourceLabel} />}
-        {details.selectedTitle && <InfoLine label="Selected" value={details.selectedTitle} />}
-        {["published", "learning"].includes(item.status) && details.youtubeUrl && <InfoLine label="YouTube" value={details.youtubeUrl} />}
-        {details.nextAction && <InfoLine label="Next" value={details.nextAction} />}
-        {openWorkCount > 0 && <InfoLine label="Work" value={`${openWorkCount} open item${openWorkCount === 1 ? "" : "s"}`} />}
-      </div>
+          <div className="mt-3 space-y-2 text-xs leading-5 text-gray-400">
+            {details.shortDescription && <p className="line-clamp-3">{details.shortDescription}</p>}
+            {details.sourceLabel && <InfoLine label="Source" value={details.sourceLabel} />}
+            {details.selectedTitle && <InfoLine label="Selected" value={details.selectedTitle} />}
+            {["published", "learning"].includes(item.status) && details.youtubeUrl && <InfoLine label="YouTube" value={details.youtubeUrl} />}
+            {details.nextAction && <InfoLine label="Next" value={details.nextAction} />}
+            {openWorkCount > 0 && <InfoLine label="Work" value={`${openWorkCount} open item${openWorkCount === 1 ? "" : "s"}`} />}
+          </div>
+        </>
+      )}
     </button>
   );
 }
@@ -583,6 +598,7 @@ function getItemDetails(item: VideoPipelineItem): ItemDetails {
     ["stage_next_action"],
   ]);
   const sourceLabel = getSourceLabel(item, metadata, youtubeV0);
+  const shortDescription = getShortDescription(metadata, youtubeV0);
 
   const ideaSection = compactRecord({
     concept: firstPresent(youtubeV0.concept, metadata.concept, getValueAt(metadata, ["overview", "concept"])),
@@ -648,6 +664,7 @@ function getItemDetails(item: VideoPipelineItem): ItemDetails {
     youtubeUrl,
     videoId,
     nextAction,
+    shortDescription,
     ideaSection,
     titleSection,
     thumbnailSection,
@@ -656,6 +673,24 @@ function getItemDetails(item: VideoPipelineItem): ItemDetails {
     publicationSection,
     learningSection,
   };
+}
+
+
+function getShortDescription(metadata: JsonRecord, youtubeV0: JsonRecord) {
+  const intel = toRecord(metadata.intel);
+  const analysis = toRecord(metadata.analysis);
+  const description = firstStringFromPaths([youtubeV0, metadata, intel, analysis], [
+    ["short_description"],
+    ["description"],
+    ["summary"],
+    ["idea_summary"],
+    ["summary_short"],
+    ["why_it_matters"],
+    ["core_hypothesis"],
+    ["notes"],
+  ]);
+  if (!description) return null;
+  return description.length > 260 ? `${description.slice(0, 257).trim()}...` : description;
 }
 
 function getLinkedWorkItems(item: VideoPipelineItem, workItems: LinkedWorkItem[]) {

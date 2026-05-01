@@ -97,6 +97,19 @@ Behavior:
 - appends lightweight `metadata.youtube_v0.history[]`
 - preserves older transition actions for compatibility
 
+Stage transitions also create deduped YouTube Director work items for the main automation handoffs:
+
+- moving to `title_thumbnail` creates `youtube_light_research`
+  - brief research before packaging
+  - viewer problem, demand signal, strongest angle
+  - title candidates and thumbnail directions
+- moving to `research` / `researching` creates `youtube_deep_research`
+  - competitor/transcript scan where available
+  - demand, supply gap, AIPaths angle, risks, recommendation
+- moving to `bullets` creates `youtube_bullet_points`
+  - chronological chapters and recording bullets
+  - not a full script
+
 When transitioning to `published`, the route can create scheduled follow-up work items for:
 
 - `youtube_snapshot_24h`
