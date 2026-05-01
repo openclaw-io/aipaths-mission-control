@@ -101,7 +101,7 @@ Stage transitions also create deduped YouTube Director work items for the main a
 
 - moving to `title_thumbnail` creates `youtube_light_research`
   - short `Video Opportunity Brief` in markdown for prioritization
-  - category/pillar, target persona, promise, why it could work, risks, initial 0-10 score, recommendation
+  - category/pillar, target persona, persona fit against `director-youtube/context/persona.md`, promise, why it could work, risks, initial 0-10 score, recommendation
   - contrast against AIPaths channel patterns: concrete problem/object, clear promise, clear viewer, simple tension, and fit with proven topics
   - title candidates and thumbnail directions
 - moving to `research` / `researching` creates `youtube_deep_research`
