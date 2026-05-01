@@ -8,7 +8,8 @@
     "start": "next start -H 127.0.0.1 -p 3001",
     "lint": "eslint",
     "backfill:strategist": "node scripts/backfill-strategist-analytics.mjs",
-    "validate:strategist-backfill": "node scripts/validate-strategist-backfill.mjs"
+    "validate:strategist-backfill": "node scripts/validate-strategist-backfill.mjs",
+    "suggestions:seed-hygiene": "node scripts/seed-hygiene-suggestions.mjs"
   },
   "dependencies": {
     "@supabase/ssr": "^0.9.0",

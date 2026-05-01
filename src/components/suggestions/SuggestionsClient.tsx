@@ -42,6 +42,19 @@ function isPendingSuggestion(item: SuggestionItem) {
   return item.payload?.requires_human_approval === true && ["blocked", "draft"].includes(item.status);
 }
 
+function riskRank(value: string | null) {
+  if (value === "high") return 0;
+  if (value === "medium") return 1;
+  if (value === "low") return 2;
+  return 3;
+}
+
+function sortByRiskThenCreated(a: SuggestionItem, b: SuggestionItem) {
+  const riskDelta = riskRank(payloadString(a.payload, "risk")) - riskRank(payloadString(b.payload, "risk"));
+  if (riskDelta !== 0) return riskDelta;
+  return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+}
+
 export function SuggestionsClient({ initialItems }: { initialItems: SuggestionItem[] }) {
   const [items, setItems] = useState(initialItems);
   const [agentFilter, setAgentFilter] = useState("all");
@@ -70,7 +83,7 @@ export function SuggestionsClient({ initialItems }: { initialItems: SuggestionIt
 
   const agents = useMemo(() => Array.from(new Set(items.map(agentFor))).sort(), [items]);
   const risks = useMemo(() => Array.from(new Set(items.map((item) => payloadString(item.payload, "risk") || "unknown"))).sort(), [items]);
-  const filtered = useMemo(() => items.filter((item) => isPendingSuggestion(item) && (agentFilter === "all" || agentFor(item) === agentFilter) && (riskFilter === "all" || (payloadString(item.payload, "risk") || "unknown") === riskFilter)), [items, agentFilter, riskFilter]);
+  const filtered = useMemo(() => items.filter((item) => isPendingSuggestion(item) && (agentFilter === "all" || agentFor(item) === agentFilter) && (riskFilter === "all" || (payloadString(item.payload, "risk") || "unknown") === riskFilter)).sort(sortByRiskThenCreated), [items, agentFilter, riskFilter]);
 
   async function resolveSuggestion(item: SuggestionItem, action: "approve" | "dismiss") {
     setBusyId(item.id);
