@@ -795,13 +795,10 @@ function getCurrentStageSection(item: VideoPipelineItem, details: ItemDetails) {
 
   if (item.status === "title_thumbnail") {
     return {
-      title: "Elegir package: título y thumbnail",
-      hint: "Acá conviene ver candidatos, título elegido y dirección visual.",
+      title: "Resumen para decidir package",
+      hint: "Brief corto para priorizar: persona, promesa, riesgo, score y recomendación.",
       blocks: [
-        { label: "Opportunity brief", value: details.opportunityBrief, wide: true },
-        { label: "Título elegido", value: details.selectedTitle },
-        { label: "Candidatos", value: firstPresent(getValueAt(toRecord(item.metadata), ["youtube_v0", "title_lab", "candidates"]), getValueAt(toRecord(item.metadata), ["youtube_v0", "title_lab", "recommended_shortlist"]), packaging.title_options, details.titleSection), wide: true },
-        { label: "Thumbnail direction", value: firstPresent(getValueAt(toRecord(item.metadata), ["youtube_v0", "title_lab", "thumbnail_directions"]), packaging.thumbnail_direction, details.thumbnailSection), wide: true },
+        { label: "Video Opportunity Brief", value: details.opportunityBrief || details.researchSection || details.titleSection, wide: true },
       ],
     };
   }
