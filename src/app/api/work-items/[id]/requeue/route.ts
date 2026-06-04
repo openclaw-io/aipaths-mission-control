@@ -30,12 +30,28 @@ export async function POST(
   const now = new Date().toISOString();
   const payload = ((existing.payload || {}) as Record<string, unknown>) || {};
   const manualRequeueCount = Number(payload.manual_requeue_count || 0) + 1;
-  const {
-    dead_lettered_at: _deadLetteredAt,
-    dead_letter_reason: _deadLetterReason,
-    wake_failure_limit: _wakeFailureLimit,
-    ...restoredPayload
-  } = payload;
+  const restoredPayload = { ...payload };
+  for (const key of [
+    "dead_lettered_at",
+    "dead_letter_reason",
+    "wake_failure_limit",
+    "stale_claim_requeue_count",
+    "stale_claim_failed_at",
+    "stale_claim_last_requeued_at",
+    "stale_claim_max_requeues",
+    "stale_claim_policy",
+    "unclaimed_notify_requeue_count",
+    "unclaimed_notify_failed_at",
+    "unclaimed_notify_last_requeued_at",
+    "unclaimed_notify_limit",
+    "dispatch_session_id",
+    "dispatch_session_started_at",
+    "dispatch_escalation",
+    "requires_system_attention",
+    "operator_alert",
+  ]) {
+    delete restoredPayload[key];
+  }
 
   const { data, error } = await supabaseAdmin
     .from("work_items")

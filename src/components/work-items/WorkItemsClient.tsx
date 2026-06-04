@@ -733,6 +733,7 @@ function FailedColumn({ items, onOpen, onRequeue }: { items: WorkItem[]; onOpen:
             <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-red-500/10 pt-3">
               <div className="space-y-1 text-xs text-red-200/60">
                 <div>{payloadString(item.payload, "dispatch_failure_reason") || payloadString(item.payload, "error") || "No failure reason stored"}</div>
+                {payloadString(item.payload, "operator_alert") && <div className="text-red-100">{payloadString(item.payload, "operator_alert")}</div>}
                 {payloadString(item.payload, "dead_letter_reason") && <div>Dead letter: {payloadString(item.payload, "dead_letter_reason")}</div>}
               </div>
               <button

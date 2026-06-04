@@ -150,6 +150,38 @@ function communityPublishTarget(metadata: JsonRecord) {
   return { channelId: "1498256983122378883", channelName: "🛰️_radar_ia", label: "default community update" };
 }
 
+function hasCommunityPublicationRecord(item: { status?: string | null; published_at?: string | null; current_url?: string | null }) {
+  return item.status === "published" || item.status === "live" || !!item.published_at || !!item.current_url;
+}
+
+function isWakeFailureReadyRestore(body: Record<string, unknown>) {
+  const patch = body.payload_patch;
+  return body.status === "ready"
+    && patch
+    && typeof patch === "object"
+    && !Array.isArray(patch)
+    && (patch as JsonRecord).dispatch_state === "ready_after_wake_failure";
+}
+
+async function hasAgentClaimEvent(db: ReturnType<typeof createServiceClient>, input: {
+  workItemId: string;
+  since: string | null;
+}) {
+  let query = db
+    .from("event_log")
+    .select("id")
+    .eq("entity_type", "work_item")
+    .eq("entity_id", input.workItemId)
+    .eq("event_type", "work_item.in_progress")
+    .limit(1);
+
+  if (input.since) query = query.gte("created_at", input.since);
+
+  const { data, error } = await query;
+  if (error) throw error;
+  return Boolean(data?.length);
+}
+
 async function ensureCommunityPublishWorkItem(db: ReturnType<typeof createServiceClient>, input: {
   pipelineItemId: string;
   title: string;
@@ -159,13 +191,25 @@ async function ensureCommunityPublishWorkItem(db: ReturnType<typeof createServic
   metadata?: JsonRecord | null;
   copyText?: string | null;
 }) {
-  const openStatuses = ["draft", "ready", "blocked", "in_progress"];
+  const { data: pipelineItem, error: pipelineError } = await db
+    .from("pipeline_items")
+    .select("id, status, published_at, current_url")
+    .eq("id", input.pipelineItemId)
+    .eq("pipeline_type", "community_post")
+    .maybeSingle();
+
+  if (pipelineError) throw pipelineError;
+  if (pipelineItem && hasCommunityPublicationRecord(pipelineItem)) {
+    return { id: null, created: false, skipped: true, reason: "already_published" };
+  }
+
+  const dedupeStatuses = ["draft", "ready", "blocked", "in_progress", "done"];
   const { data: existingItems, error: existingError } = await db
     .from("work_items")
     .select("id, status, payload")
     .in("source_type", ["pipeline_item", "service"])
     .eq("source_id", input.pipelineItemId)
-    .in("status", openStatuses)
+    .in("status", dedupeStatuses)
     .order("created_at", { ascending: false });
 
   if (existingError) throw existingError;
@@ -174,6 +218,10 @@ async function ensureCommunityPublishWorkItem(db: ReturnType<typeof createServic
     const payload = (item.payload || {}) as JsonRecord;
     return payload.action === "publish_community_post" || payload.relation_type === "publish";
   });
+
+  if (existingPublish?.status === "done") {
+    return { id: existingPublish.id as string, created: false, skipped: true, reason: "publish_already_done" };
+  }
 
   const metadata = input.metadata || {};
   const target = communityPublishTarget(metadata);
@@ -398,6 +446,36 @@ export async function PATCH(
     return NextResponse.json({ error: existingError?.message || "Work item not found" }, { status: 404 });
   }
 
+  if (isWakeFailureReadyRestore(body as Record<string, unknown>) && existing.status === "in_progress") {
+    const claimedByAgent = await hasAgentClaimEvent(db, {
+      workItemId: id,
+      since: existing.started_at || existing.updated_at || null,
+    });
+
+    if (claimedByAgent) {
+      await db.from("event_log").insert({
+        domain: "work",
+        event_type: "work_item.wake_failure_restore_ignored",
+        entity_type: "work_item",
+        entity_id: id,
+        actor: existing.owner_agent || "unknown",
+        payload: {
+          reason: "agent_already_claimed_after_wake",
+          status: existing.status,
+          started_at: existing.started_at,
+          updated_at: existing.updated_at,
+          source_type: existing.source_type,
+          source_id: existing.source_id,
+        },
+      });
+
+      return NextResponse.json({
+        ...existing,
+        wake_failure_restore_ignored: true,
+      });
+    }
+  }
+
   const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
   if (status) updates.status = status;
   if (status === "ready") {
@@ -613,7 +691,7 @@ export async function PATCH(
       const scheduledFor = extractCommunityScheduledFor(body as Record<string, unknown>);
       const { data: communityItem } = await db
         .from("pipeline_items")
-        .select("metadata, title, priority, requested_by")
+        .select("status, published_at, current_url, metadata, title, priority, requested_by")
         .eq("id", pipelineItemId)
         .eq("pipeline_type", "community_post")
         .maybeSingle();
@@ -622,7 +700,8 @@ export async function PATCH(
         const communityMetadata = (communityItem.metadata || {}) as JsonRecord;
         const copyMetadata = (communityMetadata.copy || {}) as JsonRecord;
         const finalScheduledFor = scheduledFor;
-        const publishWork = finalScheduledFor
+        const alreadyPublished = hasCommunityPublicationRecord(communityItem);
+        const publishWork = finalScheduledFor && !alreadyPublished
           ? await ensureCommunityPublishWorkItem(db, {
               pipelineItemId,
               title: String(communityItem.title || data.title || "Community post"),
@@ -633,27 +712,31 @@ export async function PATCH(
               copyText: typeof copyMetadata.text === "string" ? copyMetadata.text : null,
             })
           : null;
+        const previousSchedule = (communityMetadata.schedule || {}) as JsonRecord;
+        const publishWorkItemId = alreadyPublished
+          ? (typeof previousSchedule.publish_work_item_id === "string" ? previousSchedule.publish_work_item_id : null)
+          : publishWork?.id || null;
 
         await db
           .from("pipeline_items")
           .update({
-            status: finalScheduledFor ? "scheduled" : "approved",
+            status: alreadyPublished ? communityItem.status : finalScheduledFor ? "scheduled" : "approved",
             scheduled_for: null,
             metadata: {
               ...communityMetadata,
               schedule: {
-                ...((communityMetadata.schedule || {}) as JsonRecord),
+                ...previousSchedule,
                 scheduled_for: finalScheduledFor,
                 scheduled_at: new Date().toISOString(),
                 scheduled_by: data.owner_agent || "community",
                 source: "work_items",
-                publish_work_item_id: publishWork?.id || null,
+                publish_work_item_id: publishWorkItemId,
               },
               runtime_feedback: {
                 ...((communityMetadata.runtime_feedback || {}) as JsonRecord),
-                last_status: finalScheduledFor ? "publish_work_item_scheduled" : "schedule_missing_date",
+                last_status: alreadyPublished ? "schedule_skipped_already_published" : finalScheduledFor ? "publish_work_item_scheduled" : "schedule_missing_date",
                 last_work_item_id: data.id,
-                publish_work_item_id: publishWork?.id || null,
+                publish_work_item_id: publishWorkItemId,
                 updated_at: new Date().toISOString(),
               },
             },

@@ -113,6 +113,10 @@ function createPublishInstruction(item: { id: string; title: string; metadata?: 
   ].join("\n");
 }
 
+function hasPublicationRecord(item: { status?: string | null; published_at?: string | null; current_url?: string | null }) {
+  return item.status === "published" || item.status === "live" || !!item.published_at || !!item.current_url;
+}
+
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -152,6 +156,10 @@ export async function POST(
 
   if (action === "approve" && !getCommunityCopy(item)) {
     return NextResponse.json({ error: "Cannot approve a community post without copy text" }, { status: 400 });
+  }
+
+  if (action === "approve" && hasPublicationRecord(item)) {
+    return NextResponse.json({ error: "Community post already has a publication record" }, { status: 409 });
   }
 
   const metadata = {
@@ -240,7 +248,7 @@ export async function POST(
     }
   }
 
-  const nextStatus = action === "approve" && approvedScheduledFor ? "scheduled" : targetStatus;
+  const nextStatus = action === "approve" && publishWorkItemId ? "scheduled" : targetStatus;
   const updatePayload: Record<string, unknown> = {
     status: nextStatus,
     metadata: action === "approve"

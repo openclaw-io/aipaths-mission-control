@@ -66,8 +66,19 @@ function buildProjectContext(project: ProjectContextRow) {
   return parts.join("\n\n");
 }
 
-function buildWorkItemSessionKey(agentId: string, workItemId: string) {
-  return `agent:${agentId}:mission-control:work-item:${workItemId}`;
+function buildWorkItemSessionKey(agentId: string, workItemId: string, payload?: Record<string, unknown> | null) {
+  const dispatchSessionId = typeof payload?.dispatch_session_id === "string" ? payload.dispatch_session_id : "";
+  if (dispatchSessionId) {
+    return `agent:${agentId}:mission-control:work-item:${workItemId}:dispatch:${dispatchSessionId}`;
+  }
+
+  const dispatchAttempt = Number(payload?.dispatch_attempts || 0);
+  const staleRequeues = Number(payload?.stale_claim_requeue_count || 0);
+  const manualRequeues = Number(payload?.manual_requeue_count || 0);
+  const attemptSuffix = dispatchAttempt > 0 || staleRequeues > 0 || manualRequeues > 0
+    ? `:attempt:${dispatchAttempt}:stale:${staleRequeues}:manual:${manualRequeues}`
+    : "";
+  return `agent:${agentId}:mission-control:work-item:${workItemId}${attemptSuffix}`;
 }
 
 function shellSingleQuote(value: string) {
@@ -130,7 +141,7 @@ async function checkModelHealth(agentId = "systems") {
   }
 }
 
-async function wakeAgent(agentId: string, workItemId: string, message: string): Promise<boolean> {
+async function wakeAgent(agentId: string, workItemId: string, message: string, workPayload?: Record<string, unknown> | null): Promise<boolean> {
   const gatewayUrl = process.env.OPENCLAW_GATEWAY_URL || "http://127.0.0.1:18789";
   const gatewayToken = process.env.OPENCLAW_GATEWAY_TOKEN;
 
@@ -139,7 +150,7 @@ async function wakeAgent(agentId: string, workItemId: string, message: string): 
     return false;
   }
 
-  const sessionKey = buildWorkItemSessionKey(agentId, workItemId);
+  const sessionKey = buildWorkItemSessionKey(agentId, workItemId, workPayload);
   const payload = {
     gatewayUrl,
     gatewayToken,
@@ -363,7 +374,7 @@ Fail it:
 ${failCommand}
 \`\`\``;
 
-  let woke = await wakeAgent(routing.agentId, item.id, message);
+  let woke = await wakeAgent(routing.agentId, item.id, message, workPayload);
   if (!woke) {
     const { data: latestItem } = await db
       .from("work_items")
@@ -371,10 +382,10 @@ ${failCommand}
       .eq("id", item.id)
       .maybeSingle();
 
-    // A long-running agent can successfully claim the work item before the
-    // gateway request returns. Treat that as a successful wake so the scheduler
-    // does not retry and create duplicate detached sessions.
-    if (latestItem?.status === "in_progress" || latestItem?.status === "done") {
+    // Completion is the only safe success signal after a failed wake. An
+    // in_progress claim can also be a stale broken session, so let the scheduler
+    // surface it instead of hiding the failure as a successful dispatch.
+    if (latestItem?.status === "done") {
       console.log(`[notify-work-item] ${agent} wake timed out, but work item is ${latestItem.status}; treating as success`);
       woke = true;
     }
@@ -399,5 +410,12 @@ ${failCommand}
     }
   }
 
-  return NextResponse.json({ ok: true, agent, woke, workItemId: item.id, wakeMode: "detached_spawn" });
+  return NextResponse.json({
+    ok: true,
+    agent,
+    woke,
+    workItemId: item.id,
+    wakeMode: "detached_spawn",
+    dispatchSessionId: typeof workPayload.dispatch_session_id === "string" ? workPayload.dispatch_session_id : null,
+  });
 }
