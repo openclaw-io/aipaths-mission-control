@@ -23,7 +23,7 @@ interface MemoryRow {
   created_at?: string;
 }
 
-const POLL_INTERVAL = 10_000;
+const POLL_INTERVAL = 90_000;
 const REALTIME_TIMEOUT = 5_000;
 
 export function useOfficeAgents(
@@ -37,6 +37,25 @@ export function useOfficeAgents(
   useEffect(() => {
     const supabase = createClient();
     let realtimeConnected = false;
+
+    async function refresh() {
+      if (document.visibilityState !== "visible") return;
+      const [tasksRes, memRes] = await Promise.all([
+        supabase
+          .from("work_items")
+          .select("id, title, owner_agent, target_agent_id, status, created_at, started_at, completed_at")
+          .order("created_at", { ascending: false }),
+        supabase
+          .from("memories")
+          .select("agent, date, content, created_at")
+          .eq("type", "journal")
+          .order("date", { ascending: false })
+          .order("created_at", { ascending: false })
+          .limit(50),
+      ]);
+      if (tasksRes.data) setTasks(tasksRes.data);
+      if (memRes.data) setMemory(memRes.data);
+    }
 
     const channel = supabase
       .channel("office-agents")
@@ -104,29 +123,23 @@ export function useOfficeAgents(
     // Fallback: if Realtime doesn't connect in 5s, start polling
     const fallbackTimer = setTimeout(() => {
       if (!realtimeConnected && !pollRef.current) {
-        pollRef.current = setInterval(async () => {
-          const [tasksRes, memRes] = await Promise.all([
-            supabase
-              .from("work_items")
-              .select("id, title, owner_agent, target_agent_id, status, created_at, started_at, completed_at")
-              .order("created_at", { ascending: false }),
-            supabase
-              .from("memories")
-              .select("agent, date, content, created_at")
-              .eq("type", "journal")
-              .order("date", { ascending: false })
-              .order("created_at", { ascending: false })
-              .limit(50),
-          ]);
-          if (tasksRes.data) setTasks(tasksRes.data);
-          if (memRes.data) setMemory(memRes.data);
+        pollRef.current = setInterval(() => {
+          void refresh();
         }, POLL_INTERVAL);
       }
     }, REALTIME_TIMEOUT);
 
+    const handleVisibleRefresh = () => {
+      if (!realtimeConnected && document.visibilityState === "visible") void refresh();
+    };
+    window.addEventListener("focus", handleVisibleRefresh);
+    document.addEventListener("visibilitychange", handleVisibleRefresh);
+
     return () => {
       clearTimeout(fallbackTimer);
       if (pollRef.current) clearInterval(pollRef.current);
+      window.removeEventListener("focus", handleVisibleRefresh);
+      document.removeEventListener("visibilitychange", handleVisibleRefresh);
       supabase.removeChannel(channel);
     };
   }, []);
