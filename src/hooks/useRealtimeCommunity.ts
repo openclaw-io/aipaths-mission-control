@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import { createClient } from "@/lib/supabase/client";
 import type { CommunityItem } from "@/app/community/page";
 
 export function useRealtimeCommunity(initialItems: CommunityItem[]): [CommunityItem[], Dispatch<SetStateAction<CommunityItem[]>>] {
   const [items, setItems] = useState<CommunityItem[]>(initialItems);
-  const supabase = createClient();
+  const supabase = useMemo(() => createClient(), []);
 
   useEffect(() => {
     setItems(initialItems);

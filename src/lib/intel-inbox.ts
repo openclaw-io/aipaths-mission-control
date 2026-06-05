@@ -173,6 +173,40 @@ function toObject(value: unknown): Record<string, unknown> {
   return {};
 }
 
+function toBoolean(value: unknown) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    if (value.toLowerCase() === "true") return true;
+    if (value.toLowerCase() === "false") return false;
+  }
+  return false;
+}
+
+function toStringArray(value: unknown) {
+  if (Array.isArray(value)) return value.filter((entry): entry is string => typeof entry === "string");
+  if (typeof value !== "string" || !value.trim()) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function compactIntelMetadata(row: Record<string, unknown>) {
+  return {
+    headline_short: typeof row.headline_short === "string" ? row.headline_short : undefined,
+    transcript_summary_used: toBoolean(row.transcript_summary_used),
+    comments_used: toNumber(row.comments_used),
+    suggested_destinations: toStringArray(row.suggested_destinations),
+    ingestion_run_id: row.ingestion_run_id,
+    ingestionRunId: row.ingestionRunId,
+    pipeline_run_id: row.pipeline_run_id,
+    run_id: row.run_id,
+    runId: row.runId,
+  };
+}
+
 function normalizeStatus(value: unknown): IntelInboxStatus {
   if (value === "saved" || value === "dismissed" || value === "promoted") return value;
   return "new";
@@ -731,15 +765,14 @@ async function fetchTranscriptSummariesByRawItemId(
 
   const { data: rawRows, error: rawError } = await db
     .from("intel_items_raw")
-    .select("id,external_id,raw_json")
+    .select("id,external_id,video_id:raw_json->>videoId")
     .in("id", uniqueRawIds);
   if (rawError) throw rawError;
 
   const videoByRawId = new Map<number, string>();
   for (const row of (rawRows || []) as Array<Record<string, unknown>>) {
     const rawId = Number(row.id);
-    const rawJson = toObject(row.raw_json);
-    const videoId = String(rawJson.videoId || row.external_id || "").trim();
+    const videoId = String(row.video_id || row.external_id || "").trim();
     if (Number.isFinite(rawId) && videoId) videoByRawId.set(rawId, videoId);
   }
 
@@ -775,7 +808,7 @@ async function fetchTranscriptSummariesByRawItemId(
 async function fetchLatestRunIds(db: ReturnType<typeof createServiceClient> | typeof supabaseAdmin) {
   const { data, error } = await db
     .from("intel_items_enriched")
-    .select("id,created_at,metadata_json")
+    .select("id,created_at,ingestion_run_id:metadata_json->>ingestion_run_id,ingestionRunId:metadata_json->>ingestionRunId,pipeline_run_id:metadata_json->>pipeline_run_id,run_id:metadata_json->>run_id,runId:metadata_json->>runId")
     .order("created_at", { ascending: false })
     .limit(250);
 
@@ -786,7 +819,7 @@ async function fetchLatestRunIds(db: ReturnType<typeof createServiceClient> | ty
       .map((row) => ({
         id: Number(row.id),
         createdAt: String(row.created_at || ""),
-        metadata: toObject(row.metadata_json),
+        metadata: compactIntelMetadata(row),
       }))
       .filter((row) => Number.isFinite(row.id))
   );
@@ -828,7 +861,7 @@ export async function getIntelInboxHealth(): Promise<IntelInboxHealth> {
       .gte("created_at", recentCutoff),
     db
       .from("intel_items_enriched")
-      .select("id,lane,metadata_json,created_at")
+      .select("id,lane,created_at,comments_used:metadata_json->>comments_used,transcript_summary_used:metadata_json->>transcript_summary_used,ingestion_run_id:metadata_json->>ingestion_run_id,ingestionRunId:metadata_json->>ingestionRunId,pipeline_run_id:metadata_json->>pipeline_run_id,run_id:metadata_json->>run_id,runId:metadata_json->>runId")
       .gte("created_at", recentCutoff)
       .order("created_at", { ascending: false })
       .limit(500),
@@ -866,7 +899,7 @@ export async function getIntelInboxHealth(): Promise<IntelInboxHealth> {
 
   const enrichedMeta = ((enrichedMetaRows || []) as Array<Record<string, unknown>>).map((row) => ({
     ...row,
-    metadata: toObject(row.metadata_json),
+    metadata: compactIntelMetadata(row),
   }));
   const redditWithDiscussion = enrichedMeta.filter((row) => toNumber(row.metadata.comments_used) > 0).length;
   const youtubeTranscriptSummaries = enrichedMeta.filter((row) => row.metadata.transcript_summary_used === true).length;
@@ -928,7 +961,7 @@ export async function listIntelInbox(options?: {
 
   let query = db
     .from("intel_items_enriched")
-    .select("id,raw_item_id,lane,summary_short,summary_display,why_it_matters,primary_topic,suggested_owner,suggested_destination,overall_score,promote_title,promote_type,promote_owner,promote_status_default,created_at,metadata_json")
+    .select("id,raw_item_id,lane,summary_short,summary_display,why_it_matters,primary_topic,suggested_owner,suggested_destination,overall_score,promote_title,promote_type,promote_owner,promote_status_default,created_at,headline_short:metadata_json->>headline_short,transcript_summary_used:metadata_json->>transcript_summary_used,comments_used:metadata_json->>comments_used,suggested_destinations:metadata_json->suggested_destinations,ingestion_run_id:metadata_json->>ingestion_run_id,ingestionRunId:metadata_json->>ingestionRunId,pipeline_run_id:metadata_json->>pipeline_run_id,run_id:metadata_json->>run_id,runId:metadata_json->>runId")
     .order("created_at", { ascending: false })
     .order("overall_score", { ascending: false })
     .limit(250);
@@ -957,7 +990,7 @@ export async function listIntelInbox(options?: {
   const { data: rawRows, error: rawRowsError } = rawIds.length
     ? await db
         .from("intel_items_raw")
-        .select("id,lane,url,canonical_url,source_context,raw_json")
+        .select("id,lane,url,canonical_url,source_context,raw_source:raw_json->>source")
         .in("id", rawIds)
     : { data: [], error: null };
 
@@ -993,7 +1026,7 @@ export async function listIntelInbox(options?: {
   const filteredItems: IntelInboxListItem[] = rows
     .map((row) => {
       const id = Number(row.id);
-      const metadata = toObject(row.metadata_json);
+      const metadata = compactIntelMetadata(row);
       const review = reviewByItem.get(id);
       const title = String(row.promote_title || metadata.headline_short || row.summary_short || `Intel item ${id}`);
       const rawSource = rawById.get(Number(row.raw_item_id)) || null;
@@ -1002,7 +1035,7 @@ export async function listIntelInbox(options?: {
         url: rawSource?.url,
         canonicalUrl: rawSource?.canonical_url,
         sourceContext: rawSource?.source_context,
-        rawJson: rawSource?.raw_json,
+        rawJson: rawSource ? { source: rawSource.raw_source } : null,
       });
       const sourceLabel = sourceLabelFromKind(sourceKind, hostnameFromUrl(rawSource?.canonical_url) || hostnameFromUrl(rawSource?.url));
       const transcriptSummary = transcriptSummaryByRawId.get(Number(row.raw_item_id)) || null;
@@ -1036,7 +1069,7 @@ export async function listIntelInbox(options?: {
         miniDescription: buildMiniDescription(summary),
         sourceKind,
         sourceLabel,
-        discussionContext: getDiscussionContext({ sourceKind, metadata, rawJson: rawSource?.raw_json }),
+        discussionContext: getDiscussionContext({ sourceKind, metadata, rawJson: rawSource ? { source: rawSource.raw_source } : null }),
         lane: typeof row.lane === "string" ? row.lane : null,
         primaryTopic: typeof row.primary_topic === "string" ? row.primary_topic : null,
         suggestedOwner: typeof row.suggested_owner === "string" ? row.suggested_owner : null,
