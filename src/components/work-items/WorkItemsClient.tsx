@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { isPublicationWorkItem } from "@/lib/publication/scheduling";
 
@@ -82,6 +82,8 @@ const STATUS_STYLES: Record<string, string> = {
   canceled: "bg-gray-500/20 text-gray-300 border-gray-500/20",
 };
 
+const FALLBACK_REFRESH_MS = 90_000;
+
 function pretty(value: string | null | undefined) {
   return value ? value.replaceAll("_", " ") : "—";
 }
@@ -151,18 +153,23 @@ export function WorkItemsClient({ initialItems, initialEvents, initialRules = []
   const [items, setItems] = useState(initialItems);
   const [events, setEvents] = useState(initialEvents);
   const [rules, setRules] = useState(initialRules);
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastRefreshAt, setLastRefreshAt] = useState<Date | null>(null);
   const [tab, setTab] = useState<Tab>("live");
   const [agentFilter, setAgentFilter] = useState("all");
   const [sourceFilter, setSourceFilter] = useState("all");
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  const refreshInFlightRef = useRef(false);
 
-  const supabase = createClient();
+  const supabase = useMemo(() => createClient(), []);
 
-  useEffect(() => {
-    let alive = true;
+  const refresh = useCallback(async (options: { includeRules?: boolean } = {}) => {
+    if (refreshInFlightRef.current) return;
+    refreshInFlightRef.current = true;
+    setRefreshing(true);
 
-    async function refresh() {
+    try {
       const [itemsRes, eventsRes] = await Promise.all([
         supabase
           .from("work_items")
@@ -177,36 +184,69 @@ export function WorkItemsClient({ initialItems, initialEvents, initialRules = []
           .limit(100),
       ]);
 
-      if (!alive) return;
       if (!itemsRes.error) setItems((itemsRes.data || []) as WorkItem[]);
       if (!eventsRes.error) setEvents((eventsRes.data || []) as WorkEvent[]);
-      fetch("/api/work-items/recurring-rules").then((res) => res.ok ? res.json() : null).then((body) => {
-        if (alive && body?.rules) setRules(body.rules as RecurringWorkRule[]);
-      }).catch(() => {});
+      if (options.includeRules) {
+        const body = await fetch("/api/work-items/recurring-rules").then((res) => res.ok ? res.json() : null).catch(() => null);
+        if (body?.rules) setRules(body.rules as RecurringWorkRule[]);
+      }
+      setLastRefreshAt(new Date());
+    } finally {
+      refreshInFlightRef.current = false;
+      setRefreshing(false);
     }
+  }, [supabase]);
+
+  useEffect(() => {
+    const upsertItem = (item: WorkItem) => {
+      setItems((current) => {
+        const index = current.findIndex((candidate) => candidate.id === item.id);
+        if (index === -1) return [item, ...current].slice(0, 200);
+        const next = [...current];
+        next[index] = { ...next[index], ...item };
+        return next;
+      });
+    };
 
     const workChannel = supabase
       .channel("work-queue-items")
-      .on("postgres_changes", { event: "*", schema: "public", table: "work_items" }, refresh)
+      .on("postgres_changes", { event: "*", schema: "public", table: "work_items" }, (payload) => {
+        if (payload.eventType === "DELETE") {
+          const item = payload.old as { id?: string };
+          if (item.id) setItems((current) => current.filter((candidate) => candidate.id !== item.id));
+          return;
+        }
+        upsertItem(payload.new as WorkItem);
+      })
       .subscribe();
 
     const eventChannel = supabase
       .channel("work-queue-events")
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "event_log", filter: "domain=eq.work" }, refresh)
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "event_log", filter: "domain=eq.work" }, (payload) => {
+        const event = payload.new as WorkEvent;
+        setEvents((current) => [event, ...current].slice(0, 100));
+      })
       .subscribe();
 
     const timer = window.setInterval(() => {
       setNow(Date.now());
-      refresh();
-    }, 10_000);
+      if (document.visibilityState === "visible") void refresh();
+    }, FALLBACK_REFRESH_MS);
+
+    const handleVisibleRefresh = () => {
+      if (document.visibilityState === "visible") void refresh({ includeRules: true });
+    };
+    window.addEventListener("focus", handleVisibleRefresh);
+    document.addEventListener("visibilitychange", handleVisibleRefresh);
 
     return () => {
-      alive = false;
       supabase.removeChannel(workChannel);
       supabase.removeChannel(eventChannel);
       window.clearInterval(timer);
+      window.removeEventListener("focus", handleVisibleRefresh);
+      document.removeEventListener("visibilitychange", handleVisibleRefresh);
     };
-  }, [supabase]);
+  }, [refresh, supabase]);
 
   const filteredItems = useMemo(() => {
     return items.filter((item) => {
@@ -281,6 +321,16 @@ export function WorkItemsClient({ initialItems, initialEvents, initialRules = []
           <option value="all">All sources</option>
           {sources.map((source) => <option key={source} value={source}>{pretty(source)}</option>)}
         </select>
+
+        <button
+          type="button"
+          onClick={() => refresh({ includeRules: true })}
+          disabled={refreshing}
+          className="rounded-lg border border-gray-700 bg-white/[0.03] px-3 py-1.5 text-sm font-medium text-gray-300 transition hover:border-gray-600 hover:bg-white/[0.06] hover:text-white disabled:cursor-wait disabled:opacity-60"
+          title={lastRefreshAt ? `Last refreshed ${formatDate(lastRefreshAt.toISOString())}` : "Refresh work queue"}
+        >
+          {refreshing ? "Refreshing..." : "Refresh"}
+        </button>
       </div>
 
       {tab === "live" && <LiveBoardTab inProgress={inProgress} readyNow={readyNow} blocked={blocked} failed={failed} events={events} items={items} onOpen={setSelectedItemId} onRequeue={(item) => {

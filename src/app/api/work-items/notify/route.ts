@@ -67,6 +67,9 @@ function buildProjectContext(project: ProjectContextRow) {
 }
 
 function buildWorkItemSessionKey(agentId: string, workItemId: string, payload?: Record<string, unknown> | null) {
+  const dispatchSessionKey = typeof payload?.dispatch_session_key === "string" ? payload.dispatch_session_key : "";
+  if (dispatchSessionKey) return dispatchSessionKey;
+
   const dispatchSessionId = typeof payload?.dispatch_session_id === "string" ? payload.dispatch_session_id : "";
   if (dispatchSessionId) {
     return `agent:${agentId}:mission-control:work-item:${workItemId}:dispatch:${dispatchSessionId}`;
@@ -93,6 +96,15 @@ function buildWorkItemStatusCommand(workItemId: string, status: "in_progress" | 
   const script = `set -a; [ -f "${envLocal}" ] && . "${envLocal}"; [ -f "${envFile}" ] && . "${envFile}"; set +a; curl -s -X PATCH -H "Authorization: Bearer $AGENT_API_KEY" -H "Content-Type: application/json" "${url}" -d '${payload}'`;
   return `bash -lc ${shellSingleQuote(script)}`;
 }
+
+type WakeAgentResult = {
+  ok: boolean;
+  mode: "cron_agent_turn" | "chat_completions_spawn";
+  cronJobId?: string | null;
+  cronRunId?: string | null;
+  sessionKey?: string | null;
+  error?: string | null;
+};
 
 async function checkModelHealth(agentId = "systems") {
   const gatewayUrl = process.env.OPENCLAW_GATEWAY_URL || "http://127.0.0.1:18789";
@@ -141,7 +153,106 @@ async function checkModelHealth(agentId = "systems") {
   }
 }
 
-async function wakeAgent(agentId: string, workItemId: string, message: string, workPayload?: Record<string, unknown> | null): Promise<boolean> {
+function runOpenClawCronWake(args: string[], timeoutMs: number): Promise<{ ok: boolean; stdout: string; stderr: string; error?: string }> {
+  const openclawBin = process.env.OPENCLAW_BIN || "/opt/homebrew/bin/openclaw";
+
+  return new Promise((resolve) => {
+    const child = spawn(openclawBin, args, {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        PATH: ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", process.env.PATH || ""].filter(Boolean).join(":"),
+        HOME: process.env.HOME || "/Users/joaco",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      resolve({ ok: false, stdout, stderr, error: `openclaw_cron_add_timeout_after_${timeoutMs}ms` });
+    }, timeoutMs);
+
+    child.stdout.on("data", (chunk) => { stdout += String(chunk); });
+    child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      resolve({ ok: false, stdout, stderr, error: err.message });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ ok: code === 0, stdout, stderr, error: code === 0 ? undefined : `openclaw_cron_add_exit_${code}` });
+    });
+  });
+}
+
+async function scheduleCronWake(agentId: string, workItemId: string, message: string, workPayload?: Record<string, unknown> | null): Promise<WakeAgentResult> {
+  const sessionKey = buildWorkItemSessionKey(agentId, workItemId, workPayload);
+  const wakeDelay = process.env.OPENCLAW_WORK_ITEM_CRON_DELAY || "10s";
+  const addTimeoutMs = Number(process.env.OPENCLAW_WORK_ITEM_CRON_ADD_TIMEOUT_MS || 10000);
+  const agentTimeoutSeconds = String(process.env.OPENCLAW_WORK_ITEM_AGENT_TIMEOUT_SECONDS || 0);
+  const args = [
+    "cron", "add",
+    "--agent", agentId,
+    "--name", `Mission Control work item ${workItemId}`,
+    "--at", wakeDelay,
+    "--session", "isolated",
+    "--session-key", sessionKey,
+    "--message", message,
+    "--no-deliver",
+    "--delete-after-run",
+    "--timeout-seconds", agentTimeoutSeconds,
+    "--timeout", String(addTimeoutMs),
+    "--json",
+  ];
+
+  const result = await runOpenClawCronWake(args, addTimeoutMs + 2000);
+  if (!result.ok) {
+    return {
+      ok: false,
+      mode: "cron_agent_turn",
+      sessionKey,
+      error: result.error || result.stderr.slice(0, 500) || result.stdout.slice(0, 500) || "openclaw_cron_add_failed",
+    };
+  }
+
+  let body: { id?: unknown; sessionKey?: unknown } | null = null;
+  try { body = JSON.parse(result.stdout) as { id?: unknown; sessionKey?: unknown }; } catch { body = null; }
+  const cronJobId = typeof body?.id === "string" ? body.id : "";
+  if (!cronJobId) {
+    return {
+      ok: false,
+      mode: "cron_agent_turn",
+      sessionKey,
+      error: result.stdout.slice(0, 500) || "openclaw_cron_add_missing_job_id",
+    };
+  }
+
+  const runResult = await runOpenClawCronWake(["cron", "run", cronJobId], addTimeoutMs + 2000);
+  if (!runResult.ok) {
+    return {
+      ok: false,
+      mode: "cron_agent_turn",
+      cronJobId,
+      sessionKey,
+      error: runResult.error || runResult.stderr.slice(0, 500) || runResult.stdout.slice(0, 500) || "openclaw_cron_run_failed",
+    };
+  }
+
+  let runBody: { runId?: unknown } | null = null;
+  try { runBody = JSON.parse(runResult.stdout) as { runId?: unknown }; } catch { runBody = null; }
+  await runOpenClawCronWake(["cron", "rm", cronJobId], addTimeoutMs + 2000).catch(() => null);
+
+  return {
+    ok: true,
+    mode: "cron_agent_turn",
+    cronJobId,
+    cronRunId: typeof runBody?.runId === "string" ? runBody.runId : null,
+    sessionKey: typeof body?.sessionKey === "string" ? body.sessionKey : sessionKey,
+  };
+}
+
+async function wakeAgentViaChatCompletions(agentId: string, workItemId: string, message: string, workPayload?: Record<string, unknown> | null): Promise<boolean> {
   const gatewayUrl = process.env.OPENCLAW_GATEWAY_URL || "http://127.0.0.1:18789";
   const gatewayToken = process.env.OPENCLAW_GATEWAY_TOKEN;
 
@@ -243,6 +354,22 @@ async function restoreReady(reason) {
     console.error(`[notify-work-item] failed to spawn detached wake for ${agentId}:`, message);
     return false;
   }
+}
+
+async function wakeAgent(agentId: string, workItemId: string, message: string, workPayload?: Record<string, unknown> | null): Promise<WakeAgentResult> {
+  const configuredMode = process.env.OPENCLAW_WORK_ITEM_WAKE_MODE || "cron";
+  if (configuredMode !== "chat_completions") {
+    const cronWake = await scheduleCronWake(agentId, workItemId, message, workPayload);
+    if (cronWake.ok || configuredMode === "cron") return cronWake;
+  }
+
+  const ok = await wakeAgentViaChatCompletions(agentId, workItemId, message, workPayload);
+  return {
+    ok,
+    mode: "chat_completions_spawn",
+    sessionKey: buildWorkItemSessionKey(agentId, workItemId, workPayload),
+    error: ok ? null : "chat_completions_wake_failed",
+  };
 }
 
 export async function GET(request: NextRequest) {
@@ -374,8 +501,8 @@ Fail it:
 ${failCommand}
 \`\`\``;
 
-  let woke = await wakeAgent(routing.agentId, item.id, message, workPayload);
-  if (!woke) {
+  let wake = await wakeAgent(routing.agentId, item.id, message, workPayload);
+  if (!wake.ok) {
     const { data: latestItem } = await db
       .from("work_items")
       .select("status")
@@ -387,12 +514,12 @@ ${failCommand}
     // surface it instead of hiding the failure as a successful dispatch.
     if (latestItem?.status === "done") {
       console.log(`[notify-work-item] ${agent} wake timed out, but work item is ${latestItem.status}; treating as success`);
-      woke = true;
+      wake = { ...wake, ok: true };
     }
   }
 
-  if (!woke) {
-    return NextResponse.json({ ok: false, agent, woke, workItemId: item.id }, { status: 503 });
+  if (!wake.ok) {
+    return NextResponse.json({ ok: false, agent, woke: false, workItemId: item.id, wakeMode: wake.mode, error: wake.error || null }, { status: 503 });
   }
 
   const webhookUrl = process.env.DISCORD_TASK_ROUTER_WEBHOOK;
@@ -413,9 +540,12 @@ ${failCommand}
   return NextResponse.json({
     ok: true,
     agent,
-    woke,
+    woke: wake.ok,
     workItemId: item.id,
-    wakeMode: "detached_spawn",
+    wakeMode: wake.mode,
+    dispatchCronJobId: wake.cronJobId || null,
+    dispatchCronRunId: wake.cronRunId || null,
     dispatchSessionId: typeof workPayload.dispatch_session_id === "string" ? workPayload.dispatch_session_id : null,
+    dispatchSessionKey: wake.sessionKey || null,
   });
 }

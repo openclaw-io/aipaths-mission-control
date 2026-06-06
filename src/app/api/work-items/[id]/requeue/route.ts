@@ -45,10 +45,17 @@ export async function POST(
     "unclaimed_notify_last_requeued_at",
     "unclaimed_notify_limit",
     "dispatch_session_id",
+    "dispatch_session_key",
     "dispatch_session_started_at",
+    "dispatch_wake_mode",
+    "dispatch_cron_job_id",
+    "dispatch_cron_run_id",
     "dispatch_escalation",
     "requires_system_attention",
     "operator_alert",
+    "stale_claim_deferred_count",
+    "stale_claim_last_deferred_at",
+    "stale_claim_session_observation",
   ]) {
     delete restoredPayload[key];
   }

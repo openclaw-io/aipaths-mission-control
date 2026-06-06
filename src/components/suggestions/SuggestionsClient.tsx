@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 
 export interface SuggestionItem {
@@ -55,17 +55,24 @@ function sortByRiskThenCreated(a: SuggestionItem, b: SuggestionItem) {
   return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
 }
 
+const FALLBACK_REFRESH_MS = 90_000;
+
 export function SuggestionsClient({ initialItems }: { initialItems: SuggestionItem[] }) {
   const [items, setItems] = useState(initialItems);
   const [agentFilter, setAgentFilter] = useState("all");
   const [riskFilter, setRiskFilter] = useState("all");
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastRefreshAt, setLastRefreshAt] = useState<Date | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const supabase = createClient();
+  const refreshInFlightRef = useRef(false);
+  const supabase = useMemo(() => createClient(), []);
 
-  useEffect(() => {
-    let alive = true;
-    async function refresh() {
+  const refresh = useCallback(async () => {
+    if (refreshInFlightRef.current) return;
+    refreshInFlightRef.current = true;
+    setRefreshing(true);
+    try {
       const { data, error: refreshError } = await supabase
         .from("work_items")
         .select("id,title,status,priority,owner_agent,target_agent_id,requested_by,source_type,source_id,kind,created_at,updated_at,scheduled_for,payload")
@@ -73,13 +80,56 @@ export function SuggestionsClient({ initialItems }: { initialItems: SuggestionIt
         .eq("payload->>requires_human_approval", "true")
         .order("created_at", { ascending: false })
         .limit(200);
-      if (!alive || refreshError) return;
+      if (refreshError) return;
       setItems((data || []) as SuggestionItem[]);
+      setLastRefreshAt(new Date());
+    } finally {
+      refreshInFlightRef.current = false;
+      setRefreshing(false);
     }
-    const channel = supabase.channel("suggestions-work-items").on("postgres_changes", { event: "*", schema: "public", table: "work_items" }, refresh).subscribe();
-    const timer = window.setInterval(refresh, 10_000);
-    return () => { alive = false; supabase.removeChannel(channel); window.clearInterval(timer); };
   }, [supabase]);
+
+  useEffect(() => {
+    const upsertOrRemove = (item: SuggestionItem) => {
+      setItems((current) => {
+        if (!isPendingSuggestion(item)) return current.filter((candidate) => candidate.id !== item.id);
+        const index = current.findIndex((candidate) => candidate.id === item.id);
+        if (index === -1) return [item, ...current].slice(0, 200);
+        const next = [...current];
+        next[index] = { ...next[index], ...item };
+        return next;
+      });
+    };
+
+    const channel = supabase
+      .channel("suggestions-work-items")
+      .on("postgres_changes", { event: "*", schema: "public", table: "work_items" }, (payload) => {
+        if (payload.eventType === "DELETE") {
+          const item = payload.old as { id?: string };
+          if (item.id) setItems((current) => current.filter((candidate) => candidate.id !== item.id));
+          return;
+        }
+        upsertOrRemove(payload.new as SuggestionItem);
+      })
+      .subscribe();
+
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void refresh();
+    }, FALLBACK_REFRESH_MS);
+
+    const handleVisibleRefresh = () => {
+      if (document.visibilityState === "visible") void refresh();
+    };
+    window.addEventListener("focus", handleVisibleRefresh);
+    document.addEventListener("visibilitychange", handleVisibleRefresh);
+
+    return () => {
+      supabase.removeChannel(channel);
+      window.clearInterval(timer);
+      window.removeEventListener("focus", handleVisibleRefresh);
+      document.removeEventListener("visibilitychange", handleVisibleRefresh);
+    };
+  }, [refresh, supabase]);
 
   const agents = useMemo(() => Array.from(new Set(items.map(agentFor))).sort(), [items]);
   const risks = useMemo(() => Array.from(new Set(items.map((item) => payloadString(item.payload, "risk") || "unknown"))).sort(), [items]);
@@ -123,6 +173,15 @@ export function SuggestionsClient({ initialItems }: { initialItems: SuggestionIt
           <option value="all">All risks</option>
           {risks.map((risk) => <option key={risk} value={risk}>{pretty(risk)}</option>)}
         </select>
+        <button
+          type="button"
+          onClick={() => refresh()}
+          disabled={refreshing}
+          className="rounded-lg border border-gray-700 bg-white/[0.03] px-3 py-1.5 text-sm font-medium text-gray-300 transition hover:border-gray-600 hover:bg-white/[0.06] hover:text-white disabled:cursor-wait disabled:opacity-60"
+          title={lastRefreshAt ? `Last refreshed ${formatDate(lastRefreshAt.toISOString())}` : "Refresh suggestions"}
+        >
+          {refreshing ? "Refreshing..." : "Refresh"}
+        </button>
       </div>
 
       {error && <p className="rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-200">{error}</p>}
