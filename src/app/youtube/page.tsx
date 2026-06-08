@@ -1,5 +1,6 @@
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { YouTubeDecisionBoard } from "@/components/youtube/YouTubeDecisionBoard";
+import { COMPACT_LINKED_WORK_ITEM_SELECT, compactWorkItemRow } from "@/lib/work-items/compact-payload";
 
 export const dynamic = "force-dynamic";
 
@@ -47,8 +48,9 @@ export default async function YouTubePage() {
       .order("created_at", { ascending: false }),
     supabaseAdmin
       .from("work_items")
-      .select("id, source_id, source_type, title, status, owner_agent, target_agent_id, created_at, scheduled_for, payload")
+      .select(COMPACT_LINKED_WORK_ITEM_SELECT)
       .in("source_type", ["pipeline_item", "service"])
+      .eq("payload->>pipeline_type", "video")
       .order("created_at", { ascending: false }),
   ]);
 
@@ -60,10 +62,10 @@ export default async function YouTubePage() {
   }
 
   const videos: VideoPipelineItem[] = data ?? [];
-  const linkedWorkItems: LinkedWorkItem[] = (workItems ?? []).filter((item) => {
+  const linkedWorkItems = (workItems ?? []).map((item) => compactWorkItemRow(item as unknown as Record<string, unknown>)).filter((item) => {
     const payload = item.payload || {};
     return payload.pipeline_type === "video";
-  });
+  }) as unknown as LinkedWorkItem[];
 
   return <YouTubeDecisionBoard initialItems={videos} initialWorkItems={linkedWorkItems} />;
 }

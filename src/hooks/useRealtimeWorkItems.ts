@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import type { LinkedWorkItem } from "@/app/blogs/page";
 
 export function useRealtimeWorkItems(initialItems: LinkedWorkItem[]): LinkedWorkItem[] {
   const [items, setItems] = useState<LinkedWorkItem[]>(initialItems);
-  const supabase = createClient();
+  const supabase = useMemo(() => createClient(), []);
 
   useEffect(() => {
     setItems(initialItems);

@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import { createClient } from "@/lib/supabase/client";
 import type { BlogItem } from "@/app/blogs/page";
 
 export function useRealtimeBlogs(initialBlogs: BlogItem[]): [BlogItem[], Dispatch<SetStateAction<BlogItem[]>>] {
   const [blogs, setBlogs] = useState<BlogItem[]>(initialBlogs);
-  const supabase = createClient();
+  const supabase = useMemo(() => createClient(), []);
 
   useEffect(() => {
     setBlogs(initialBlogs);

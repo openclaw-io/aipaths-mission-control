@@ -1,5 +1,7 @@
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { CommunityClient } from "@/components/community/CommunityClient";
+import { COMPACT_LINKED_WORK_ITEM_SELECT, compactWorkItemRow } from "@/lib/work-items/compact-payload";
+import { COMPACT_COMMUNITY_PIPELINE_SELECT, compactCommunityPipelineItem } from "@/lib/pipeline-items/compact-metadata";
 
 export const dynamic = "force-dynamic";
 
@@ -40,13 +42,14 @@ export default async function CommunityPage() {
   const [{ data, error }, { data: workItems, error: workError }] = await Promise.all([
     supabaseAdmin
       .from("pipeline_items")
-      .select("id, pipeline_type, title, slug, status, priority, owner_agent, requested_by, source_type, source_id, published_at, current_url, content_path, content_format, metadata, created_at, updated_at")
+      .select(COMPACT_COMMUNITY_PIPELINE_SELECT)
       .eq("pipeline_type", "community_post")
       .order("created_at", { ascending: false }),
     supabaseAdmin
       .from("work_items")
-      .select("id, source_id, source_type, title, status, owner_agent, target_agent_id, created_at, scheduled_for, payload")
+      .select(COMPACT_LINKED_WORK_ITEM_SELECT)
       .in("source_type", ["pipeline_item", "service"])
+      .eq("payload->>pipeline_type", "community_post")
       .order("created_at", { ascending: false }),
   ]);
 
@@ -57,11 +60,11 @@ export default async function CommunityPage() {
     console.error("[CommunityPage] Failed to fetch work items:", workError);
   }
 
-  const communityItems: CommunityItem[] = data ?? [];
-  const linkedWorkItems: LinkedWorkItem[] = (workItems ?? []).filter((item) => {
+  const communityItems = (data ?? []).map((item) => compactCommunityPipelineItem(item as unknown as Record<string, unknown>)) as unknown as CommunityItem[];
+  const linkedWorkItems = (workItems ?? []).map((item) => compactWorkItemRow(item as unknown as Record<string, unknown>)).filter((item) => {
     const payload = item.payload || {};
     return payload.pipeline_type === "community_post";
-  });
+  }) as unknown as LinkedWorkItem[];
 
   return <CommunityClient initialItems={communityItems} initialWorkItems={linkedWorkItems} />;
 }
