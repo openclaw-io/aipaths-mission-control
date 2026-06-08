@@ -69,6 +69,7 @@ export function GuidesClient({ initialGuides, initialWorkItems }: { initialGuide
   const [reviewId, setReviewId] = useState<string | null>(null);
   const [reviewNotes, setReviewNotes] = useState("");
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [loadingDetailId, setLoadingDetailId] = useState<string | null>(null);
   const [tab, setTab] = useState<TabKey>("inbox");
 
   const inboxGrouped = useMemo(() => {
@@ -89,10 +90,24 @@ export function GuidesClient({ initialGuides, initialWorkItems }: { initialGuide
   const publishedItems = useMemo(() => guides.filter((item) => item.status === "live"), [guides]);
   const archivedItems = useMemo(() => guides.filter((item) => item.status === "archived"), [guides]);
 
+  async function loadFullItem(id: string) {
+    setLoadingDetailId(id);
+    try {
+      const res = await fetch(`/api/pipeline-items/${id}`);
+      if (!res.ok) return;
+      const body = (await res.json()) as { item?: GuideItem };
+      if (!body.item) return;
+      setGuides((prev) => prev.map((guide) => (guide.id === id ? { ...guide, ...body.item } : guide)));
+    } finally {
+      setLoadingDetailId((current) => (current === id ? null : current));
+    }
+  }
+
   function openReview(item: GuideItem) {
     setSelectedId(null);
     setReviewId(item.id);
     setReviewNotes("");
+    void loadFullItem(item.id);
   }
 
   function closeReview() {
@@ -235,6 +250,7 @@ export function GuidesClient({ initialGuides, initialWorkItems }: { initialGuide
       {selectedReviewItem && (
         <ReviewDrawer
           item={selectedReviewItem}
+          loading={loadingDetailId === selectedReviewItem.id}
           notes={reviewNotes}
           busyAction={busyAction}
           onNotesChange={setReviewNotes}
@@ -250,6 +266,7 @@ export function GuidesClient({ initialGuides, initialWorkItems }: { initialGuide
 
 function ReviewDrawer({
   item,
+  loading,
   notes,
   busyAction,
   onNotesChange,
@@ -259,6 +276,7 @@ function ReviewDrawer({
   onReject,
 }: {
   item: GuideItem;
+  loading: boolean;
   notes: string;
   busyAction: string | null;
   onNotesChange: (value: string) => void;
@@ -268,7 +286,7 @@ function ReviewDrawer({
   onReject: () => void;
 }) {
   const metadata = getMetadata(item);
-  const markdown = metadata.draft_markdown || metadata.draft_summary || "No draft content found on this guide item yet.";
+  const markdown = metadata.draft_markdown || (loading ? "Loading full guide content..." : metadata.draft_summary) || "No draft content found on this guide item yet.";
   const cleanBody = markdown.replace(/^---[\s\S]*?---\s*/, "").trim();
   const wordCount = cleanBody ? cleanBody.split(/\s+/).length : 0;
   const readMinutes = Math.max(1, Math.round(wordCount / 220));

@@ -1,5 +1,6 @@
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { WorkItemsClient, type RecurringWorkRule, type WorkEvent, type WorkItem } from "@/components/work-items/WorkItemsClient";
+import { COMPACT_WORK_QUEUE_ITEM_SELECT, compactWorkItemRow } from "@/lib/work-items/compact-payload";
 
 export const dynamic = "force-dynamic";
 
@@ -7,7 +8,7 @@ export default async function WorkItemsPage() {
   const [itemsRes, eventsRes, rulesRes] = await Promise.all([
     supabaseAdmin
       .from("work_items")
-      .select("id,title,status,priority,owner_agent,target_agent_id,requested_by,source_type,source_id,kind,created_at,updated_at,started_at,completed_at,scheduled_for,payload")
+      .select(COMPACT_WORK_QUEUE_ITEM_SELECT)
       .order("created_at", { ascending: false })
       .limit(200),
     supabaseAdmin
@@ -34,5 +35,7 @@ export default async function WorkItemsPage() {
     console.error("[WorkItemsPage] Failed to fetch recurring rules:", rulesRes.error);
   }
 
-  return <WorkItemsClient initialItems={(itemsRes.data || []) as WorkItem[]} initialEvents={(eventsRes.data || []) as WorkEvent[]} initialRules={(rulesRes.data || []) as RecurringWorkRule[]} />;
+  const initialItems = (itemsRes.data || []).map((item) => compactWorkItemRow(item as unknown as Record<string, unknown>)) as unknown as WorkItem[];
+
+  return <WorkItemsClient initialItems={initialItems} initialEvents={(eventsRes.data || []) as WorkEvent[]} initialRules={(rulesRes.data || []) as RecurringWorkRule[]} />;
 }

@@ -82,6 +82,7 @@ export function BlogsClient({ initialBlogs, initialWorkItems }: { initialBlogs: 
   const [reviewNotes, setReviewNotes] = useState("");
   const [finalCheckNotes, setFinalCheckNotes] = useState("");
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [loadingDetailId, setLoadingDetailId] = useState<string | null>(null);
   const [tab, setTab] = useState<TabKey>("inbox");
 
   const inboxGrouped = useMemo(() => {
@@ -104,11 +105,25 @@ export function BlogsClient({ initialBlogs, initialWorkItems }: { initialBlogs: 
   const publishedItems = useMemo(() => blogs.filter((item) => item.status === "live"), [blogs]);
   const archivedItems = useMemo(() => blogs.filter((item) => item.status === "archived"), [blogs]);
 
+  async function loadFullItem(id: string) {
+    setLoadingDetailId(id);
+    try {
+      const res = await fetch(`/api/pipeline-items/${id}`);
+      if (!res.ok) return;
+      const body = (await res.json()) as { item?: BlogItem };
+      if (!body.item) return;
+      setBlogs((prev) => prev.map((blog) => (blog.id === id ? { ...blog, ...body.item } : blog)));
+    } finally {
+      setLoadingDetailId((current) => (current === id ? null : current));
+    }
+  }
+
   function openReview(item: BlogItem) {
     setSelectedId(null);
     setFinalCheckId(null);
     setReviewId(item.id);
     setReviewNotes("");
+    void loadFullItem(item.id);
   }
 
   function closeReview() {
@@ -121,6 +136,7 @@ export function BlogsClient({ initialBlogs, initialWorkItems }: { initialBlogs: 
     setReviewId(null);
     setFinalCheckId(item.id);
     setFinalCheckNotes("");
+    void loadFullItem(item.id);
   }
 
   function closeFinalCheck() {
@@ -278,6 +294,7 @@ export function BlogsClient({ initialBlogs, initialWorkItems }: { initialBlogs: 
       {selectedFinalCheckItem && (
         <FinalCheckDrawer
           item={selectedFinalCheckItem}
+          loading={loadingDetailId === selectedFinalCheckItem.id}
           notes={finalCheckNotes}
           busyAction={busyAction}
           onNotesChange={setFinalCheckNotes}
@@ -291,6 +308,7 @@ export function BlogsClient({ initialBlogs, initialWorkItems }: { initialBlogs: 
       {selectedReviewItem && (
         <ReviewDrawer
           item={selectedReviewItem}
+          loading={loadingDetailId === selectedReviewItem.id}
           notes={reviewNotes}
           busyAction={busyAction}
           onNotesChange={setReviewNotes}
@@ -361,6 +379,7 @@ function FinalCheckList({ items, workItems, onOpen }: { items: BlogItem[]; workI
 
 function FinalCheckDrawer({
   item,
+  loading,
   notes,
   busyAction,
   onNotesChange,
@@ -370,6 +389,7 @@ function FinalCheckDrawer({
   onReject,
 }: {
   item: BlogItem;
+  loading: boolean;
   notes: string;
   busyAction: string | null;
   onNotesChange: (value: string) => void;
@@ -381,10 +401,16 @@ function FinalCheckDrawer({
   const metadata = getMetadata(item);
   const esMarkdown = metadata.draft_markdown || metadata.draft_summary || "No Spanish draft content found.";
   const enMarkdown = getEnglishMarkdown(metadata);
+  const hasEnglishContent = Boolean(
+    metadata.localization?.en?.draft_markdown ||
+      metadata.localization?.en?.markdown ||
+      metadata.localization?.en?.content ||
+      metadata.localization?.en?.body
+  );
   const hero = getHeroImage(metadata);
   const heroSrc = getHeroImageSrc(item, metadata);
   const [contentTab, setContentTab] = useState<"es" | "en">("en");
-  const currentMarkdown = contentTab === "es" ? esMarkdown : enMarkdown;
+  const currentMarkdown = loading && (contentTab === "es" ? !metadata.draft_markdown : !hasEnglishContent) ? "Loading full blog content..." : contentTab === "es" ? esMarkdown : enMarkdown;
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-black/70 backdrop-blur-sm" onClick={onClose}>
@@ -467,6 +493,7 @@ function FinalCheckDrawer({
 
 function ReviewDrawer({
   item,
+  loading,
   notes,
   busyAction,
   onNotesChange,
@@ -476,6 +503,7 @@ function ReviewDrawer({
   onReject,
 }: {
   item: BlogItem;
+  loading: boolean;
   notes: string;
   busyAction: string | null;
   onNotesChange: (value: string) => void;
@@ -485,7 +513,7 @@ function ReviewDrawer({
   onReject: () => void;
 }) {
   const metadata = getMetadata(item);
-  const markdown = metadata.draft_markdown || metadata.draft_summary || "No draft content found on this blog item yet.";
+  const markdown = metadata.draft_markdown || (loading ? "Loading full blog content..." : metadata.draft_summary) || "No draft content found on this blog item yet.";
   const cleanBody = markdown.replace(/^---[\s\S]*?---\s*/, "").trim();
   const wordCount = cleanBody ? cleanBody.split(/\s+/).length : 0;
   const readMinutes = Math.max(1, Math.round(wordCount / 220));

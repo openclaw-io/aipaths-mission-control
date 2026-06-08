@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { isPublicationWorkItem } from "@/lib/publication/scheduling";
+import { COMPACT_WORK_QUEUE_ITEM_SELECT, compactWorkItemRow } from "@/lib/work-items/compact-payload";
 
 type Tab = "live" | "calendar" | "recurring";
 
@@ -173,7 +174,7 @@ export function WorkItemsClient({ initialItems, initialEvents, initialRules = []
       const [itemsRes, eventsRes] = await Promise.all([
         supabase
           .from("work_items")
-          .select("id,title,status,priority,owner_agent,target_agent_id,requested_by,source_type,source_id,kind,created_at,updated_at,started_at,completed_at,scheduled_for,payload")
+          .select(COMPACT_WORK_QUEUE_ITEM_SELECT)
           .order("created_at", { ascending: false })
           .limit(200),
         supabase
@@ -184,7 +185,7 @@ export function WorkItemsClient({ initialItems, initialEvents, initialRules = []
           .limit(100),
       ]);
 
-      if (!itemsRes.error) setItems((itemsRes.data || []) as WorkItem[]);
+      if (!itemsRes.error) setItems((itemsRes.data || []).map((item) => compactWorkItemRow(item as unknown as Record<string, unknown>)) as unknown as WorkItem[]);
       if (!eventsRes.error) setEvents((eventsRes.data || []) as WorkEvent[]);
       if (options.includeRules) {
         const body = await fetch("/api/work-items/recurring-rules").then((res) => res.ok ? res.json() : null).catch(() => null);
@@ -247,6 +248,26 @@ export function WorkItemsClient({ initialItems, initialEvents, initialRules = []
       document.removeEventListener("visibilitychange", handleVisibleRefresh);
     };
   }, [refresh, supabase]);
+
+  useEffect(() => {
+    if (!selectedItemId) return;
+    let cancelled = false;
+
+    fetch(`/api/work-items/${selectedItemId}`)
+      .then(async (res) => {
+        if (!res.ok) return null;
+        return (await res.json()) as { item?: WorkItem };
+      })
+      .then((body) => {
+        if (cancelled || !body?.item) return;
+        setItems((current) => current.map((item) => item.id === body.item!.id ? { ...item, ...body.item } : item));
+      })
+      .catch(() => null);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedItemId]);
 
   const filteredItems = useMemo(() => {
     return items.filter((item) => {
