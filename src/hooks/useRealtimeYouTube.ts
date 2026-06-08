@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import { createClient } from "@/lib/supabase/client";
 import type { VideoPipelineItem } from "@/app/youtube/page";
 
 export function useRealtimeYouTube(initialItems: VideoPipelineItem[]): [VideoPipelineItem[], Dispatch<SetStateAction<VideoPipelineItem[]>>] {
   const [items, setItems] = useState<VideoPipelineItem[]>(initialItems);
-  const supabase = createClient();
+  const supabase = useMemo(() => createClient(), []);
 
   useEffect(() => {
     setItems(initialItems);

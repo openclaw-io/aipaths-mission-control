@@ -1,5 +1,7 @@
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { GuidesClient } from "@/components/guides/GuidesClient";
+import { COMPACT_LINKED_WORK_ITEM_SELECT, compactWorkItemRow } from "@/lib/work-items/compact-payload";
+import { COMPACT_EDITORIAL_PIPELINE_SELECT, compactEditorialPipelineItem } from "@/lib/pipeline-items/compact-metadata";
 
 export const dynamic = "force-dynamic";
 
@@ -42,13 +44,14 @@ export default async function GuidesPage() {
   const [{ data, error }, { data: workItems, error: workError }] = await Promise.all([
     supabaseAdmin
       .from("pipeline_items")
-      .select("id, pipeline_type, title, slug, status, priority, owner_agent, requested_by, source_type, source_id, scheduled_for, published_at, current_url, content_path, content_format, metadata, created_at, updated_at")
+      .select(COMPACT_EDITORIAL_PIPELINE_SELECT)
       .in("pipeline_type", ["doc", "guide"])
       .order("created_at", { ascending: false }),
     supabaseAdmin
       .from("work_items")
-      .select("id, source_id, source_type, title, status, owner_agent, target_agent_id, created_at, scheduled_for, payload")
+      .select(COMPACT_LINKED_WORK_ITEM_SELECT)
       .in("source_type", ["pipeline_item", "service"])
+      .in("payload->>pipeline_type", ["doc", "guide"])
       .order("created_at", { ascending: false }),
   ]);
 
@@ -59,12 +62,12 @@ export default async function GuidesPage() {
     console.error("[GuidesPage] Failed to fetch work items:", workError);
   }
 
-  const guides: GuideItem[] = data ?? [];
-  const linkedWorkItems: LinkedWorkItem[] = (workItems ?? []).filter((item) => {
+  const guides = (data ?? []).map((item) => compactEditorialPipelineItem(item as unknown as Record<string, unknown>)) as unknown as GuideItem[];
+  const linkedWorkItems = (workItems ?? []).map((item) => compactWorkItemRow(item as unknown as Record<string, unknown>)).filter((item) => {
     const payload = item.payload || {};
     const isLegacyManualTransition = item.source_type === "service" && payload.trigger === "manual_transition";
     return ["doc", "guide"].includes(String(payload.pipeline_type)) && !isLegacyManualTransition;
-  });
+  }) as unknown as LinkedWorkItem[];
 
   return <GuidesClient initialGuides={guides} initialWorkItems={linkedWorkItems} />;
 }

@@ -51,20 +51,44 @@ function renderMarkdown(text: string): string {
 
 export function MemoryEntryCard({ entry }: { entry: MemoryEntry }) {
   const [expanded, setExpanded] = useState(false);
+  const [content, setContent] = useState(entry.content ?? "");
+  const [loaded, setLoaded] = useState(entry.content_loaded === true || Boolean(entry.content));
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const agentBadge = getAgentBadgeClass(entry.agent);
   const typeBadge = TYPE_COLORS[entry.type] ?? "bg-gray-500/20 text-gray-400";
 
   const plainPreview =
-    entry.content?.length > 200
-      ? entry.content.slice(0, 200) + "..."
-      : entry.content;
-  const isLong = entry.content?.length > 200;
+    content?.length > 200
+      ? content.slice(0, 200) + "..."
+      : content;
+  const isLong = !loaded || content?.length > 200;
+
+  async function toggleExpanded() {
+    const nextExpanded = !expanded;
+    setExpanded(nextExpanded);
+    if (!nextExpanded || loaded || loading) return;
+
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/memory/${entry.id}`);
+      if (!res.ok) throw new Error(await res.text());
+      const data = (await res.json()) as { memory?: { content?: string } };
+      setContent(data.memory?.content || "");
+      setLoaded(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load memory content");
+    } finally {
+      setLoading(false);
+    }
+  }
 
   return (
     <div className="rounded-lg border border-gray-800 bg-[#111118]">
       <button
-        onClick={() => setExpanded(!expanded)}
+        onClick={toggleExpanded}
         className="w-full px-4 py-3 text-left transition hover:bg-white/[0.02]"
       >
         <div className="flex items-center gap-2 flex-wrap">
@@ -111,16 +135,22 @@ export function MemoryEntryCard({ entry }: { entry: MemoryEntry }) {
         )}
 
         {!expanded && (
-          <p className="mt-2 text-sm text-gray-300">{plainPreview}</p>
+          <p className="mt-2 text-sm text-gray-300">{loaded ? plainPreview : "Open to load memory content."}</p>
         )}
       </button>
 
       {expanded && (
         <div className="border-t border-gray-800 px-4 py-3">
-          <div
-            className="text-sm text-gray-300 leading-relaxed"
-            dangerouslySetInnerHTML={{ __html: renderMarkdown(entry.content) }}
-          />
+          {loading ? (
+            <p className="text-sm text-gray-500">Loading memory content...</p>
+          ) : error ? (
+            <p className="rounded border border-red-500/20 bg-red-500/10 px-3 py-2 text-sm text-red-200">{error}</p>
+          ) : (
+            <div
+              className="text-sm text-gray-300 leading-relaxed"
+              dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }}
+            />
+          )}
         </div>
       )}
     </div>

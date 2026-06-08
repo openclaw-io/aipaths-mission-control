@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import { createClient } from "@/lib/supabase/client";
 import type { GuideItem } from "@/app/guides/page";
 
 export function useRealtimeGuides(initialGuides: GuideItem[]): [GuideItem[], Dispatch<SetStateAction<GuideItem[]>>] {
   const [guides, setGuides] = useState<GuideItem[]>(initialGuides);
-  const supabase = createClient();
+  const supabase = useMemo(() => createClient(), []);
 
   useEffect(() => {
     setGuides(initialGuides);

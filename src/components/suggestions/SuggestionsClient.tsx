@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { COMPACT_WORK_ITEM_SELECT, compactWorkItemRow } from "@/lib/work-items/compact-payload";
 
 export interface SuggestionItem {
   id: string;
@@ -75,13 +76,13 @@ export function SuggestionsClient({ initialItems }: { initialItems: SuggestionIt
     try {
       const { data, error: refreshError } = await supabase
         .from("work_items")
-        .select("id,title,status,priority,owner_agent,target_agent_id,requested_by,source_type,source_id,kind,created_at,updated_at,scheduled_for,payload")
+        .select(COMPACT_WORK_ITEM_SELECT)
         .in("status", ["blocked", "draft"])
         .eq("payload->>requires_human_approval", "true")
         .order("created_at", { ascending: false })
         .limit(200);
       if (refreshError) return;
-      setItems((data || []) as SuggestionItem[]);
+      setItems((data || []).map((item) => compactWorkItemRow(item as unknown as Record<string, unknown>)) as unknown as SuggestionItem[]);
       setLastRefreshAt(new Date());
     } finally {
       refreshInFlightRef.current = false;

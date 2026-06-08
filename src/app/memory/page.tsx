@@ -6,11 +6,12 @@ export interface MemoryEntry {
   agent: string;
   type: string;
   title: string | null;
-  content: string;
+  content?: string | null;
   tags: string[];
   date: string;
   created_at: string;
   updated_at: string;
+  content_loaded?: boolean;
   similarity?: number | null;
 }
 
@@ -19,7 +20,7 @@ export default async function MemoryPage() {
 
   const { data, error } = await supabase
     .from("memories")
-    .select("*")
+    .select("id, agent, type, title, tags, date, created_at, updated_at")
     .order("date", { ascending: false })
     .limit(100);
 
@@ -27,7 +28,11 @@ export default async function MemoryPage() {
     console.error("[MemoryPage] Failed to fetch memory entries:", error);
   }
 
-  const entries: MemoryEntry[] = data ?? [];
+  const entries: MemoryEntry[] = (data ?? []).map((entry) => ({
+    ...entry,
+    content: null,
+    content_loaded: false,
+  }));
 
   return <MemoryClient initialEntries={entries} />;
 }

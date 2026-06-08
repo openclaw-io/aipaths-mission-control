@@ -57,7 +57,7 @@ export function MemoryClient({ initialEntries }: { initialEntries: MemoryEntry[]
       });
       if (res.ok) {
         const data = await res.json();
-        setSearchResults(data.results ?? []);
+        setSearchResults((data.results ?? []).map((entry: MemoryEntry) => ({ ...entry, content_loaded: true })));
       }
     } finally {
       setSearching(false);
