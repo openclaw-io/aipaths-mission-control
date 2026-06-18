@@ -49,8 +49,6 @@ const STRATEGIST_REPORTING_TABLES = [
   "ops_youtube_short_daily",
   "ops_community_daily",
   "ops_youtube_comments",
-  "intel_items_raw",
-  "intel_trend_daily",
 ];
 
 function parseDateKey(value: string) {
@@ -169,7 +167,10 @@ function strategistReportOccurrence(rule: RecurringWorkRule, day: Date, schedule
   const title = `${typeLabel} review — ${titleDate}`;
   const instruction = [
     `Prepare the ${typeLabel.toLowerCase()} strategist report for ${titleDate}.`,
-    "Use Mission Control canonical reporting tables only; do not read Academy legacy daily_digest or legacy recurrence tables.",
+    "Use the diagnostic-first reporting contract. Lead with Diagnostico IA funnel learning, not generic platform monitoring.",
+    "Read Mission Control canonical reporting tables first, especially ops_daily_snapshots.academy_json.diagnostic. Fall back to Academy diagnostic/event tables only when the canonical diagnostic block is missing.",
+    "Do not include routine trends, Intel Inbox, broad rankings, or mandatory director-task fan-out unless they materially change a funnel decision.",
+    "Do not read Academy legacy daily_digest or legacy recurrence tables.",
     "Keep com.aipaths.daily-scrape as the data ingestion source, then post the finished report through the normal strategist reporting path and close this work item.",
   ].join("\n\n");
   const payload: Record<string, unknown> = {
@@ -226,6 +227,8 @@ export function plannedOccurrenceDryRun(rule: RecurringWorkRule, now = new Date(
     title: occurrence.title,
     scheduledFor: occurrence.scheduledFor,
     reportType: typeof occurrence.payload.report_type === "string" ? occurrence.payload.report_type : null,
+    instruction: occurrence.instruction,
+    source_tables: Array.isArray(occurrence.payload.source_tables) ? occurrence.payload.source_tables : null,
   }));
 }
 
