@@ -1,5 +1,6 @@
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { YouTubeDecisionBoard } from "@/components/youtube/YouTubeDecisionBoard";
+import { YouTubeLearningDashboard } from "@/components/youtube/YouTubeLearningDashboard";
 import { COMPACT_LINKED_WORK_ITEM_SELECT, compactWorkItemRow } from "@/lib/work-items/compact-payload";
 
 export const dynamic = "force-dynamic";
@@ -67,5 +68,10 @@ export default async function YouTubePage() {
     return payload.pipeline_type === "video";
   }) as unknown as LinkedWorkItem[];
 
-  return <YouTubeDecisionBoard initialItems={videos} initialWorkItems={linkedWorkItems} />;
+  return (
+    <div className="space-y-8">
+      <YouTubeLearningDashboard initialItems={videos} />
+      <YouTubeDecisionBoard initialItems={videos} initialWorkItems={linkedWorkItems} />
+    </div>
+  );
 }
