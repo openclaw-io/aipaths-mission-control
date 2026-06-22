@@ -410,6 +410,38 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const metadata = getYouTubeMetadata(item.metadata);
   const requestedAction = typeof body.action === "string" ? body.action : null;
 
+  if (requestedAction === "save_learning_review") {
+    const learning = toRecord(body.learning);
+    const existingLearning = toRecord(metadata.youtube_learning_v1);
+    const nextLearning = {
+      ...existingLearning,
+      ...learning,
+      updated_at: now,
+      updated_by: user.email || user.id,
+    };
+    const nextMetadata = {
+      ...metadata,
+      youtube_learning_v1: nextLearning,
+    };
+
+    const { data: updated, error: updateError } = await db
+      .from("pipeline_items")
+      .update({
+        owner_agent: item.owner_agent || "youtube",
+        metadata: nextMetadata,
+        updated_at: now,
+      })
+      .eq("id", id)
+      .select("id, pipeline_type, title, slug, status, priority, owner_agent, requested_by, source_type, source_id, scheduled_for, published_at, current_url, content_path, content_format, metadata, created_at, updated_at")
+      .single();
+
+    if (updateError) {
+      return NextResponse.json({ error: updateError.message }, { status: 500 });
+    }
+
+    return NextResponse.json({ item: updated });
+  }
+
   if (requestedAction === "set_stage") {
     const requestedStage = body.stage ?? body.status;
     if (!isYouTubeV0StageStatus(requestedStage)) {
