@@ -15,6 +15,7 @@ const NAV_ITEMS = [
   { href: "/email-campaigns", label: "Email Campaigns", emoji: "📧" },
   { href: "/blogs", label: "Blogs", emoji: "✍️" },
   { href: "/youtube", label: "YouTube", emoji: "🎬" },
+  { href: "/statistics", label: "Statistics", emoji: "📈" },
   { href: "/guides", label: "Guías", emoji: "📚" },
   { href: "/community", label: "Community", emoji: "🏘️" },
   { href: "/intel", label: "Intel Inbox", emoji: "🧠" },
