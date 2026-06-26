@@ -3,9 +3,10 @@
 import { useMemo, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { BarChart3, Pencil, Save, X } from "lucide-react";
 import type { VideoPipelineItem } from "@/app/youtube/page";
+import type { YouTubeMetricSnapshot, YouTubeStatisticsRow } from "@/lib/youtube/statistics-types";
 
 type JsonRecord = Record<string, unknown>;
-type LearningWindow = "7d" | "28d" | "lifetime";
+type LearningWindow = "7d" | "28d" | "lifetime" | "launch_day" | "first_7d" | "first_28d";
 
 type MetricSnapshot = {
   views?: number | null;
@@ -71,15 +72,19 @@ type ScoreBundle = {
 };
 
 const WINDOWS: Array<{ key: LearningWindow; label: string; hint: string }> = [
-  { key: "7d", label: "7 días", hint: "Lanzamiento / packaging" },
-  { key: "28d", label: "28 días", hint: "Performance estable" },
+  { key: "launch_day", label: "Día 1", hint: "Primeras 24h" },
+  { key: "first_7d", label: "Primeros 7d", hint: "Lanzamiento comparable" },
+  { key: "first_28d", label: "Primeros 28d", hint: "Maduración comparable" },
+  { key: "7d", label: "Últimos 7d", hint: "Momentum actual" },
+  { key: "28d", label: "Últimos 28d", hint: "Performance reciente" },
   { key: "lifetime", label: "Lifetime", hint: "Referencia histórica" },
 ];
 
 const EMPTY_STATE = "—";
 
-export function YouTubeLearningDashboard({ initialItems }: { initialItems: VideoPipelineItem[] }) {
-  const [items, setItems] = useState(initialItems);
+export function YouTubeLearningDashboard({ initialRows }: { initialRows: YouTubeStatisticsRow[] }) {
+  const [statisticsRows, setStatisticsRows] = useState(initialRows);
+  const items = useMemo(() => statisticsRows.map(statisticsRowToVideoPipelineItem), [statisticsRows]);
   const [windowKey, setWindowKey] = useState<LearningWindow>("28d");
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
@@ -113,7 +118,7 @@ export function YouTubeLearningDashboard({ initialItems }: { initialItems: Video
         <div>
           <div className="flex items-center gap-2 text-blue-300">
             <BarChart3 className="h-4 w-4" />
-            <p className="text-xs font-semibold uppercase tracking-wide">YouTube Learning Dashboard · V1 manual</p>
+            <p className="text-xs font-semibold uppercase tracking-wide">YouTube Statistics · automated + manual review</p>
           </div>
           <h2 className="mt-2 text-xl font-bold text-white">Qué video funcionó y por qué</h2>
           <p className="mt-1 max-w-3xl text-sm leading-6 text-gray-400">
@@ -208,13 +213,17 @@ export function YouTubeLearningDashboard({ initialItems }: { initialItems: Video
                     </div>
                   </Td>
                   <Td>
-                    <button
-                      type="button"
-                      onClick={() => setSelectedId(item.id)}
-                      className="inline-flex items-center gap-1 rounded-lg border border-gray-700 bg-black/20 px-2 py-1 text-xs text-gray-300 transition hover:border-blue-500 hover:text-white"
-                    >
-                      <Pencil className="h-3 w-3" /> Editar
-                    </button>
+                    {canSaveManualReview(item) ? (
+                      <button
+                        type="button"
+                        onClick={() => setSelectedId(item.id)}
+                        className="inline-flex items-center gap-1 rounded-lg border border-gray-700 bg-black/20 px-2 py-1 text-xs text-gray-300 transition hover:border-blue-500 hover:text-white"
+                      >
+                        <Pencil className="h-3 w-3" /> Editar
+                      </button>
+                    ) : (
+                      <span className="text-xs text-gray-600">Auto</span>
+                    )}
                   </Td>
                 </tr>
               ))
@@ -229,7 +238,14 @@ export function YouTubeLearningDashboard({ initialItems }: { initialItems: Video
           windowKey={windowKey}
           onClose={() => setSelectedId(null)}
           onSaved={(updated) => {
-            setItems((current) => current.map((item) => (item.id === updated.id ? updated : item)));
+            setStatisticsRows((current) => current.map((row) => {
+              if (row.item.id !== updated.id) return row;
+              return {
+                ...row,
+                item: { ...row.item, ...updated },
+                manual: getLearningData(updated),
+              };
+            }));
             setSelectedId(null);
           }}
         />
@@ -258,24 +274,9 @@ function LearningDrawer({
     setError(null);
     try {
       const ctas = parseCtaLines(form.ctaLines);
-      const snapshot: MetricSnapshot = {
-        views: toNullableNumber(form.views),
-        impressions: toNullableNumber(form.impressions),
-        yt_ctr: toNullableNumber(form.yt_ctr),
-        avg_view_duration: trimToNull(form.avg_view_duration),
-        avg_percent_viewed: toNullableNumber(form.avg_percent_viewed),
-        retention_30s: toNullableNumber(form.retention_30s),
-        watch_time_hours: toNullableNumber(form.watch_time_hours),
-        subs_gained: toNullableNumber(form.subs_gained),
-        leads: toNullableNumber(form.leads),
-      };
       const learning: LearningData = {
         ...pickLearningFields(form),
         format: "long_form",
-        snapshots: {
-          ...(row.learning.snapshots || {}),
-          [windowKey]: snapshot,
-        },
         ctas,
       };
 
@@ -437,8 +438,62 @@ function TextArea({ label, value, onChange, placeholder }: { label: string; valu
   );
 }
 
+function canSaveManualReview(item: VideoPipelineItem) {
+  return !item.id.startsWith("owned-video:");
+}
+
 function setFormField(setForm: Dispatch<SetStateAction<LearningFormState>>, key: keyof LearningFormState, value: string) {
   setForm((current) => ({ ...current, [key]: value }));
+}
+
+function statisticsRowToVideoPipelineItem(row: YouTubeStatisticsRow): VideoPipelineItem {
+  const metadata = toRecord(row.item.metadata);
+  const manual = row.manual as JsonRecord;
+  const canonicalSnapshots = {
+    "7d": metricToSnapshot(row.snapshots["7d"]),
+    "28d": metricToSnapshot(row.snapshots["28d"]),
+    lifetime: metricToSnapshot(row.snapshots.lifetime),
+    launch_day: metricToSnapshot(row.snapshots.launch_day),
+    first_7d: metricToSnapshot(row.snapshots.first_7d),
+    first_28d: metricToSnapshot(row.snapshots.first_28d),
+  };
+
+  return {
+    ...row.item,
+    title: row.video?.title || row.item.title,
+    published_at: row.video?.published_at || row.item.published_at,
+    current_url: row.item.current_url || (row.video ? `https://www.youtube.com/watch?v=${row.video.platform_video_id}` : null),
+    metadata: {
+      ...metadata,
+      youtube_learning_v1: {
+        ...manual,
+        snapshots: canonicalSnapshots,
+      },
+    },
+  };
+}
+
+function metricToSnapshot(metric?: YouTubeMetricSnapshot): MetricSnapshot {
+  if (!metric) return normalizeSnapshot(null);
+  return {
+    views: metric.views,
+    impressions: metric.impressions,
+    yt_ctr: metric.yt_ctr,
+    avg_view_duration: formatSeconds(metric.avg_view_duration_seconds),
+    avg_percent_viewed: metric.avg_percent_viewed,
+    retention_30s: metric.retention_30s,
+    watch_time_hours: metric.watch_time_minutes == null ? null : Math.round((metric.watch_time_minutes / 60) * 10) / 10,
+    subs_gained: metric.subscribers_gained,
+    leads: null,
+  };
+}
+
+function formatSeconds(value: number | null) {
+  if (value === null || value === undefined || !Number.isFinite(value)) return null;
+  const total = Math.max(0, Math.round(value));
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
 function getLearningData(item: VideoPipelineItem): LearningData {
