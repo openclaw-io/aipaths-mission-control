@@ -9,7 +9,11 @@
     "lint": "eslint",
     "backfill:strategist": "node scripts/backfill-strategist-analytics.mjs",
     "validate:strategist-backfill": "node scripts/validate-strategist-backfill.mjs",
-    "suggestions:seed-hygiene": "node scripts/seed-hygiene-suggestions.mjs"
+    "suggestions:seed-hygiene": "node scripts/seed-hygiene-suggestions.mjs",
+    "sync:youtube-statistics": "node scripts/sync-youtube-statistics.mjs",
+    "sync:youtube-statistics:batch": "node scripts/sync-youtube-statistics-batch.mjs",
+    "refresh:youtube-metadata": "node scripts/refresh-youtube-owned-video-metadata.mjs",
+    "test:youtube-statistics": "node --test scripts/lib/__tests__/*.test.mjs"
   },
   "dependencies": {
     "@supabase/ssr": "^0.9.0",
