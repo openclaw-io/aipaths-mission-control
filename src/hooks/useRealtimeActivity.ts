@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 
+const REALTIME_ENABLED = process.env.NEXT_PUBLIC_ENABLE_SUPABASE_REALTIME === "true";
+
 export interface ActivityEvent {
   id: string;
   agent: string;
@@ -15,13 +17,15 @@ export interface ActivityEvent {
 
 export function useRealtimeActivity(initialEvents: ActivityEvent[]): ActivityEvent[] {
   const [events, setEvents] = useState<ActivityEvent[]>(initialEvents);
-  const supabase = createClient();
 
   useEffect(() => {
     setEvents(initialEvents);
   }, [initialEvents]);
 
   useEffect(() => {
+    if (!REALTIME_ENABLED) return;
+
+    const supabase = createClient();
     const channel = supabase
       .channel("activity-realtime")
       .on(
@@ -37,7 +41,7 @@ export function useRealtimeActivity(initialEvents: ActivityEvent[]): ActivityEve
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [supabase]);
+  }, []);
 
   return events;
 }

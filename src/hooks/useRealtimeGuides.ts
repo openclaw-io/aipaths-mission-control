@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import { createClient } from "@/lib/supabase/client";
 import type { GuideItem } from "@/app/guides/page";
 
@@ -8,7 +8,6 @@ const REALTIME_ENABLED = process.env.NEXT_PUBLIC_ENABLE_SUPABASE_REALTIME === "t
 
 export function useRealtimeGuides(initialGuides: GuideItem[]): [GuideItem[], Dispatch<SetStateAction<GuideItem[]>>] {
   const [guides, setGuides] = useState<GuideItem[]>(initialGuides);
-  const supabase = useMemo(() => createClient(), []);
 
   useEffect(() => {
     setGuides(initialGuides);
@@ -17,6 +16,7 @@ export function useRealtimeGuides(initialGuides: GuideItem[]): [GuideItem[], Dis
   useEffect(() => {
     if (!REALTIME_ENABLED) return;
 
+    const supabase = createClient();
     const channel = supabase
       .channel("guides-realtime")
       .on(
@@ -42,7 +42,7 @@ export function useRealtimeGuides(initialGuides: GuideItem[]): [GuideItem[], Dis
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [supabase]);
+  }, []);
 
   return [guides, setGuides];
 }

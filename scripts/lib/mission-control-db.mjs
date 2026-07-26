@@ -1,5 +1,4 @@
 import pg from 'pg';
-import { createClient } from '@supabase/supabase-js';
 
 const { Pool } = pg;
 
@@ -10,13 +9,7 @@ export function getMissionControlDatabaseUrl(env = {}) {
 export function createMissionControlDb({ env = {}, envPath = '.env.local' } = {}) {
   const databaseUrl = getMissionControlDatabaseUrl(env);
   if (databaseUrl) return createPostgresMissionControlDb(databaseUrl);
-
-  const supabaseUrl = env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceKey = env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!supabaseUrl || !serviceKey) {
-    throw new Error(`Missing MISSION_CONTROL_DATABASE_URL or Supabase env in ${envPath}`);
-  }
-  return createSupabaseMissionControlDb(supabaseUrl, serviceKey);
+  throw new Error(`Missing MISSION_CONTROL_DATABASE_URL in ${envPath}`);
 }
 
 function createPostgresMissionControlDb(databaseUrl) {
@@ -218,112 +211,6 @@ function createPostgresMissionControlDb(databaseUrl) {
         [videoIds],
       );
       return result.rows;
-    },
-  };
-}
-
-function createSupabaseMissionControlDb(supabaseUrl, serviceKey) {
-  const supabase = createClient(supabaseUrl, serviceKey);
-  return {
-    kind: 'supabase',
-    description: 'Supabase fallback (MISSION_CONTROL_DATABASE_URL not set)',
-    async close() {},
-    async createPipelineRun(options) {
-      const { data, error } = await supabase
-        .from('pipeline_runs')
-        .insert({
-          run_type: 'sync:youtube-statistics',
-          status: 'running',
-          source_system: 'youtube_mcp',
-          metadata_json: {
-            windows: options.windows,
-            video_type: options.videoType,
-            limit: options.limit,
-            offset: options.offset,
-            include_retention_curve: options.includeRetentionCurve,
-          },
-        })
-        .select('id')
-        .single();
-      if (error) throw new Error(`create pipeline_runs failed: ${error.message}`);
-      return data.id;
-    },
-    async finishPipelineRun(runId, patch) {
-      const { error } = await supabase
-        .from('pipeline_runs')
-        .update({
-          ...patch,
-          finished_at: new Date().toISOString(),
-        })
-        .eq('id', runId);
-      if (error) throw new Error(`finish pipeline_runs failed: ${error.message}`);
-    },
-    async loadOwnedVideoRowsByIds(ids) {
-      if (!ids.length) return [];
-      const { data, error } = await supabase
-        .from('ops_owned_videos')
-        .select('academy_video_id,video_kind,is_published,metadata_json')
-        .in('academy_video_id', ids);
-      if (error) throw new Error(`select ops_owned_videos failed: ${error.message}`);
-      return data || [];
-    },
-    async upsertOwnedVideoRows(rows) {
-      if (!rows.length) return;
-      const { error } = await supabase
-        .from('ops_owned_videos')
-        .upsert(rows, { onConflict: 'academy_video_id' });
-      if (error) throw new Error(`upsert ops_owned_videos failed: ${error.message}`);
-    },
-    async upsertSnapshotRows(rows) {
-      if (!rows.length) return;
-      const { error } = await supabase
-        .from('ops_youtube_video_learning_snapshots')
-        .upsert(rows, { onConflict: 'academy_video_id,window_key' });
-      if (error) throw new Error(`upsert ops_youtube_video_learning_snapshots failed: ${error.message}`);
-    },
-    async loadOwnedVideosForMetadata({ ids = [], includeShorts = true, limit = null } = {}) {
-      let query = supabase
-        .from('ops_owned_videos')
-        .select('academy_video_id,title,video_kind,is_published,metadata_json')
-        .eq('platform', 'youtube')
-        .order('published_at', { ascending: false, nullsFirst: false });
-      if (ids.length) query = query.in('academy_video_id', ids);
-      if (!includeShorts) query = query.eq('video_kind', 'longform');
-      if (limit && !ids.length) query = query.limit(limit);
-      const { data, error } = await query;
-      if (error) throw new Error(`Failed to load ops_owned_videos: ${error.message}`);
-      return data || [];
-    },
-    async updateOwnedVideoMetadata({ academyVideoId, title, videoKind, isPublished, metadata, syncedAt }) {
-      const { error } = await supabase
-        .from('ops_owned_videos')
-        .update({
-          title,
-          video_kind: videoKind,
-          is_published: isPublished,
-          metadata_json: metadata,
-          synced_at: syncedAt,
-        })
-        .eq('academy_video_id', academyVideoId);
-      if (error) throw new Error(`Failed to update ${academyVideoId}: ${error.message}`);
-    },
-    async loadOwnedVideosForStatisticsBatch() {
-      const { data, error } = await supabase
-        .from('ops_owned_videos')
-        .select('academy_video_id,title,published_at,video_kind,is_published,metadata_json')
-        .eq('video_kind', 'longform')
-        .order('published_at', { ascending: false });
-      if (error) throw new Error(`load ops_owned_videos failed: ${error.message}`);
-      return data || [];
-    },
-    async loadExistingSnapshots(videoIds) {
-      if (!videoIds.length) return [];
-      const { data, error } = await supabase
-        .from('ops_youtube_video_learning_snapshots')
-        .select('*')
-        .in('academy_video_id', videoIds);
-      if (error) throw new Error(`load existing snapshots failed: ${error.message}`);
-      return data || [];
     },
   };
 }

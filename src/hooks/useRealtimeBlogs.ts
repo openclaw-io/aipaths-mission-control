@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import { createClient } from "@/lib/supabase/client";
 import type { BlogItem } from "@/app/blogs/page";
 
@@ -8,7 +8,6 @@ const REALTIME_ENABLED = process.env.NEXT_PUBLIC_ENABLE_SUPABASE_REALTIME === "t
 
 export function useRealtimeBlogs(initialBlogs: BlogItem[]): [BlogItem[], Dispatch<SetStateAction<BlogItem[]>>] {
   const [blogs, setBlogs] = useState<BlogItem[]>(initialBlogs);
-  const supabase = useMemo(() => createClient(), []);
 
   useEffect(() => {
     setBlogs(initialBlogs);
@@ -17,6 +16,7 @@ export function useRealtimeBlogs(initialBlogs: BlogItem[]): [BlogItem[], Dispatc
   useEffect(() => {
     if (!REALTIME_ENABLED) return;
 
+    const supabase = createClient();
     const channel = supabase
       .channel("blogs-realtime")
       .on(
@@ -40,7 +40,7 @@ export function useRealtimeBlogs(initialBlogs: BlogItem[]): [BlogItem[], Dispatc
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [supabase]);
+  }, []);
 
   return [blogs, setBlogs];
 }
