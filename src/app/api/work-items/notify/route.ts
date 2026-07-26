@@ -27,7 +27,7 @@ type ClarificationHistoryEntry = {
   responded_by?: string | null;
 };
 
-type ProjectContextRow = {
+type LoopContextRow = {
   id: string;
   name: string | null;
   summary: string | null;
@@ -55,16 +55,16 @@ type WorkItemRow = {
   payload: Record<string, unknown> | null;
 };
 
-function buildProjectContext(project: ProjectContextRow) {
+function buildLoopContext(loop: LoopContextRow) {
   const parts: string[] = [];
 
-  if (project.name) parts.push(`Project: ${project.name}`);
+  if (loop.name) parts.push(`Loop: ${loop.name}`);
 
-  const summary = project.summary || project.description;
+  const summary = loop.summary || loop.description;
   if (summary) parts.push(`Summary: ${summary}`);
 
-  const clarificationHistory = Array.isArray(project.metadata?.clarification_history)
-    ? project.metadata?.clarification_history || []
+  const clarificationHistory = Array.isArray(loop.metadata?.clarification_history)
+    ? loop.metadata?.clarification_history || []
     : [];
 
   const responses = clarificationHistory
@@ -75,8 +75,8 @@ function buildProjectContext(project: ProjectContextRow) {
     parts.push(`Latest clarification from requester:\n${responses.map((response) => `- ${response}`).join("\n")}`);
   }
 
-  if (project.approval_scope?.notes) {
-    parts.push(`Approval notes: ${project.approval_scope.notes}`);
+  if (loop.approval_scope?.notes) {
+    parts.push(`Approval notes: ${loop.approval_scope.notes}`);
   }
 
   return parts.join("\n\n");
@@ -310,29 +310,29 @@ export async function POST(request: NextRequest) {
     failed: "❌ Work item failed",
   };
 
-  let projectContext = "";
-  if (item.source_type === "project" && typeof item.source_id === "string") {
-    let project: ProjectContextRow | null = null;
+  let loopContext = "";
+  if (item.source_type === "loop" && typeof item.source_id === "string") {
+    let loop: LoopContextRow | null = null;
     if (useLocalMode) {
       const { rows } = await query(
         `select id, name, summary, description, clarification_questions, metadata, approval_scope
-           from public.projects
+           from public.loops
           where id = $1
           limit 1`,
         [item.source_id],
       );
-      project = (rows[0] as ProjectContextRow | undefined) || null;
+      loop = (rows[0] as LoopContextRow | undefined) || null;
     } else {
       const { data } = await (db as ReturnType<typeof createServiceClient>)
-        .from("projects")
+        .from("loops")
         .select("id,name,summary,description,clarification_questions,metadata,approval_scope")
         .eq("id", item.source_id)
         .maybeSingle();
-      project = data as ProjectContextRow | null;
+      loop = data as LoopContextRow | null;
     }
 
-    if (project) {
-      projectContext = buildProjectContext(project);
+    if (loop) {
+      loopContext = buildLoopContext(loop);
     }
   }
 
@@ -340,7 +340,7 @@ export async function POST(request: NextRequest) {
   let message = `${label}: \"${item.title}\" (work item ID: ${item.id})\n`;
 
   if (item.instruction) message += `\n## Instructions\n${item.instruction}\n`;
-  if (projectContext) message += `\n## Latest project context\n${projectContext}\n`;
+  if (loopContext) message += `\n## Latest loop context\n${loopContext}\n`;
   if (item.scheduled_for) message += `\nScheduled for: ${item.scheduled_for}\n`;
   if (item.source_type) message += `\nSource: ${item.source_type}\n`;
 

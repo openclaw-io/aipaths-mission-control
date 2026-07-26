@@ -12,8 +12,8 @@ function isPublicPath(pathname: string) {
     pathname.startsWith("/api/memory/") ||
     pathname.startsWith("/api/work-items/") ||
     pathname === "/api/youtube/launch-package" ||
-    pathname === "/api/projects/materialize-queued" ||
-    pathname === "/api/projects/plan-pending"
+    pathname === "/api/loops/materialize-queued" ||
+    pathname === "/api/loops/plan-pending"
   );
 }
 
