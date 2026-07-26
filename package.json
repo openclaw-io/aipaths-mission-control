@@ -16,6 +16,8 @@
     "test": "node --test scripts/lib/__tests__/*.test.mjs",
     "test:loops": "node --test scripts/lib/__tests__/work-item-loop-contract.test.mjs scripts/lib/__tests__/loops-total-cutover.test.mjs scripts/lib/__tests__/loops-cutover-postgres.test.mjs",
     "rehearse:loops": "node scripts/rehearse-loops-cutover.mjs",
+    "rehearse:loops:sql-editor": "node scripts/rehearse-loops-cutover.mjs --sql-editor",
+    "rehearse:loops:recovery": "node scripts/rehearse-loops-cutover.mjs --sql-editor --inject-all-checkpoints",
     "guard:loops": "node scripts/guard-no-project-domain.mjs",
     "test:youtube-statistics": "node --test scripts/lib/__tests__/*.test.mjs"
   },

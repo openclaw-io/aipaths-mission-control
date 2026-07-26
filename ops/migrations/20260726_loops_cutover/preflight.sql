@@ -1,8 +1,8 @@
 -- Read-only gate. Run before migration 030 on each target store.
 BEGIN;
 SET LOCAL TRANSACTION READ ONLY;
-SET LOCAL lock_timeout = '5s';
-SET LOCAL statement_timeout = '2min';
+SET lock_timeout = '5s';
+SET statement_timeout = '2min';
 
 DO $$
 DECLARE
@@ -10,8 +10,29 @@ DECLARE
   present_destination text[] := ARRAY[]::text[];
   violations bigint;
   fk_count bigint;
+  exact_primary_indexes bigint;
   obj record;
 BEGIN
+  -- Reserve the complete helper prefix, not just helpers currently created by
+  -- this revision. This is intentionally identical to forward's residue gate.
+  IF EXISTS (
+    SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+    WHERE n.nspname='public' AND c.relname LIKE '__mc_loops_cutover_20260726%'
+  ) OR EXISTS (
+    SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+    WHERE n.nspname='public' AND p.proname LIKE '__mc_loops_cutover_20260726%'
+  ) OR EXISTS (
+    SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace
+    WHERE n.nspname='public' AND t.typname LIKE '__mc_loops_cutover_20260726%'
+  ) OR EXISTS (
+    SELECT 1 FROM pg_namespace n WHERE n.nspname LIKE '__mc_loops_cutover_20260726%'
+  ) OR EXISTS (
+    SELECT 1 FROM pg_constraint c WHERE c.conname LIKE '__mc_loops_cutover_20260726%'
+  ) OR EXISTS (
+    SELECT 1 FROM pg_trigger t WHERE NOT t.tgisinternal AND t.tgname LIKE '__mc_loops_cutover_20260726%'
+  ) THEN
+    RAISE EXCEPTION 'Preflight failed; prior cutover recovery metadata/helper exists. Run rollback.sql statement-by-statement before retrying forward';
+  END IF;
   IF to_regclass('public.projects') IS NULL THEN missing := array_append(missing,'projects'); END IF;
   IF to_regclass('public.project_events') IS NULL THEN missing := array_append(missing,'project_events'); END IF;
   IF to_regclass('public.project_work_items') IS NULL THEN missing := array_append(missing,'project_work_items'); END IF;
@@ -87,6 +108,20 @@ BEGIN
   SELECT count(*) INTO violations FROM (SELECT project_id FROM public.project_work_items WHERE relation_type='primary_execution' GROUP BY project_id HAVING count(*)>1) d;
   IF violations>0 THEN RAISE EXCEPTION 'Preflight failed; % duplicate primary executions',violations; END IF;
 
+  -- This is the same exact shape gate used by forward before deciding whether
+  -- its fallback unique partial index is needed. Narrower predicates, included
+  -- columns, or another key are not treated as the required invariant.
+  SELECT count(*) INTO exact_primary_indexes
+  FROM pg_index i
+  WHERE i.indrelid='public.project_work_items'::regclass
+    AND i.indisunique AND i.indpred IS NOT NULL
+    AND i.indnkeyatts=1 AND i.indnatts=1
+    AND i.indkey::text=(SELECT attnum::text FROM pg_attribute WHERE attrelid=i.indrelid AND attname='project_id')
+    AND pg_get_expr(i.indpred,i.indrelid)='(relation_type = ''primary_execution''::text)';
+  IF exact_primary_indexes>1 THEN
+    RAISE EXCEPTION 'Preflight failed; found % exact primary_execution uniqueness indexes; expected at most one',exact_primary_indexes;
+  END IF;
+
   -- No destination key or value may exist before cutover: rollback is global.
   SELECT count(*) INTO violations FROM public.work_items
   WHERE payload ?| ARRAY['source_loop_id','source_loop_title','materialized_from_loop','loop_status_at_materialization','superseded_for_loop_id','orphaned_source_loop_id']
@@ -111,8 +146,37 @@ BEGIN
   SELECT count(*) INTO violations FROM pg_constraint c
   WHERE c.conrelid='public.work_items'::regclass AND c.contype='c'
     AND c.conkey @> ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid=c.conrelid AND attname='source_type')]::smallint[]
-    AND position('''loop''' IN pg_get_constraintdef(c.oid))>0;
-  IF violations>0 THEN RAISE EXCEPTION 'Preflight failed; destination controlled value loop already exists in source_type CHECK'; END IF;
+    AND (position('''loop''' IN pg_get_constraintdef(c.oid))>0
+      OR position('''project''' IN pg_get_constraintdef(c.oid))=0);
+  IF violations>0 THEN
+    RAISE EXCEPTION 'Preflight failed; % source_type CHECKs are not exactly transformable (each must contain an exact project literal and no loop literal)',violations;
+  END IF;
+
+  -- Rollback renames every generated Loop-named object on a participating
+  -- relation. Therefore *no* such name may predate forward, including the two
+  -- reserved fallback names. This provenance gate is deliberately broad.
+  SELECT count(*) INTO violations
+  FROM pg_constraint c JOIN pg_class r ON r.oid=c.conrelid JOIN pg_namespace n ON n.oid=r.relnamespace
+  WHERE n.nspname='public'
+    AND (r.relname IN ('projects','project_events','project_work_items','work_items')
+      OR (r.relname IN ('pipeline_items','recurrence_rules') AND EXISTS
+        (SELECT 1 FROM information_schema.columns ic
+         WHERE ic.table_schema='public' AND ic.table_name=r.relname AND ic.column_name='project_id')))
+    AND c.conname ILIKE '%loop%';
+  IF violations>0 THEN
+    RAISE EXCEPTION 'Preflight failed; % pre-existing constraint names contain reserved token loop on participating relations',violations;
+  END IF;
+  SELECT count(*) INTO violations
+  FROM pg_indexes i
+  WHERE i.schemaname='public'
+    AND (i.tablename IN ('projects','project_events','project_work_items','work_items')
+      OR (i.tablename IN ('pipeline_items','recurrence_rules') AND EXISTS
+        (SELECT 1 FROM information_schema.columns ic
+         WHERE ic.table_schema='public' AND ic.table_name=i.tablename AND ic.column_name='project_id')))
+    AND i.indexname ILIKE '%loop%';
+  IF violations>0 THEN
+    RAISE EXCEPTION 'Preflight failed; % pre-existing index names contain reserved token loop on participating relations',violations;
+  END IF;
 
   FOR obj IN SELECT c.conname FROM pg_constraint c JOIN pg_class r ON r.oid=c.conrelid JOIN pg_namespace n ON n.oid=r.relnamespace
     WHERE n.nspname='public'
@@ -144,4 +208,6 @@ UNION ALL SELECT 'project_events',count(*) FROM public.project_events
 UNION ALL SELECT 'project_work_items',count(*) FROM public.project_work_items
 UNION ALL SELECT 'work_items_with_project_id',count(*) FROM public.work_items WHERE project_id IS NOT NULL
 UNION ALL SELECT 'legacy_source_type',count(*) FROM public.work_items WHERE source_type='project';
+RESET lock_timeout;
+RESET statement_timeout;
 COMMIT;

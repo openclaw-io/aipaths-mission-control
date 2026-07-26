@@ -135,10 +135,29 @@ test("versioned migration artifacts are transactional, reversible, and drift-lou
   assert.match(rehearsal, /assertSourceIdWrites/);
   assert.match(rehearsal, /orphaned_source_loop_id/);
 
-  for (const optionalRelation of ["pipeline_items", "recurrence_rules"]) {
-    assert.match(forward, new RegExp(`LOCK TABLE[^;]*${optionalRelation}|LOCK TABLE public\\.${optionalRelation}`, "is"));
-    assert.match(rollback, new RegExp(`LOCK TABLE[^;]*${optionalRelation}|LOCK TABLE public\\.${optionalRelation}`, "is"));
+  for (const sql of [forward, rollback]) {
+    assert.doesNotMatch(sql, /\bCREATE\s+TEMP(?:ORARY)?\b|\bpg_temp\b|\bON\s+COMMIT\b/i, "cutover artifacts must not depend on session-local objects");
+    assert.doesNotMatch(sql, /^\s*LOCK\s+TABLE\b/im, "statement-by-statement autocommit cannot retain explicit locks across statements");
+    assert.doesNotMatch(sql, /^\s*SET\s+LOCAL\s+(?:lock|statement)_timeout\b/im, "SQL Editor autocommit needs session timeouts, not SET LOCAL");
+    assert.match(sql, /^SET lock_timeout\b/m);
+    assert.match(sql, /^SET statement_timeout\b/m);
+    assert.match(sql, /^RESET lock_timeout\b/m);
+    assert.match(sql, /^RESET statement_timeout\b/m);
+    assert.match(sql, /__mc_loops_cutover_20260726/);
   }
+  assert.ok(rollback.indexOf("rollback_entry_guard") < rollback.indexOf("CREATE OR REPLACE FUNCTION"), "rollback provenance guard must precede its first catalog mutation");
+  assert.match(rollback, /Projects namespace has no cutover provenance metadata[\s\S]*refusing all mutation/i);
+  for (const sql of [preflight, forward]) {
+    assert.match(sql, /conname ILIKE '%loop%'/i, "missing broad Loop-named constraint provenance gate");
+    assert.match(sql, /indexname ILIKE '%loop%'/i, "missing broad Loop-named index provenance gate");
+    assert.match(sql, /position\('''loop'''[\s\S]*position\('''project'''/i, "missing exact source CHECK transformability gate");
+    assert.match(sql, /indnkeyatts=1 AND i\.indnatts=1[\s\S]*relation_type = ''primary_execution''::text/i, "missing exact unique-partial index shape gate");
+  }
+  assert.equal((forward.match(/checkpoint: recoverable-mutation/g) || []).length, 14, "every mutating forward statement needs a recovery checkpoint");
+  assert.match(forward, /recovery metadata\/helper already exists[\s\S]*rollback/i);
+  assert.match(forward, /DROP FUNCTION[\s\S]*DROP TABLE/i, "successful forward must clean namespaced helpers");
+  assert.match(rollback, /DROP FUNCTION IF EXISTS[\s\S]*DROP TABLE IF EXISTS/i, "rollback must clean namespaced helpers");
+  assert.match(rollback, /mixed\/ambiguous|exactly one complete namespace/i);
 
   // Migration 030 is a reversible namespace/value cutover, not a schema normalizer.
   for (const destructiveShapeChange of [

@@ -1,14 +1,32 @@
 -- Read-only gate. Run after migration 030 on each target store.
 BEGIN;
 SET LOCAL TRANSACTION READ ONLY;
-SET LOCAL lock_timeout = '5s';
-SET LOCAL statement_timeout = '2min';
+SET lock_timeout = '5s';
+SET statement_timeout = '2min';
 
 DO $$
 DECLARE
   violations bigint;
   fk_count bigint;
 BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+    WHERE n.nspname='public' AND c.relname LIKE '__mc_loops_cutover_20260726%'
+  ) OR EXISTS (
+    SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+    WHERE n.nspname='public' AND p.proname LIKE '__mc_loops_cutover_20260726%'
+  ) OR EXISTS (
+    SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace
+    WHERE n.nspname='public' AND t.typname LIKE '__mc_loops_cutover_20260726%'
+  ) OR EXISTS (
+    SELECT 1 FROM pg_namespace n WHERE n.nspname LIKE '__mc_loops_cutover_20260726%'
+  ) OR EXISTS (
+    SELECT 1 FROM pg_constraint c WHERE c.conname LIKE '__mc_loops_cutover_20260726%'
+  ) OR EXISTS (
+    SELECT 1 FROM pg_trigger t WHERE NOT t.tgisinternal AND t.tgname LIKE '__mc_loops_cutover_20260726%'
+  ) THEN
+    RAISE EXCEPTION 'Postflight failed; cutover helper objects remain; run rollback recovery instead of continuing';
+  END IF;
   IF to_regclass('public.loops') IS NULL OR to_regclass('public.loop_events') IS NULL
      OR to_regclass('public.loop_work_items') IS NULL OR to_regclass('public.work_items') IS NULL THEN
     RAISE EXCEPTION 'Postflight failed; one or more canonical Loop tables are absent';
@@ -145,5 +163,8 @@ END $$;
 SELECT 'loops' AS relation,count(*) AS row_count FROM public.loops
 UNION ALL SELECT 'loop_events',count(*) FROM public.loop_events
 UNION ALL SELECT 'loop_work_items',count(*) FROM public.loop_work_items
-UNION ALL SELECT 'work_items_with_loop_id',count(*) FROM public.work_items WHERE loop_id IS NOT NULL;
+UNION ALL SELECT 'work_items_with_loop_id',count(*) FROM public.work_items WHERE loop_id IS NOT NULL
+UNION ALL SELECT 'canonical_source_type',count(*) FROM public.work_items WHERE source_type='loop';
+RESET lock_timeout;
+RESET statement_timeout;
 COMMIT;

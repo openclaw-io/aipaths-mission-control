@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
+import { executeSqlEditorStatements, splitTopLevelSql } from "./lib/sql-editor-harness.mjs";
 
 const { Client } = pg;
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -226,7 +227,43 @@ async function assertGateRejects(client, sql, expectedPattern, label) {
   if (!rejected) throw new Error(`${label} gate did not reject the adversarial fixture`);
 }
 
-export async function runLoopsCutoverRehearsal({ adminConnectionString = process.env.LOOPS_REHEARSAL_ADMIN_URL || "postgres:///postgres" } = {}) {
+async function helperObjectCount(client) {
+  const result = await client.query(`
+    select count(*)::int as count from (
+      select 'class:'||n.nspname||'.'||c.relname as object_name
+        from pg_class c join pg_namespace n on n.oid=c.relnamespace
+       where c.relname like '__mc_loops_cutover_20260726%'
+      union
+      select 'proc:'||n.nspname||'.'||p.proname
+        from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+       where p.proname like '__mc_loops_cutover_20260726%'
+      union
+      select 'constraint:'||c.conname from pg_constraint c
+       where c.conname like '__mc_loops_cutover_20260726%'
+      union
+      select 'trigger:'||t.tgname from pg_trigger t
+       where not t.tgisinternal and t.tgname like '__mc_loops_cutover_20260726%'
+      union
+      select 'namespace:'||n.nspname from pg_namespace n
+       where n.nspname like '__mc_loops_cutover_20260726%'
+    ) helpers
+  `);
+  return result.rows[0]?.count ?? -1;
+}
+
+async function assertExactProjectFingerprint(client, schemaBefore, dataBefore, label) {
+  const schemaAfter = await schemaFingerprint(client);
+  const dataAfter = await dataFingerprint(client, "project");
+  if (JSON.stringify(schemaAfter) !== JSON.stringify(schemaBefore)) throw new Error(`${label} changed schema fingerprint`);
+  if (JSON.stringify(dataAfter) !== JSON.stringify(dataBefore)) throw new Error(`${label} changed data fingerprint`);
+}
+
+export async function runLoopsCutoverRehearsal({
+  adminConnectionString = process.env.LOOPS_REHEARSAL_ADMIN_URL || "postgres:///postgres",
+  executionMode = "transactional",
+  injectFailureAfterRename = false,
+  injectFailureAfterEveryMutation = false,
+} = {}) {
   const database = `mc_loops_rehearsal_${process.pid}_${Date.now()}`;
   const admin = new Client({ connectionString: adminConnectionString });
   let scratch;
@@ -244,16 +281,165 @@ export async function runLoopsCutoverRehearsal({ adminConnectionString = process
       readFile(resolve(migrationDir,"postflight.sql"),"utf8"),
       readFile(resolve(migrationDir,"rollback.sql"),"utf8"),
     ]);
+    const executeArtifact = async (sql, label, options = {}) => executionMode === "sql-editor"
+      ? executeSqlEditorStatements(scratch, sql, { label, ...options })
+      : scratch.query(sql);
 
     await scratch.query(fixtureSql);
     await scratch.query(cloudShapeOptionalSql);
 
+    const assertArtifactRejectsWithoutMutation = async (sql, label, expectedPattern) => {
+      const schemaBefore = await schemaFingerprint(scratch);
+      const dataBefore = await dataFingerprint(scratch, "project");
+      let rejected = false;
+      try {
+        await executeArtifact(sql, label);
+      } catch (error) {
+        rejected = error?.code === "P0001" && expectedPattern.test(String(error?.message));
+        await scratch.query("ROLLBACK").catch(() => {});
+      }
+      if (!rejected) throw new Error(`${label} did not reject before mutation`);
+      await assertExactProjectFingerprint(scratch, schemaBefore, dataBefore, label);
+    };
+
+    // Reviewer adversary 1: rollback on an untouched Projects namespace has no
+    // provenance. It must reject in its first non-control statement and leave an
+    // exact schema+data fingerprint with no helper objects.
+    await assertArtifactRejectsWithoutMutation(rollback, "rollback-without-provenance", /no cutover provenance metadata|refusing all mutation/i);
+    if (await helperObjectCount(scratch) !== 0) throw new Error("rollback-without-provenance created a helper object");
+
+    // Reviewer adversary 2: any pre-existing Loop token on a participating
+    // index is reserved, even when the index is otherwise a legitimate source object.
+    await scratch.query("CREATE INDEX idx_work_items_loop_marker ON public.work_items(id)");
+    await assertArtifactRejectsWithoutMutation(preflight, "preflight-loop-index-provenance", /index names.*reserved token loop/i);
+    await assertArtifactRejectsWithoutMutation(forward, "forward-loop-index-provenance", /index names.*reserved token loop/i);
+    await scratch.query("DROP INDEX public.idx_work_items_loop_marker");
+
+    // Reviewer adversary 3: reserve the fallback CHECK name so rollback can
+    // never mistake a source constraint for one created by this cutover.
+    await scratch.query(`ALTER TABLE public.work_items
+      ADD CONSTRAINT work_items_source_type_loop_cutover_created
+      CHECK (source_type IS NULL OR source_type=ANY(ARRAY['manual'::text,'service'::text,'project'::text]))`);
+    await assertArtifactRejectsWithoutMutation(preflight, "preflight-reserved-fallback-check", /constraint names.*reserved token loop/i);
+    await assertArtifactRejectsWithoutMutation(forward, "forward-reserved-fallback-check", /constraint names.*reserved token loop/i);
+    await scratch.query("ALTER TABLE public.work_items DROP CONSTRAINT work_items_source_type_loop_cutover_created");
+
+    // Every source_type CHECK must be exactly transformable. No CHECK remains an
+    // explicitly supported source shape and is exercised by the normal cycles.
+    await scratch.query("ALTER TABLE public.work_items ADD CONSTRAINT source_type_without_project CHECK (source_type IS NULL OR source_type<>'forbidden')");
+    await assertArtifactRejectsWithoutMutation(preflight, "preflight-check-without-project", /not exactly transformable.*project literal/i);
+    await assertArtifactRejectsWithoutMutation(forward, "forward-check-without-project", /not exactly transformable.*project literal/i);
+    await scratch.query("ALTER TABLE public.work_items DROP CONSTRAINT source_type_without_project");
+    await scratch.query("ALTER TABLE public.work_items ADD CONSTRAINT source_type_with_destination CHECK (source_type IS NULL OR source_type<>'loop')");
+    await assertArtifactRejectsWithoutMutation(preflight, "preflight-check-with-loop-literal", /not exactly transformable.*no loop literal/i);
+    await assertArtifactRejectsWithoutMutation(forward, "forward-check-with-loop-literal", /not exactly transformable.*no loop literal/i);
+    await scratch.query("ALTER TABLE public.work_items DROP CONSTRAINT source_type_with_destination");
+
+    // The entire helper prefix is reserved, and forward uses the same broad gate.
+    await scratch.query("CREATE TABLE public.__mc_loops_cutover_20260726_unexpected_helper(id integer)");
+    await assertArtifactRejectsWithoutMutation(preflight, "preflight-unexpected-helper", /metadata\/helper exists/i);
+    await assertArtifactRejectsWithoutMutation(forward, "forward-unexpected-helper", /metadata\/helper already exists/i);
+    if (await helperObjectCount(scratch) === 0) throw new Error("helper residue gate unexpectedly removed the adversarial helper");
+    await scratch.query("DROP TABLE public.__mc_loops_cutover_20260726_unexpected_helper");
+
+    // Preflight duplicates forward's exact unique-partial multiplicity, key, and
+    // predicate gate instead of allowing a late post-mutation failure.
+    await scratch.query(`CREATE UNIQUE INDEX uq_project_primary_execution_a
+      ON public.project_work_items(project_id) WHERE relation_type='primary_execution'`);
+    await scratch.query(`CREATE UNIQUE INDEX uq_project_primary_execution_b
+      ON public.project_work_items(project_id) WHERE relation_type='primary_execution'`);
+    await assertArtifactRejectsWithoutMutation(preflight, "preflight-primary-index-multiplicity", /exact primary_execution uniqueness indexes.*at most one/i);
+    await assertArtifactRejectsWithoutMutation(forward, "forward-primary-index-multiplicity", /exact primary_execution uniqueness indexes.*at most one/i);
+    await scratch.query("DROP INDEX public.uq_project_primary_execution_a, public.uq_project_primary_execution_b");
+
+    if (injectFailureAfterEveryMutation) {
+      if (executionMode !== "sql-editor") throw new Error("all-checkpoint injection requires executionMode=sql-editor");
+      const checkpointLabels = splitTopLevelSql(forward)
+        .map((statement) => statement.match(/checkpoint:\s*recoverable-mutation\s+([a-z0-9-]+)/i)?.[1])
+        .filter(Boolean);
+      if (checkpointLabels.length === 0) throw new Error("forward has no recoverable mutation checkpoints");
+
+      for (const checkpoint of checkpointLabels) {
+        const schemaBefore = await schemaFingerprint(scratch);
+        const dataBefore = await dataFingerprint(scratch, "project");
+        await executeSqlEditorStatements(scratch, preflight, { label: `preflight-before-${checkpoint}` });
+        let injected = false;
+        try {
+          await executeSqlEditorStatements(scratch, forward, {
+            label: `forward-inject-${checkpoint}`,
+            afterStatement: ({ statement }) => {
+              if (statement.includes(`recoverable-mutation ${checkpoint}`)) {
+                injected = true;
+                throw new Error(`INJECTED_FAILURE_AFTER_${checkpoint}`);
+              }
+            },
+          });
+        } catch (error) {
+          if (!injected || !String(error?.message).includes(`INJECTED_FAILURE_AFTER_${checkpoint}`)) throw error;
+        }
+        if (!injected) throw new Error(`forward checkpoint was not reached: ${checkpoint}`);
+        await executeSqlEditorStatements(scratch, rollback, { label: `rollback-after-${checkpoint}` });
+        await assertExactProjectFingerprint(scratch, schemaBefore, dataBefore, `recovery after ${checkpoint}`);
+        const helpers = await helperObjectCount(scratch);
+        if (helpers !== 0) throw new Error(`recovery after ${checkpoint} left ${helpers} helper objects`);
+      }
+      return {
+        database,
+        executionMode,
+        injectedFailure: "after-every-recoverable-mutation",
+        checkpoints: checkpointLabels,
+        checkpointCount: checkpointLabels.length,
+        rollback: "passed",
+        exactSchemaAndData: true,
+        helperObjectsRemaining: 0,
+        adversarialReviewerCases: "rejected-with-exact-fingerprints",
+      };
+    }
+
+    if (injectFailureAfterRename) {
+      const schemaBefore = await schemaFingerprint(scratch);
+      const dataBefore = await dataFingerprint(scratch, "project");
+      await executeArtifact(preflight, "preflight");
+      let injected = false;
+      try {
+        await executeArtifact(forward, "forward", {
+          afterStatement: ({ statement }) => {
+            if (/ALTER TABLE public\.projects RENAME TO loops/i.test(statement)) {
+              injected = true;
+              throw new Error("INJECTED_FAILURE_AFTER_RENAME");
+            }
+          },
+        });
+      } catch (error) {
+        if (!injected || !/INJECTED_FAILURE_AFTER_RENAME/.test(String(error?.message))) throw error;
+      }
+      if (!injected) throw new Error("forward rename checkpoint was not reached");
+      await executeArtifact(rollback, "rollback-after-injected-forward");
+      const schemaAfter = await schemaFingerprint(scratch);
+      const dataAfter = await dataFingerprint(scratch, "project");
+      if (JSON.stringify(schemaAfter) !== JSON.stringify(schemaBefore)) throw new Error("partial-forward rollback schema fingerprint differs");
+      if (JSON.stringify(dataAfter) !== JSON.stringify(dataBefore)) throw new Error("partial-forward rollback data fingerprint differs");
+      const helpers = await scratch.query(`select n.nspname,c.relname from pg_class c join pg_namespace n on n.oid=c.relnamespace
+        where n.nspname='public' and c.relname like '__mc_loops_cutover_20260726%'`);
+      const helperFunctions = await scratch.query(`select n.nspname,p.proname from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+        where n.nspname='public' and p.proname like '__mc_loops_cutover_20260726%'`);
+      if (helpers.rowCount || helperFunctions.rowCount) throw new Error("rollback left cutover helper objects");
+      return {
+        database,
+        executionMode,
+        injectedFailure: "after-rename",
+        rollback: "passed",
+        exactSchemaAndData: true,
+        helperObjectsRemaining: 0,
+      };
+    }
+
     const executeCycle = async ({ sourceCheck, adversarialPostflight = false, shape, sourceIdType }) => {
       const schemaBefore = await schemaFingerprint(scratch);
       const dataBefore = await dataFingerprint(scratch,"project");
-      await scratch.query(preflight);
-      await scratch.query(forward);
-      await scratch.query(postflight);
+      await executeArtifact(preflight, "preflight");
+      await executeArtifact(forward, "forward");
+      await executeArtifact(postflight, "postflight");
 
       const migratedSourceIdType = await scratch.query(
         "select udt_name from information_schema.columns where table_schema='public' and table_name='work_items' and column_name='source_id'",
@@ -298,8 +484,18 @@ export async function runLoopsCutoverRehearsal({ adminConnectionString = process
         }
       }
 
-      await scratch.query(rollback);
+      await executeArtifact(rollback, "rollback");
       if (sourceCheck) await assertCheckBehavior(scratch,"project","loop");
+      const remainingHelpers = await scratch.query(`
+        select count(*)::int as count from (
+          select c.relname as name from pg_class c join pg_namespace n on n.oid=c.relnamespace
+           where n.nspname='public' and c.relname like '__mc_loops_cutover_20260726%'
+          union all
+          select p.proname from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+           where n.nspname='public' and p.proname like '__mc_loops_cutover_20260726%'
+        ) helpers
+      `);
+      if (remainingHelpers.rows[0]?.count !== 0) throw new Error(`rollback left ${remainingHelpers.rows[0]?.count} helper objects`);
       const schemaAfter = await schemaFingerprint(scratch);
       const dataAfter = await dataFingerprint(scratch,"project");
       const rolledBackSourceIdType = await scratch.query(
@@ -333,11 +529,12 @@ export async function runLoopsCutoverRehearsal({ adminConnectionString = process
     await scratch.query("delete from public.work_items where id='20000000-0000-0000-0000-000000000004'");
 
     return {
-      database, forward: "passed", postflight: "passed", rollback: "passed", exactSchemaAndData: true,
+      database, executionMode, forward: "passed", postflight: "passed", rollback: "passed", exactSchemaAndData: true,
       scenarios: ["cloud-shape", "local-shape"],
       sourceIdTypes: { "cloud-shape": "uuid", "local-shape": "text" },
       duplicateSqlState: "23505", adversarialPostflight: "rejected-column-constraint-index", orphanPreflight: "rejected-non-terminal",
       optionalDestinationCollision: "rejected",
+      adversarialReviewerCases: "rejected-with-exact-fingerprints",
     };
   } finally {
     if (scratch) await scratch.end().catch(() => {});
@@ -348,7 +545,10 @@ export async function runLoopsCutoverRehearsal({ adminConnectionString = process
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    const result = await runLoopsCutoverRehearsal();
+    const executionMode = process.argv.includes("--sql-editor") ? "sql-editor" : "transactional";
+    const injectFailureAfterRename = process.argv.includes("--inject-after-rename");
+    const injectFailureAfterEveryMutation = process.argv.includes("--inject-all-checkpoints");
+    const result = await runLoopsCutoverRehearsal({ executionMode, injectFailureAfterRename, injectFailureAfterEveryMutation });
     console.log(`Loops PostgreSQL rehearsal passed: ${JSON.stringify(result)}`);
   } catch (error) {
     console.error(error instanceof Error ? error.stack : error);
