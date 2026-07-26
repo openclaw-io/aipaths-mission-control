@@ -556,20 +556,8 @@ CREATE TABLE IF NOT EXISTS public.intel_sources (
 );
 CREATE INDEX IF NOT EXISTS idx_intel_sources_lane_enabled ON public.intel_sources(lane, enabled);
 
-INSERT INTO public.intel_sources (source_key, name, lane, source_type, base_url, enabled)
-VALUES
-  ('hackernews', 'Hacker News', 'trend', 'api', 'https://news.ycombinator.com', true),
-  ('reddit', 'Reddit', 'trend', 'api', 'https://www.reddit.com', true),
-  ('producthunt', 'Product Hunt', 'trend', 'api', 'https://www.producthunt.com', true),
-  ('news', 'AI News RSS', 'industry', 'rss', null, true),
-  ('google_trends', 'Google Trends', 'trend', 'api', null, true)
-ON CONFLICT (source_key) DO UPDATE SET
-  name = EXCLUDED.name,
-  lane = EXCLUDED.lane,
-  source_type = EXCLUDED.source_type,
-  base_url = EXCLUDED.base_url,
-  enabled = EXCLUDED.enabled,
-  updated_at = now();
+-- Keep the bootstrap data tables empty. The cloud bootstrap owns intel_sources
+-- and refuses to touch any non-empty local data set without explicit replacement.
 
 CREATE TABLE IF NOT EXISTS public.intel_items_raw (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

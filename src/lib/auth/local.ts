@@ -3,7 +3,7 @@ export interface LocalMissionControlUser {
 }
 
 export function isLocalAuthDisabled() {
-  return process.env.MISSION_CONTROL_LOCAL_AUTH_DISABLED !== "false";
+  return process.env.MISSION_CONTROL_LOCAL_AUTH_DISABLED === "true";
 }
 
 export function getLocalMissionControlUser(): LocalMissionControlUser | null {

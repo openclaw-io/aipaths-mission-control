@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { LayoutShell } from "@/components/LayoutShell";
+import { isLocalAuthDisabled } from "@/lib/auth/local";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -23,13 +24,15 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const authEnabled = !isLocalAuthDisabled();
+
   return (
     <html
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="min-h-full bg-[#0a0a0f] text-gray-200">
-        <LayoutShell>{children}</LayoutShell>
+        <LayoutShell authEnabled={authEnabled}>{children}</LayoutShell>
       </body>
     </html>
   );

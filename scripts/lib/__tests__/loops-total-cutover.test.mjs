@@ -48,13 +48,15 @@ test("local Loop review preserves the migrated local shape without assuming last
 
 test("cloud/local sync is bounded, FK-safe, and verifies the local target", () => {
   const sync = readFileSync(resolve(root, "scripts/sync-local-core-from-cloud.mjs"), "utf8");
+  const helpers = readFileSync(resolve(root, "ops/local-postgres/sync-local-core-helpers.mjs"), "utf8");
+  const syncContract = `${sync}\n${helpers}`;
   const positions = ["loops", "work_items", "loop_events", "loop_work_items"].map((name) => sync.indexOf(`name: \"${name}\"`));
   assert.ok(positions.every((position) => position >= 0), "sync is missing one or more Loop graph tables");
   assert.deepEqual([...positions].sort((a, b) => a - b), positions, "Loop graph sync order is not dependency-safe");
   assert.match(sync, /count assertion|assertImportedCounts/i, "sync does not assert imported counts");
   assert.doesNotMatch(sync, /\btruncate\b/i, "sync must not use TRUNCATE (especially CASCADE)");
-  assert.match(sync, /external foreign key|assertNoExternalReferencingForeignKeys/i);
-  assert.match(sync, /new URL\s*\(/);
+  assert.match(sync, /getExternalForeignKeys|assertNoExternalReferencingForeignKeys/i);
+  assert.match(syncContract, /new URL\s*\(/);
   assert.match(sync, /current_database\s*\(\)|verifyLocalDatabaseTarget/i);
   assert.match(sync, /restoreWorkItemParents|parent_id.*null/is, "work_items.parent_id is not imported in two FK-safe phases");
 });

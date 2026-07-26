@@ -2,7 +2,6 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { createClient } from "@/lib/supabase/client";
 
 const NAV_ITEMS = [
   { href: "/", label: "Overview", emoji: "📊" },
@@ -25,12 +24,14 @@ const NAV_ITEMS = [
   { href: "/memory", label: "Memory", emoji: "🧠" },
 ];
 
-export default function Sidebar() {
+export default function Sidebar({ authEnabled }: { authEnabled: boolean }) {
   const pathname = usePathname();
   const router = useRouter();
-  const supabase = createClient();
 
   async function handleSignOut() {
+    if (!authEnabled) return;
+    const { createClient } = await import("@/lib/supabase/client");
+    const supabase = createClient();
     await supabase.auth.signOut();
     router.push("/login");
     router.refresh();
@@ -66,15 +67,16 @@ export default function Sidebar() {
         })}
       </nav>
 
-      {/* Footer — Sign Out */}
-      <div className="border-t border-white/10 px-4 py-4">
-        <button
-          onClick={handleSignOut}
-          className="w-full rounded-lg px-3 py-2 text-sm text-gray-400 transition hover:bg-white/5 hover:text-white"
-        >
-          Sign Out
-        </button>
-      </div>
+      {authEnabled && (
+        <div className="border-t border-white/10 px-4 py-4">
+          <button
+            onClick={handleSignOut}
+            className="w-full rounded-lg px-3 py-2 text-sm text-gray-400 transition hover:bg-white/5 hover:text-white"
+          >
+            Sign Out
+          </button>
+        </div>
+      )}
     </aside>
   );
 }
