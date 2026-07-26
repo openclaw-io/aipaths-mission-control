@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import { createClient } from "@/lib/supabase/client";
 import type { VideoPipelineItem } from "@/app/youtube/page";
 
@@ -8,7 +8,6 @@ const REALTIME_ENABLED = process.env.NEXT_PUBLIC_ENABLE_SUPABASE_REALTIME === "t
 
 export function useRealtimeYouTube(initialItems: VideoPipelineItem[]): [VideoPipelineItem[], Dispatch<SetStateAction<VideoPipelineItem[]>>] {
   const [items, setItems] = useState<VideoPipelineItem[]>(initialItems);
-  const supabase = useMemo(() => createClient(), []);
 
   useEffect(() => {
     setItems(initialItems);
@@ -17,6 +16,7 @@ export function useRealtimeYouTube(initialItems: VideoPipelineItem[]): [VideoPip
   useEffect(() => {
     if (!REALTIME_ENABLED) return;
 
+    const supabase = createClient();
     const channel = supabase
       .channel("youtube-realtime")
       .on(
@@ -40,7 +40,7 @@ export function useRealtimeYouTube(initialItems: VideoPipelineItem[]): [VideoPip
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [supabase]);
+  }, []);
 
   return [items, setItems];
 }
