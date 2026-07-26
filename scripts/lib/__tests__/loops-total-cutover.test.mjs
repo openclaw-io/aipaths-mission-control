@@ -116,6 +116,25 @@ test("versioned migration artifacts are transactional, reversible, and drift-lou
   assert.match(forward, /source_type_loop_cutover_created/i, "forward lacks a permissive no-project CHECK fallback");
   assert.match(rollback, /source_type_loop_cutover_created/i);
 
+  const cutoverArtifacts = { forward, preflight, postflight, rollback };
+  for (const [name, sql] of Object.entries(cutoverArtifacts)) {
+    assert.doesNotMatch(sql, /ALTER\s+(?:TABLE\s+[^;]+\s+)?(?:COLUMN\s+)?source_id\s+TYPE/i, `${name} must preserve the existing source_id type`);
+    assert.doesNotMatch(sql, /\b(?:p|l)\.id::text\s*=\s*wi\.source_id(?!::text)/, `${name} has a one-sided source_id ID comparison`);
+    assert.doesNotMatch(sql, /IS DISTINCT FROM\s+wi\.source_id(?!::text)/, `${name} has a one-sided source_id marker comparison`);
+  }
+  assert.match(forward, /p\.id::text\s*=\s*wi\.source_id::text/);
+  assert.match(preflight, /p\.id::text\s*=\s*wi\.source_id::text/);
+  assert.match(postflight, /l\.id::text\s*=\s*wi\.source_id::text/);
+  assert.match(rollback, /l\.id::text\s*=\s*wi\.source_id::text/);
+  assert.match(postflight, /orphaned_source_loop_id[^;]*::text\s+IS DISTINCT FROM\s+wi\.source_id::text/is);
+  assert.match(rollback, /orphaned_source_loop_id[^;]*::text\s+IS DISTINCT FROM\s+wi\.source_id::text/is);
+
+  const rehearsal = readFileSync(resolve(root, "scripts/rehearse-loops-cutover.mjs"), "utf8");
+  assert.match(rehearsal, /source_id uuid/);
+  assert.match(rehearsal, /ALTER COLUMN source_id TYPE text USING source_id::text/);
+  assert.match(rehearsal, /assertSourceIdWrites/);
+  assert.match(rehearsal, /orphaned_source_loop_id/);
+
   for (const optionalRelation of ["pipeline_items", "recurrence_rules"]) {
     assert.match(forward, new RegExp(`LOCK TABLE[^;]*${optionalRelation}|LOCK TABLE public\\.${optionalRelation}`, "is"));
     assert.match(rollback, new RegExp(`LOCK TABLE[^;]*${optionalRelation}|LOCK TABLE public\\.${optionalRelation}`, "is"));

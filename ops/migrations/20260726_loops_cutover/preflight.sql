@@ -45,7 +45,7 @@ BEGIN
     WHERE wi.project_id IS NOT NULL AND p.id IS NULL;
   IF violations>0 THEN RAISE EXCEPTION 'Preflight failed; % orphan work_items.project_id values',violations; END IF;
 
-  SELECT count(*) INTO violations FROM public.work_items wi LEFT JOIN public.projects p ON p.id::text=wi.source_id
+  SELECT count(*) INTO violations FROM public.work_items wi LEFT JOIN public.projects p ON p.id::text=wi.source_id::text
   WHERE wi.source_type='project' AND p.id IS NULL AND wi.status NOT IN ('done','failed','canceled','cancelled');
   IF violations>0 THEN RAISE EXCEPTION 'Preflight failed; % non-terminal source_type=project rows have orphan source_id',violations; END IF;
 

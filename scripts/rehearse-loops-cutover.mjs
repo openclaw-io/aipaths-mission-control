@@ -24,7 +24,7 @@ CREATE TABLE public.work_items (
   project_id uuid REFERENCES public.projects(id) ON DELETE SET NULL,
   parent_id uuid REFERENCES public.work_items(id) ON DELETE SET NULL,
   source_type text,
-  source_id text,
+  source_id uuid,
   status text NOT NULL DEFAULT 'ready',
   requested_by text,
   payload jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -183,6 +183,38 @@ async function assertDuplicatePrimaryExecutionRejected(client) {
   }
 }
 
+async function assertSourceIdWrites(client, expectedType) {
+  await client.query("BEGIN");
+  try {
+    const inserted = await client.query(`
+      INSERT INTO public.work_items (id,loop_id,parent_id,source_type,source_id,status,requested_by,payload)
+      VALUES ('20000000-0000-0000-0000-000000000005',NULL,NULL,'loop',
+              '10000000-0000-0000-0000-000000000001','ready','system','{}')
+      RETURNING source_id::text AS source_id,pg_typeof(source_id)::text AS source_id_type
+    `);
+    if (inserted.rows[0]?.source_id_type !== expectedType
+      || inserted.rows[0]?.source_id !== "10000000-0000-0000-0000-000000000001") {
+      throw new Error(`source_id insert changed shape/value: ${JSON.stringify(inserted.rows[0])}`);
+    }
+    const updated = await client.query(`
+      UPDATE public.work_items
+         SET source_id='ffffffff-ffff-ffff-ffff-ffffffffffff',
+             status='done',
+             payload=jsonb_build_object('orphaned_source_loop_id','ffffffff-ffff-ffff-ffff-ffffffffffff')
+       WHERE id='20000000-0000-0000-0000-000000000005'
+       RETURNING source_id::text AS source_id,pg_typeof(source_id)::text AS source_id_type,
+                 payload->>'orphaned_source_loop_id' AS marker
+    `);
+    if (updated.rows[0]?.source_id_type !== expectedType
+      || updated.rows[0]?.source_id !== "ffffffff-ffff-ffff-ffff-ffffffffffff"
+      || updated.rows[0]?.marker !== updated.rows[0]?.source_id) {
+      throw new Error(`source_id update/payload marker changed shape/value: ${JSON.stringify(updated.rows[0])}`);
+    }
+  } finally {
+    await client.query("ROLLBACK");
+  }
+}
+
 async function assertGateRejects(client, sql, expectedPattern, label) {
   let rejected = false;
   try {
@@ -216,12 +248,19 @@ export async function runLoopsCutoverRehearsal({ adminConnectionString = process
     await scratch.query(fixtureSql);
     await scratch.query(cloudShapeOptionalSql);
 
-    const executeCycle = async ({ sourceCheck, adversarialPostflight = false, shape }) => {
+    const executeCycle = async ({ sourceCheck, adversarialPostflight = false, shape, sourceIdType }) => {
       const schemaBefore = await schemaFingerprint(scratch);
       const dataBefore = await dataFingerprint(scratch,"project");
       await scratch.query(preflight);
       await scratch.query(forward);
       await scratch.query(postflight);
+
+      const migratedSourceIdType = await scratch.query(
+        "select udt_name from information_schema.columns where table_schema='public' and table_name='work_items' and column_name='source_id'",
+      );
+      if (migratedSourceIdType.rows[0]?.udt_name !== sourceIdType) {
+        throw new Error(`forward modified work_items.source_id type (${shape}): ${migratedSourceIdType.rows[0]?.udt_name}`);
+      }
 
       const transformed = await scratch.query(`
         select wi.source_type,wi.requested_by,wi.payload,l.metadata,le.event_type,le.actor,le.payload as event_payload
@@ -244,6 +283,7 @@ export async function runLoopsCutoverRehearsal({ adminConnectionString = process
       }
       await assertCheckBehavior(scratch,"loop","project");
       await assertDuplicatePrimaryExecutionRejected(scratch);
+      await assertSourceIdWrites(scratch,sourceIdType);
 
       if (adversarialPostflight) {
         const leftovers = [
@@ -262,18 +302,25 @@ export async function runLoopsCutoverRehearsal({ adminConnectionString = process
       if (sourceCheck) await assertCheckBehavior(scratch,"project","loop");
       const schemaAfter = await schemaFingerprint(scratch);
       const dataAfter = await dataFingerprint(scratch,"project");
+      const rolledBackSourceIdType = await scratch.query(
+        "select udt_name from information_schema.columns where table_schema='public' and table_name='work_items' and column_name='source_id'",
+      );
+      if (rolledBackSourceIdType.rows[0]?.udt_name !== sourceIdType) {
+        throw new Error(`rollback modified work_items.source_id type (${shape}): ${rolledBackSourceIdType.rows[0]?.udt_name}`);
+      }
       if (JSON.stringify(schemaAfter) !== JSON.stringify(schemaBefore)) throw new Error(`rollback schema fingerprint differs (${shape}, ${sourceCheck ? "existing CHECK" : "no CHECK"})`);
       if (JSON.stringify(dataAfter) !== JSON.stringify(dataBefore)) throw new Error(`rollback data fingerprint differs (${shape}, ${sourceCheck ? "existing CHECK" : "no CHECK"})`);
     };
 
-    await executeCycle({ sourceCheck: true, adversarialPostflight: true, shape: "cloud-shape" });
+    await executeCycle({ sourceCheck: true, adversarialPostflight: true, shape: "cloud-shape", sourceIdType: "uuid" });
     await scratch.query("ALTER TABLE public.work_items DROP CONSTRAINT work_items_source_type_check");
     await scratch.query("CREATE UNIQUE INDEX uq_project_work_items_primary_execution ON public.project_work_items(project_id) WHERE relation_type='primary_execution'");
-    await executeCycle({ sourceCheck: false, shape: "cloud-shape" });
+    await executeCycle({ sourceCheck: false, shape: "cloud-shape", sourceIdType: "uuid" });
 
     await scratch.query("DROP TABLE public.recurrence_rules, public.pipeline_items");
+    await scratch.query("ALTER TABLE public.work_items ALTER COLUMN source_id TYPE text USING source_id::text");
     await scratch.query(localShapeOptionalSql);
-    await executeCycle({ sourceCheck: false, shape: "local-shape" });
+    await executeCycle({ sourceCheck: false, shape: "local-shape", sourceIdType: "text" });
 
     await scratch.query("ALTER TABLE public.pipeline_items ADD COLUMN loop_id uuid");
     await assertGateRejects(scratch, preflight, /destination.*pipeline_items\.loop_id|pipeline_items\.loop_id.*collision/i, "preflight optional destination-column collision");
@@ -288,6 +335,7 @@ export async function runLoopsCutoverRehearsal({ adminConnectionString = process
     return {
       database, forward: "passed", postflight: "passed", rollback: "passed", exactSchemaAndData: true,
       scenarios: ["cloud-shape", "local-shape"],
+      sourceIdTypes: { "cloud-shape": "uuid", "local-shape": "text" },
       duplicateSqlState: "23505", adversarialPostflight: "rejected-column-constraint-index", orphanPreflight: "rejected-non-terminal",
       optionalDestinationCollision: "rejected",
     };

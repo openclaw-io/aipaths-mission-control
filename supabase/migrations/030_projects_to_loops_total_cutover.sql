@@ -96,7 +96,7 @@ BEGIN
   IF violations > 0 THEN RAISE EXCEPTION 'Loops cutover found % orphan work_items.project_id values', violations; END IF;
 
   SELECT count(*) INTO violations
-  FROM public.work_items wi LEFT JOIN public.projects p ON p.id::text=wi.source_id
+  FROM public.work_items wi LEFT JOIN public.projects p ON p.id::text=wi.source_id::text
   WHERE wi.source_type='project' AND p.id IS NULL
     AND wi.status NOT IN ('done','failed','canceled','cancelled');
   IF violations > 0 THEN RAISE EXCEPTION 'Loops cutover found % non-terminal source_type=project rows with orphan source_id', violations; END IF;
@@ -255,7 +255,7 @@ WHERE jsonb_path_exists(metadata, '$.** ? (@ == $value)', jsonb_build_object('va
 UPDATE public.work_items wi
 SET payload=payload || jsonb_build_object('orphaned_source_loop_id',wi.source_id)
 WHERE wi.source_type='project' AND wi.status IN ('done','failed','canceled','cancelled')
-  AND NOT EXISTS (SELECT 1 FROM public.projects p WHERE p.id::text=wi.source_id);
+  AND NOT EXISTS (SELECT 1 FROM public.projects p WHERE p.id::text=wi.source_id::text);
 
 UPDATE public.work_items SET
   source_type=CASE WHEN source_type='project' THEN 'loop' ELSE source_type END,

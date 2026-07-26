@@ -10,6 +10,7 @@ test("forward, postflight, CHECK/value transforms, and exact rollback execute on
       { forward: "passed", postflight: "passed", rollback: "passed", exactSchemaAndData: true },
     );
     assert.deepEqual(result.scenarios, ["cloud-shape", "local-shape"]);
+    assert.deepEqual(result.sourceIdTypes, { "cloud-shape": "uuid", "local-shape": "text" });
     assert.equal(result.optionalDestinationCollision, "rejected");
   } catch (error) {
     const unavailableCodes = new Set(["ECONNREFUSED", "ENOTFOUND", "28P01", "42501"]);

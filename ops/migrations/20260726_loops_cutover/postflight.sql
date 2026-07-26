@@ -106,16 +106,16 @@ BEGIN
      OR jsonb_path_exists(payload,'$.** ? (@ == $value)',jsonb_build_object('value','project-planner'))
      OR jsonb_path_exists(payload,'$.** ? (@ == $value)',jsonb_build_object('value','project-execution-materializer'));
   IF violations>0 THEN RAISE EXCEPTION 'Postflight failed; % work_items retain controlled legacy keys/values',violations; END IF;
-  SELECT count(*) INTO violations FROM public.work_items wi LEFT JOIN public.loops l ON l.id::text=wi.source_id
+  SELECT count(*) INTO violations FROM public.work_items wi LEFT JOIN public.loops l ON l.id::text=wi.source_id::text
   WHERE wi.source_type='loop' AND l.id IS NULL
     AND (wi.status NOT IN ('done','failed','canceled','cancelled')
       OR NOT (wi.payload ? 'orphaned_source_loop_id')
-      OR (wi.payload->>'orphaned_source_loop_id') IS DISTINCT FROM wi.source_id);
+      OR (wi.payload->>'orphaned_source_loop_id')::text IS DISTINCT FROM wi.source_id::text);
   IF violations>0 THEN RAISE EXCEPTION 'Postflight failed; % orphan Loop source_id rows lack a valid orphaned_source_loop_id marker',violations; END IF;
   SELECT count(*) INTO violations FROM public.work_items wi
   WHERE wi.payload ? 'orphaned_source_loop_id'
     AND (wi.source_type<>'loop' OR wi.status NOT IN ('done','failed','canceled','cancelled')
-      OR (wi.payload->>'orphaned_source_loop_id') IS DISTINCT FROM wi.source_id);
+      OR (wi.payload->>'orphaned_source_loop_id')::text IS DISTINCT FROM wi.source_id::text);
   IF violations>0 THEN RAISE EXCEPTION 'Postflight failed; % invalid orphaned_source_loop_id markers',violations; END IF;
   SELECT count(*) INTO violations FROM public.loop_events
   WHERE event_type LIKE 'project.%' OR actor IN ('project-planner','project-execution-materializer')

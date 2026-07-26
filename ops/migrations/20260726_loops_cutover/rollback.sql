@@ -56,6 +56,18 @@ BEGIN
   WHERE payload ?| ARRAY['source_project_id','source_project_title','materialized_from_project','project_status_at_materialization','superseded_for_project_id'];
   IF collisions>0 THEN RAISE EXCEPTION 'Loops rollback found % loop_events destination payload key collisions',collisions; END IF;
 
+  SELECT count(*) INTO collisions FROM public.work_items wi LEFT JOIN public.loops l ON l.id::text=wi.source_id::text
+  WHERE wi.source_type='loop' AND l.id IS NULL
+    AND (wi.status NOT IN ('done','failed','canceled','cancelled')
+      OR NOT (wi.payload ? 'orphaned_source_loop_id')
+      OR (wi.payload->>'orphaned_source_loop_id')::text IS DISTINCT FROM wi.source_id::text);
+  IF collisions>0 THEN RAISE EXCEPTION 'Loops rollback found % orphan Loop source_id rows without a valid orphaned_source_loop_id marker',collisions; END IF;
+  SELECT count(*) INTO collisions FROM public.work_items wi
+  WHERE wi.payload ? 'orphaned_source_loop_id'
+    AND (wi.source_type<>'loop' OR wi.status NOT IN ('done','failed','canceled','cancelled')
+      OR (wi.payload->>'orphaned_source_loop_id')::text IS DISTINCT FROM wi.source_id::text);
+  IF collisions>0 THEN RAISE EXCEPTION 'Loops rollback found % invalid orphaned_source_loop_id markers',collisions; END IF;
+
   SELECT count(*) INTO collisions FROM public.loop_events le LEFT JOIN public.loops l ON l.id=le.loop_id WHERE l.id IS NULL;
   IF collisions>0 THEN RAISE EXCEPTION 'Loops rollback found % orphan loop_events.loop_id values',collisions; END IF;
   SELECT count(*) INTO collisions FROM public.loop_work_items lwi
