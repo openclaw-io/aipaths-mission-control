@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { createServiceClient } from "@/lib/supabase/admin";
+import { query, withTransaction } from "@/lib/db/postgres";
 
 export const dynamic = "force-dynamic";
 
@@ -183,17 +183,13 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const supabase = createServiceClient();
-  const { data: projects, error } = await supabase
-    .from("projects")
-    .select("id, status, key, name, summary, description, priority, metadata, plan, clarification_questions")
-    .eq("status", "planning")
-    .order("updated_at", { ascending: true })
-    .limit(10);
-
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
-  }
+  const { rows: projects } = await query<ProjectRow>(`
+    SELECT id, status, key, name, summary, description, priority, metadata, plan, clarification_questions
+    FROM public.projects
+    WHERE status = 'planning'
+    ORDER BY updated_at ASC
+    LIMIT 10
+  `);
 
   let promoted = 0;
   let clarified = 0;
@@ -221,17 +217,13 @@ export async function POST(request: NextRequest) {
     const now = new Date().toISOString();
     const nextStatus = normalized.needsClarification ? "needs_clarification" : "needs_approval";
 
-    const { error: updateError } = await supabase
-      .from("projects")
-      .update({
-        name: normalized.normalizedName,
-        summary: normalized.summary,
-        description: normalized.description,
-        priority: normalized.priority,
-        status: nextStatus,
-        plan: normalized.needsClarification ? [] : normalized.plan,
-        clarification_questions: normalized.needsClarification ? normalized.clarificationQuestions : [],
-        metadata: {
+    try {
+      const eventType = normalized.needsClarification
+        ? "project.clarification_requested"
+        : "project.ready_for_approval";
+
+      const updated = await withTransaction(async (client) => {
+        const metadata = {
           ...(project.metadata || {}),
           raw_input: normalized.rawInput,
           clarity_score: normalized.clarityScore,
@@ -240,50 +232,69 @@ export async function POST(request: NextRequest) {
           interpreted_title: normalized.normalizedName,
           interpreted_summary: normalized.summary,
           intent_type: normalized.intent,
-        },
-        updated_at: now,
-      })
-      .eq("id", project.id)
-      .eq("status", "planning");
+        };
 
-    if (updateError) {
-      details.push({ projectId: project.id, action: `error:${updateError.message}` });
+        const updateResult = await client.query(`
+          UPDATE public.projects
+          SET name = $1,
+              summary = $2,
+              description = $3,
+              priority = $4,
+              status = $5,
+              plan = $6::jsonb,
+              clarification_questions = $7::jsonb,
+              metadata = $8::jsonb,
+              updated_at = $9::timestamptz
+          WHERE id = $10
+            AND status = 'planning'
+          RETURNING id
+        `, [
+          normalized.normalizedName,
+          normalized.summary,
+          normalized.description,
+          normalized.priority,
+          nextStatus,
+          JSON.stringify(normalized.needsClarification ? [] : normalized.plan),
+          JSON.stringify(normalized.needsClarification ? normalized.clarificationQuestions : []),
+          JSON.stringify(metadata),
+          now,
+          project.id,
+        ]);
+
+        if (!updateResult.rows[0]) return false;
+
+        await client.query(`
+          INSERT INTO public.project_events (project_id, event_type, from_status, to_status, actor, payload, created_at)
+          VALUES ($1, $2, 'planning', $3, 'project-planner', $4::jsonb, $5::timestamptz)
+        `, [
+          project.id,
+          eventType,
+          nextStatus,
+          JSON.stringify({
+            clarity_score: normalized.clarityScore,
+            source: "intent_based_normalization",
+            intent_type: normalized.intent,
+          }),
+          now,
+        ]);
+
+        return true;
+      });
+
+      if (!updated) {
+        details.push({ projectId: project.id, action: "skipped_status_changed" });
+        continue;
+      }
+    } catch (updateError) {
+      details.push({ projectId: project.id, action: `error:${updateError instanceof Error ? updateError.message : "update_failed"}` });
       continue;
     }
 
     if (normalized.needsClarification) {
-      await supabase.from("project_events").insert({
-        project_id: project.id,
-        event_type: "project.clarification_requested",
-        from_status: "planning",
-        to_status: "needs_clarification",
-        actor: "project-planner",
-        payload: {
-          clarity_score: normalized.clarityScore,
-          source: "intent_based_normalization",
-          intent_type: normalized.intent,
-        },
-        created_at: now,
-      });
       clarified++;
       details.push({ projectId: project.id, action: "normalized_and_requested_clarification" });
       continue;
     }
-
-    await supabase.from("project_events").insert({
-      project_id: project.id,
-      event_type: "project.ready_for_approval",
-      from_status: "planning",
-      to_status: "needs_approval",
-      actor: "project-planner",
-      payload: {
-        clarity_score: normalized.clarityScore,
-        source: "intent_based_normalization",
-        intent_type: normalized.intent,
-      },
-      created_at: now,
-    });
-
     promoted++;
     details.push({ projectId: project.id, action: `normalized_${normalized.intent}_project_and_promoted` });
   }

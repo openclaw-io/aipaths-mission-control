@@ -1,3 +1,6 @@
+import { isLocalAuthDisabled } from "@/lib/auth/local";
+import { normalizeRows } from "@/lib/db/mission-control";
+import { query } from "@/lib/db/postgres";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { BlogsClient } from "@/components/blogs/BlogsClient";
 import { COMPACT_LINKED_WORK_ITEM_SELECT, compactWorkItemRow } from "@/lib/work-items/compact-payload";
@@ -41,29 +44,26 @@ export interface LinkedWorkItem {
 }
 
 export default async function BlogsPage() {
-  const [{ data, error }, { data: workItems, error: workError }] = await Promise.all([
-    supabaseAdmin
-      .from("pipeline_items")
-      .select(COMPACT_EDITORIAL_PIPELINE_SELECT)
-      .eq("pipeline_type", "blog")
-      .order("created_at", { ascending: false }),
-    supabaseAdmin
-      .from("work_items")
-      .select(COMPACT_LINKED_WORK_ITEM_SELECT)
-      .in("source_type", ["pipeline_item", "service"])
-      .eq("payload->>pipeline_type", "blog")
-      .order("created_at", { ascending: false }),
-  ]);
+  const useLocalMode = isLocalAuthDisabled();
 
-  if (error) {
-    console.error("[BlogsPage] Failed to fetch blog items:", error);
-  }
-  if (workError) {
-    console.error("[BlogsPage] Failed to fetch work items:", workError);
-  }
+  const [pipelineRows, workRows] = useLocalMode
+    ? await Promise.all([
+        query<Record<string, unknown>>(`select * from pipeline_items where pipeline_type = 'blog' order by created_at desc`),
+        query<Record<string, unknown>>(`select * from work_items where source_type = any($1::text[]) and payload ->> 'pipeline_type' = 'blog' order by created_at desc`, [["pipeline_item", "service"]]),
+      ])
+    : await Promise.all([
+        supabaseAdmin
+          .from("pipeline_items")
+          .select(COMPACT_EDITORIAL_PIPELINE_SELECT),
+        supabaseAdmin
+          .from("work_items")
+          .select(COMPACT_LINKED_WORK_ITEM_SELECT)
+          .in("source_type", ["pipeline_item", "service"])
+          .eq("payload->>pipeline_type", "blog"),
+      ]);
 
-  const blogs = (data ?? []).map((item) => compactEditorialPipelineItem(item as unknown as Record<string, unknown>)) as unknown as BlogItem[];
-  const linkedWorkItems = (workItems ?? []).map((item) => compactWorkItemRow(item as unknown as Record<string, unknown>)).filter((item) => {
+  const blogs = normalizeRows(((pipelineRows as { rows?: Record<string, unknown>[]; data?: Record<string, unknown>[] }).rows ?? (pipelineRows as { data?: Record<string, unknown>[] }).data ?? [])).map((item) => compactEditorialPipelineItem(item as unknown as Record<string, unknown>)) as unknown as BlogItem[];
+  const linkedWorkItems = normalizeRows(((workRows as { rows?: Record<string, unknown>[]; data?: Record<string, unknown>[] }).rows ?? (workRows as { data?: Record<string, unknown>[] }).data ?? [])).map((item) => compactWorkItemRow(item as unknown as Record<string, unknown>)).filter((item) => {
     const payload = item.payload || {};
     const isLegacyManualTransition = item.source_type === "service" && payload.trigger === "manual_transition";
     return payload.pipeline_type === "blog" && !isLegacyManualTransition;

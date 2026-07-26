@@ -1,10 +1,17 @@
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { SuggestionsClient, type SuggestionItem } from "@/components/suggestions/SuggestionsClient";
 import { COMPACT_WORK_ITEM_SELECT, compactWorkItemRow } from "@/lib/work-items/compact-payload";
+import { isLocalAuthDisabled } from "@/lib/auth/local";
+import { getSuggestions } from "@/lib/db/mission-control";
 
 export const dynamic = "force-dynamic";
 
 export default async function SuggestionsPage() {
+  if (isLocalAuthDisabled()) {
+    const initialItems = await getSuggestions() as unknown as SuggestionItem[];
+    return <SuggestionsClient initialItems={initialItems} />;
+  }
+
   const { data, error } = await supabaseAdmin
     .from("work_items")
     .select(COMPACT_WORK_ITEM_SELECT)

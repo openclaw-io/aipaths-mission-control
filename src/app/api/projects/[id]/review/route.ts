@@ -1,4 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { getLocalMissionControlUser, isLocalAuthDisabled } from "@/lib/auth/local";
+import { query } from "@/lib/db/postgres";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/admin";
 import {
@@ -6,6 +8,10 @@ import {
   isPrimaryExecutionOpen,
   reconcileProjectStatusWithPrimaryExecution,
 } from "@/lib/projects/lifecycle";
+import {
+  getPrimaryExecutionWorkItemLocal,
+  reconcileProjectStatusWithPrimaryExecutionLocal,
+} from "@/lib/projects/local";
 
 export const dynamic = "force-dynamic";
 
@@ -14,16 +20,20 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-
-  const authClient = await createClient();
-  const {
-    data: { user },
-  } = await authClient.auth.getUser();
+  const useLocalMode = isLocalAuthDisabled();
+  const authClient = useLocalMode ? null : await createClient();
+  const actor = useLocalMode ? getLocalMissionControlUser() : null;
+  let user: { email?: string | null; id?: string | null } | null = actor ? { email: actor.email, id: actor.email } : null;
+  if (!useLocalMode) {
+    const authResult = await authClient!.auth.getUser();
+    user = authResult.data.user;
+  }
 
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  const actorIdentity = String(user.email || user.id || "local@mission-control");
   const body = await request.json().catch(() => ({}));
   const action = body?.action;
   const feedback = typeof body?.feedback === "string" ? body.feedback.trim() : "";
@@ -37,6 +47,118 @@ export async function POST(
   const transition = transitions[action || ""];
   if (!transition) {
     return NextResponse.json({ error: "Invalid review action" }, { status: 400 });
+  }
+
+  const now = new Date().toISOString();
+
+  if (useLocalMode) {
+    const projectRes = await query<{
+      id: string;
+      status: string;
+      name: string | null;
+      summary: string | null;
+      description: string | null;
+      plan: unknown[] | null;
+      metadata: Record<string, unknown> | null;
+      owner_agent: string | null;
+    }>(`select id, status, name, summary, description, plan, metadata, owner_agent from projects where id = $1 limit 1`, [id]);
+    const project = projectRes.rows[0];
+    if (!project) return NextResponse.json({ error: "Project not found" }, { status: 404 });
+
+    if (transition.nextStatus === "completed") {
+      const primaryExecution = await getPrimaryExecutionWorkItemLocal(id);
+      if (primaryExecution && isPrimaryExecutionOpen(primaryExecution.status)) {
+        await reconcileProjectStatusWithPrimaryExecutionLocal({
+          projectId: id,
+          projectStatus: project.status,
+          primaryExecution,
+          actor: actorIdentity,
+          reason: "review_completion_blocked_by_open_primary_execution",
+          now,
+        });
+        return NextResponse.json(
+          { error: "primary_execution_still_open", workItemId: primaryExecution.workItemId, workItemStatus: primaryExecution.status },
+          { status: 409 },
+        );
+      }
+    }
+
+    const metadata = {
+      ...((project.metadata || {}) as Record<string, unknown>),
+      review_history: [
+        ...((((project.metadata || {}) as Record<string, unknown>).review_history as unknown[]) || []),
+        { action, feedback: feedback || null, acted_at: now, acted_by: actorIdentity },
+      ],
+    };
+
+    await query(
+      `update projects set status = $1, metadata = $2::jsonb, updated_at = $3 where id = $4`,
+      [transition.nextStatus, JSON.stringify(metadata), now, id],
+    );
+    await query(
+      `insert into project_events (project_id, event_type, from_status, to_status, actor, payload, created_at)
+       values ($1, $2, $3, $4, $5, $6::jsonb, $7)`,
+      [id, transition.eventType, project.status, transition.nextStatus, actorIdentity, JSON.stringify({ action, feedback: feedback || null }), now],
+    );
+
+    if (action === "request_changes") {
+      const linksRes = await query<{ work_item_id: string }>(
+        `select work_item_id from project_work_items where project_id = $1 and relation_type = 'primary_execution' limit 1`,
+        [id],
+      );
+      const workItemId = linksRes.rows[0]?.work_item_id;
+      if (workItemId) {
+        const existingPayload = (((project.metadata || {}) as Record<string, unknown>).latest_deliverable_feedback_history as unknown[]) || [];
+        const reviewInstruction = [
+          `Project: ${project.name || id}`,
+          project.summary ? `Summary: ${project.summary}` : null,
+          project.description ? `Description: ${project.description}` : null,
+          Array.isArray(project.plan) && project.plan.length
+            ? `Current plan:\n${project.plan.map((step: unknown, index: number) => {
+                const planStep = step && typeof step === "object" && !Array.isArray(step) ? step as { title?: unknown } : {};
+                return `- ${index + 1}. ${typeof planStep.title === "string" && planStep.title.trim() ? planStep.title : "Untitled step"}`;
+              }).join("\n")}`
+            : null,
+          "",
+          "Review requested changes:",
+          feedback || "No explicit feedback provided. Rework the deliverable based on review comments and produce an updated final output.",
+          "",
+          "Important: produce a fresh updated deliverable, and persist the final answer in payload.result/output/summary when completing the work item.",
+        ].filter(Boolean).join("\n");
+
+        await query(
+          `update work_items
+              set status = 'ready', updated_at = $1, completed_at = null, instruction = $2, payload = $3::jsonb
+            where id = $4`,
+          [
+            now,
+            reviewInstruction,
+            JSON.stringify({
+              review_feedback: feedback || null,
+              rework_requested_at: now,
+              rework_requested_by: actorIdentity,
+              prior_review_feedback: existingPayload,
+            }),
+            workItemId,
+          ],
+        );
+
+        try {
+          await fetch("http://127.0.0.1:3001/api/work-items/notify", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${process.env.AGENT_API_KEY}`,
+            },
+            body: JSON.stringify({ workItemId, agent: project.owner_agent, action: "unblocked" }),
+          });
+        } catch (error) {
+          console.error("[project-review] notify on request_changes failed:", error);
+        }
+      }
+    }
+
+    return NextResponse.json({ ok: true, id, status: transition.nextStatus });
   }
 
   const supabase = createServiceClient();
@@ -54,8 +176,6 @@ export async function POST(
     return NextResponse.json({ error: "Project not found" }, { status: 404 });
   }
 
-  const now = new Date().toISOString();
-
   if (transition.nextStatus === "completed") {
     const primaryExecution = await getPrimaryExecutionWorkItem(supabase, id);
 
@@ -64,7 +184,7 @@ export async function POST(
         projectId: id,
         projectStatus: project.status,
         primaryExecution,
-        actor: user.email || user.id,
+        actor: actorIdentity,
         reason: "review_completion_blocked_by_open_primary_execution",
         now,
       });
@@ -88,7 +208,7 @@ export async function POST(
         action,
         feedback: feedback || null,
         acted_at: now,
-        acted_by: user.email || user.id,
+        acted_by: actorIdentity,
       },
     ],
   };
@@ -117,7 +237,7 @@ export async function POST(
     event_type: transition.eventType,
     from_status: project.status,
     to_status: transition.nextStatus,
-    actor: user.email || user.id,
+    actor: actorIdentity,
     payload: {
       action,
       feedback: feedback || null,
@@ -144,7 +264,10 @@ export async function POST(
         project.summary ? `Summary: ${project.summary}` : null,
         project.description ? `Description: ${project.description}` : null,
         Array.isArray(project.plan) && project.plan.length
-          ? `Current plan:\n${project.plan.map((step: any, index: number) => `- ${index + 1}. ${step.title || "Untitled step"}`).join("\n")}`
+          ? `Current plan:\n${project.plan.map((step: unknown, index: number) => {
+              const planStep = step && typeof step === "object" && !Array.isArray(step) ? step as { title?: unknown } : {};
+              return `- ${index + 1}. ${typeof planStep.title === "string" && planStep.title.trim() ? planStep.title : "Untitled step"}`;
+            }).join("\n")}`
           : null,
         "",
         "Review requested changes:",
@@ -163,7 +286,7 @@ export async function POST(
           payload: {
             review_feedback: feedback || null,
             rework_requested_at: now,
-            rework_requested_by: user.email || user.id,
+            rework_requested_by: actorIdentity,
             prior_review_feedback: existingPayload,
           },
         })

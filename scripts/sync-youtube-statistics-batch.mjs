@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { createClient } from '@supabase/supabase-js';
+import { createMissionControlDb } from './lib/mission-control-db.mjs';
 
 import {
   getStatisticsWindowPeriod,
@@ -32,63 +32,65 @@ async function main() {
 
   const env = loadEnvFile(path.join(REPO_ROOT, '.env.local'));
   const mcpEnv = loadEnvFile(path.join(MCP_DIR, '.env'));
-  const supabase = createClient(env.NEXT_PUBLIC_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY);
+  const db = createMissionControlDb({ env, envPath: path.join(REPO_ROOT, '.env.local') });
+  console.log(`Mission Control DB: ${db.description}`);
   const cacheDb = new Database(path.join(MCP_DIR, 'data/cache.db'));
   const analytics = createAnalyticsClient({ mcpEnv, cacheDb });
   const today = new Date().toISOString().slice(0, 10);
   const computedAt = new Date().toISOString();
 
-  const eligibleVideos = await loadEligibleOwnedVideos(supabase);
-  const existingSnapshots = await loadExistingSnapshots(supabase, eligibleVideos.map((video) => video.academy_video_id));
-  const reachBounds = cacheDb.prepare('select min(date) as min_date, max(date) as max_date from reach_daily').get();
+  try {
+    const eligibleVideos = await loadEligibleOwnedVideos(db);
+    const existingSnapshots = await loadExistingSnapshots(db, eligibleVideos.map((video) => video.academy_video_id));
+    const reachBounds = cacheDb.prepare('select min(date) as min_date, max(date) as max_date from reach_daily').get();
 
-  let totalRows = 0;
-  const perWindow = [];
-  for (const windowKey of options.windows) {
-    const videos = eligibleVideos.filter((video) => shouldMaterializeWindowForVideo({
-      windowKey,
-      publishedAt: video.published_at,
-      today,
-    }));
+    let totalRows = 0;
+    const perWindow = [];
+    for (const windowKey of options.windows) {
+      const videos = eligibleVideos.filter((video) => shouldMaterializeWindowForVideo({
+        windowKey,
+        publishedAt: video.published_at,
+        today,
+      }));
 
-    if (videos.length === 0) {
-      perWindow.push({ window: windowKey, videos: 0, rows: 0, skipped: eligibleVideos.length });
-      continue;
+      if (videos.length === 0) {
+        perWindow.push({ window: windowKey, videos: 0, rows: 0, skipped: eligibleVideos.length });
+        continue;
+      }
+
+      const rows = await buildRowsForWindow({
+        analytics,
+        cacheDb,
+        existingSnapshots,
+        reachBounds,
+        videos,
+        windowKey,
+        today,
+        computedAt,
+      });
+
+      totalRows += rows.length;
+      perWindow.push({
+        window: windowKey,
+        videos: videos.length,
+        rows: rows.length,
+        skipped: eligibleVideos.length - videos.length,
+        analyticsRowsWithViews: rows.filter((row) => Number(row.views || 0) > 0).length,
+      });
+
+      if (options.dryRun) {
+        console.log(`\n=== ${windowKey} dry-run ===`);
+        console.log(JSON.stringify({ sample: rows.slice(0, 3) }, null, 2));
+      } else if (rows.length > 0) {
+        await db.upsertSnapshotRows(rows);
+        console.log(`Upserted ${rows.length} ${windowKey} rows`);
+      }
     }
 
-    const rows = await buildRowsForWindow({
-      analytics,
-      cacheDb,
-      existingSnapshots,
-      reachBounds,
-      videos,
-      windowKey,
-      today,
-      computedAt,
-    });
-
-    totalRows += rows.length;
-    perWindow.push({
-      window: windowKey,
-      videos: videos.length,
-      rows: rows.length,
-      skipped: eligibleVideos.length - videos.length,
-      analyticsRowsWithViews: rows.filter((row) => Number(row.views || 0) > 0).length,
-    });
-
-    if (options.dryRun) {
-      console.log(`\n=== ${windowKey} dry-run ===`);
-      console.log(JSON.stringify({ sample: rows.slice(0, 3) }, null, 2));
-    } else if (rows.length > 0) {
-      const { error } = await supabase
-        .from('ops_youtube_video_learning_snapshots')
-        .upsert(rows, { onConflict: 'academy_video_id,window_key' });
-      if (error) throw new Error(`upsert ${windowKey} failed: ${error.message}`);
-      console.log(`Upserted ${rows.length} ${windowKey} rows`);
-    }
+    console.log(JSON.stringify({ dryRun: options.dryRun, eligibleVideos: eligibleVideos.length, totalRows, perWindow }, null, 2));
+  } finally {
+    await db.close();
   }
-
-  console.log(JSON.stringify({ dryRun: options.dryRun, eligibleVideos: eligibleVideos.length, totalRows, perWindow }, null, 2));
 }
 
 function printHelp() {
@@ -113,13 +115,8 @@ function createAnalyticsClient({ mcpEnv, cacheDb }) {
   return google.youtubeAnalytics({ version: 'v2', auth });
 }
 
-async function loadEligibleOwnedVideos(supabase) {
-  const { data, error } = await supabase
-    .from('ops_owned_videos')
-    .select('academy_video_id,title,published_at,video_kind,is_published,metadata_json')
-    .eq('video_kind', 'longform')
-    .order('published_at', { ascending: false });
-  if (error) throw new Error(`load ops_owned_videos failed: ${error.message}`);
+async function loadEligibleOwnedVideos(db) {
+  const data = await db.loadOwnedVideosForStatisticsBatch();
 
   return (data || []).filter((video) => {
     const title = String(video.title || '').toLowerCase();
@@ -132,13 +129,9 @@ async function loadEligibleOwnedVideos(supabase) {
   });
 }
 
-async function loadExistingSnapshots(supabase, videoIds) {
+async function loadExistingSnapshots(db, videoIds) {
   if (!videoIds.length) return new Map();
-  const { data, error } = await supabase
-    .from('ops_youtube_video_learning_snapshots')
-    .select('*')
-    .in('academy_video_id', videoIds);
-  if (error) throw new Error(`load existing snapshots failed: ${error.message}`);
+  const data = await db.loadExistingSnapshots(videoIds);
   return new Map((data || []).map((row) => [`${row.academy_video_id}:${row.window_key}`, row]));
 }
 

@@ -1,11 +1,20 @@
+import { isLocalAuthDisabled } from "@/lib/auth/local";
+import { normalizeRows } from "@/lib/db/mission-control";
+import { query } from "@/lib/db/postgres";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import {
   getProjectStatusForPrimaryExecution,
   getPrimaryExecutionWorkItem,
+  isPrimaryExecutionOpen,
   listPrimaryExecutionWorkItems,
   reconcileProjectStatusWithPrimaryExecution,
   type PrimaryExecutionWorkItem,
 } from "@/lib/projects/lifecycle";
+import {
+  getPrimaryExecutionWorkItemLocal,
+  listPrimaryExecutionWorkItemsLocal,
+  reconcileProjectStatusWithPrimaryExecutionLocal,
+} from "@/lib/projects/local";
 
 export type PlanStep = {
   id: string;
@@ -301,6 +310,81 @@ async function reconcileProjectsWithPrimaryExecution(
 }
 
 export async function listProjectGalleryCards(): Promise<ProjectGalleryCard[]> {
+  if (isLocalAuthDisabled()) {
+    const projectsRes = await query<ProjectRow>(
+      `select id, name, description, summary, status, priority, owner_agent, deferred_until, plan, clarification_questions, approval_scope, updated_at, metadata
+       from projects
+       order by updated_at desc`,
+    );
+
+    const rows = normalizeRows((projectsRes.rows as ProjectRow[])).filter((project) => !isArchivedFromMainList(project));
+    const ready = rows.filter(isReadyForApproval);
+    if (ready.length) {
+      const ids = ready.map((project) => project.id);
+      const now = new Date().toISOString();
+      await query(`update projects set status = 'needs_approval', updated_at = $1 where id = any($2::uuid[]) and status = 'planning'`, [now, ids]);
+      for (const project of ready) {
+        await query(
+          `insert into project_events (project_id, event_type, from_status, to_status, actor, payload, created_at)
+           values ($1, 'project.ready_for_approval', 'planning', 'needs_approval', 'system:auto', $2::jsonb, $3)`,
+          [project.id, JSON.stringify({ source: 'read_model_auto_promotion', guarded: true }), now],
+        );
+        project.status = 'needs_approval';
+      }
+    }
+
+    const projectIds = rows.map((p) => p.id);
+    const [workLinksRes, primaryExecutionByProject] = await Promise.all([
+      projectIds.length ? query<{ project_id: string }>(`select project_id from project_work_items`) : Promise.resolve({ rows: [] as { project_id: string }[] }),
+      listPrimaryExecutionWorkItemsLocal(projectIds),
+    ]);
+
+    const workCounts = new Map<string, number>();
+    for (const row of workLinksRes.rows || []) {
+      workCounts.set(row.project_id, (workCounts.get(row.project_id) || 0) + 1);
+    }
+
+    for (const project of rows) {
+      const primaryExecution = primaryExecutionByProject.get(project.id) || null;
+      const nextStatus = getProjectStatusForPrimaryExecution(project.status, primaryExecution?.status);
+      if (nextStatus) {
+        await reconcileProjectStatusWithPrimaryExecutionLocal({
+          projectId: project.id,
+          projectStatus: project.status,
+          primaryExecution,
+          actor: 'system:read_model',
+          reason: 'read_model_primary_execution_sync',
+        });
+        project.status = nextStatus;
+      }
+    }
+
+    return rows.map((project) => {
+      const { progressPercent, progressLabel } = deriveProgress(project);
+      const primaryExecution = primaryExecutionByProject.get(project.id) || null;
+      return {
+        id: project.id,
+        title: toTitle(project),
+        summary: toSummary(project),
+        status: project.status,
+        priority: project.priority || 'medium',
+        progressLabel,
+        progressPercent,
+        needsMyAttention: deriveNeedsMyAttention(project),
+        readyToRun: deriveReadyToRun(project),
+        blocked: project.status === 'blocked',
+        queued: project.status === 'queued',
+        running: project.status === 'in_progress' || project.status === 'active',
+        dispatchState: typeof primaryExecution?.payload?.dispatch_state === 'string' ? String(primaryExecution.payload?.dispatch_state) : null,
+        nextActionLabel: deriveNextActionLabel(project),
+        ownerAgent: project.owner_agent,
+        deferredUntil: project.deferred_until,
+        updatedAt: project.updated_at,
+        linkedWorkItemsCount: workCounts.get(project.id) || 0,
+      };
+    });
+  }
+
   const { data: projects, error } = await supabaseAdmin
     .from("projects")
     .select("id,name,description,summary,status,priority,owner_agent,deferred_until,plan,clarification_questions,approval_scope,updated_at,metadata")
@@ -356,6 +440,101 @@ export async function listProjectGalleryCards(): Promise<ProjectGalleryCard[]> {
 }
 
 export async function getProjectDetail(projectId: string): Promise<ProjectDetailPayload | null> {
+  if (isLocalAuthDisabled()) {
+    const projectRes = await query<ProjectRow>(
+      `select id, name, description, summary, status, priority, owner_agent, deferred_until, target_outcome, acceptance_criteria, plan, clarification_questions, approval_scope, notes, metadata, updated_at
+       from projects
+       where id = $1
+       limit 1`,
+      [projectId],
+    );
+    const row = projectRes.rows[0] ? normalizeRows([projectRes.rows[0] as ProjectRow])[0] : null;
+    if (!row) return null;
+
+    if (isReadyForApproval(row)) {
+      const now = new Date().toISOString();
+      await query(`update projects set status = 'needs_approval', updated_at = $1 where id = $2 and status = 'planning'`, [now, projectId]);
+      await query(
+        `insert into project_events (project_id, event_type, from_status, to_status, actor, payload, created_at)
+         values ($1, 'project.ready_for_approval', 'planning', 'needs_approval', 'system:auto', $2::jsonb, $3)`,
+        [projectId, JSON.stringify({ source: 'read_model_auto_promotion', guarded: true }), now],
+      );
+      row.status = 'needs_approval';
+    }
+
+    const primaryExecution = await getPrimaryExecutionWorkItemLocal(projectId);
+    const nextStatus = getProjectStatusForPrimaryExecution(row.status, primaryExecution?.status);
+    if (nextStatus) {
+      await reconcileProjectStatusWithPrimaryExecutionLocal({
+        projectId,
+        projectStatus: row.status,
+        primaryExecution,
+        actor: 'system:read_model',
+        reason: 'read_model_primary_execution_sync',
+      });
+      row.status = nextStatus;
+    }
+
+    const [workLinksRes, eventsRes] = await Promise.all([
+      query<{ work_item_id: string; relation_type: string }>(`select work_item_id, relation_type from project_work_items where project_id = $1`, [projectId]),
+      query<{ id: string; event_type: string; from_status: string | null; to_status: string | null; actor: string | null; payload: ProjectEventPayload; created_at: string }>(
+        `select id, event_type, from_status, to_status, actor, payload, created_at
+         from project_events
+         where project_id = $1
+         order by created_at desc
+         limit 20`,
+        [projectId],
+      ),
+    ]);
+
+    return {
+      id: row.id,
+      title: toTitle(row),
+      summary: toSummary(row),
+      status: row.status,
+      priority: row.priority || 'medium',
+      ownerAgent: row.owner_agent,
+      targetOutcome: row.target_outcome || null,
+      acceptanceCriteria: row.acceptance_criteria || [],
+      plan: row.plan || [],
+      clarificationQuestions: row.clarification_questions || [],
+      approvalScope: row.approval_scope || {},
+      notes: row.notes || null,
+      metadata: row.metadata || {},
+      clarificationHistory: Array.isArray((row.metadata || {}).clarification_history)
+        ? ((row.metadata || {}).clarification_history as ClarificationHistoryEntry[])
+        : [],
+      deliverable: primaryExecution
+        ? {
+            workItemId: primaryExecution.workItemId,
+            title: primaryExecution.title,
+            status: primaryExecution.status,
+            instruction: primaryExecution.instruction,
+            summary: extractDeliverableSummary(primaryExecution as unknown as PrimaryExecutionWorkItem),
+            startedAt: primaryExecution.startedAt,
+            completedAt: primaryExecution.completedAt,
+            updatedAt: primaryExecution.updatedAt,
+            dispatchState: typeof primaryExecution.payload?.dispatch_state === 'string' ? String(primaryExecution.payload?.dispatch_state) : null,
+          }
+        : null,
+      needsMyAttention: deriveNeedsMyAttention(row),
+      readyToRun: deriveReadyToRun(row),
+      nextActionLabel: deriveNextActionLabel(row),
+      blockedReason: row.status === 'blocked' ? deriveNextActionLabel(row) : null,
+      deferredUntil: row.deferred_until,
+      linkedWorkItems: (workLinksRes.rows || []).map((r) => ({ id: r.work_item_id, relationType: r.relation_type })),
+      recentEvents: (eventsRes.rows || []).map((e) => ({
+        id: e.id,
+        eventType: e.event_type,
+        fromStatus: e.from_status,
+        toStatus: e.to_status,
+        actor: e.actor,
+        payload: (e.payload || {}) as ProjectEventPayload,
+        createdAt: e.created_at,
+      })),
+    };
+  }
+
   const { data: project, error } = await supabaseAdmin
     .from("projects")
     .select("id,name,description,summary,status,priority,owner_agent,deferred_until,target_outcome,acceptance_criteria,plan,clarification_questions,approval_scope,notes,metadata,updated_at")

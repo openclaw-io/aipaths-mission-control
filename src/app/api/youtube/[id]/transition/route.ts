@@ -1,4 +1,11 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { getLocalMissionControlUser, isLocalAuthDisabled } from "@/lib/auth/local";
+import {
+  createPipelineWorkItemLocal,
+  getOrCreateVideoAnnouncementEmailItemLocal,
+  getPipelineItemLocal,
+  updatePipelineItemLocal,
+} from "@/lib/db/pipeline-local";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/admin";
 import { createPipelineWorkItem } from "@/lib/work-items/pipeline-materializer";
@@ -127,7 +134,8 @@ function createSnapshotInstruction(input: {
 }
 
 async function createPublishedSnapshotWorkItems(input: {
-  db: ReturnType<typeof createServiceClient>;
+  db?: ReturnType<typeof createServiceClient>;
+  localMode?: boolean;
   pipelineItemId: string;
   title: string;
   priority: string | null;
@@ -145,7 +153,7 @@ async function createPublishedSnapshotWorkItems(input: {
   const results = [];
   for (const snapshot of snapshots) {
     const scheduledFor = addMilliseconds(input.publishedAt, snapshot.delayMs);
-    const result = await createPipelineWorkItem(input.db, {
+    const workInput = {
       pipelineItemId: input.pipelineItemId,
       pipelineType: "video",
       title: `Collect YouTube snapshot ${snapshot.label}: ${input.title}`,
@@ -171,13 +179,136 @@ async function createPublishedSnapshotWorkItems(input: {
         snapshot_relation_type: snapshot.relationType,
         snapshot_due_at: scheduledFor,
       },
-    });
+    };
+    const result = input.localMode
+      ? await createPipelineWorkItemLocal(workInput)
+      : await createPipelineWorkItem(input.db!, workInput);
     results.push({ relationType: snapshot.relationType, ...result });
   }
 
   return results;
 }
 
+function createVideoAnnouncementEmailInstruction(input: {
+  title: string;
+  youtubeUrl: string | null;
+  videoId: string | null;
+  summary: string | null;
+}) {
+  return [
+    `Video published: ${input.title}`,
+    "",
+    "Task:",
+    "- Draft a Spanish email announcement for this newly published AIPaths YouTube video.",
+    "- Focus on the problem/idea from the video, why subscribers should care, and a clear CTA to watch it.",
+    "- Do not send or schedule the email.",
+    "- Complete this work item with output.email_draft containing: subject, preview_text, body_markdown.",
+    "- Mission Control will move the email card to ready_for_review after completion.",
+    "",
+    `YouTube URL: ${input.youtubeUrl || "(not provided)"}`,
+    `Video ID: ${input.videoId || "(not provided)"}`,
+    `Context: ${input.summary || "(none yet)"}`,
+  ].join("\n");
+}
+
+async function createVideoAnnouncementEmailWorkItem(input: {
+  db?: ReturnType<typeof createServiceClient>;
+  localMode?: boolean;
+  videoPipelineItemId: string;
+  title: string;
+  priority: string | null;
+  requestedBy: string;
+  youtubeUrl: string | null;
+  videoId: string | null;
+  summary: string | null;
+}) {
+  const emailItem = input.localMode
+    ? await getOrCreateVideoAnnouncementEmailItemLocal({
+        videoPipelineItemId: input.videoPipelineItemId,
+        title: input.title,
+        priority: input.priority,
+        requestedBy: input.requestedBy,
+        youtubeUrl: input.youtubeUrl,
+        videoId: input.videoId,
+        summary: input.summary,
+      })
+    : await (async () => {
+        const now = new Date().toISOString();
+        const { data: existing, error: existingError } = await input.db!
+          .from("pipeline_items")
+          .select("id,title,status")
+          .eq("pipeline_type", "email_campaign")
+          .contains("metadata", {
+            kind: "video_announcement",
+            source_video_pipeline_item_id: input.videoPipelineItemId,
+          })
+          .order("created_at", { ascending: false })
+          .limit(1);
+
+        if (existingError) throw existingError;
+        let created = existing?.[0] || null;
+        if (!created) {
+          const { data: inserted, error: insertError } = await input.db!
+            .from("pipeline_items")
+            .insert({
+              title: `Anuncio video: ${input.title}`,
+              pipeline_type: "email_campaign",
+              status: "drafting",
+              priority: input.priority || "medium",
+              owner_agent: "marketing",
+              requested_by: input.requestedBy,
+              source_type: "pipeline_item",
+              source_id: input.videoPipelineItemId,
+              metadata: {
+                kind: "video_announcement",
+                source_video_pipeline_item_id: input.videoPipelineItemId,
+                youtube_url: input.youtubeUrl,
+                video_id: input.videoId,
+                summary: input.summary,
+                requested_at: now,
+                requested_by: input.requestedBy,
+              },
+              asset_role: "standalone",
+              updated_at: now,
+            })
+            .select("id,title,status")
+            .single();
+
+          if (insertError || !inserted) throw insertError || new Error("Failed to create video announcement email item");
+          created = inserted;
+        }
+        return created;
+      })();
+
+  const workInput = {
+    pipelineItemId: emailItem.id,
+    pipelineType: "email_campaign",
+    title: `Draft video announcement email: ${input.title}`,
+    instruction: createVideoAnnouncementEmailInstruction({
+      title: input.title,
+      youtubeUrl: input.youtubeUrl,
+      videoId: input.videoId,
+      summary: input.summary,
+    }),
+    priority: input.priority || "medium",
+    ownerAgent: "marketing",
+    requestedBy: input.requestedBy,
+    relationType: "draft_video_announcement",
+    action: "draft_video_announcement",
+    trigger: "video_published_manual",
+    payloadExtra: {
+      source_video_pipeline_item_id: input.videoPipelineItemId,
+      youtube_url: input.youtubeUrl,
+      video_id: input.videoId,
+      newsletter_kind: "video_announcement",
+    },
+  };
+  const result = input.localMode
+    ? await createPipelineWorkItemLocal(workInput)
+    : await createPipelineWorkItem(input.db!, workInput);
+
+  return { emailItem, ...result };
+}
 
 function createStageAutomationInstruction(input: {
   title: string;
@@ -313,7 +444,8 @@ function getStageAutomationConfig(stage: string) {
 }
 
 async function createStageAutomationWorkItem(input: {
-  db: ReturnType<typeof createServiceClient>;
+  db?: ReturnType<typeof createServiceClient>;
+  localMode?: boolean;
   pipelineItemId: string;
   title: string;
   stage: string;
@@ -333,7 +465,7 @@ async function createStageAutomationWorkItem(input: {
   });
   if (!instruction) return null;
 
-  return createPipelineWorkItem(input.db, {
+  const workInput = {
     pipelineItemId: input.pipelineItemId,
     pipelineType: "video",
     title: `${config.titlePrefix}: ${input.title}`,
@@ -350,7 +482,11 @@ async function createStageAutomationWorkItem(input: {
       youtube_stage: input.stage,
       automation_kind: config.relationType,
     },
-  });
+  };
+
+  return input.localMode
+    ? createPipelineWorkItemLocal(workInput)
+    : createPipelineWorkItem(input.db!, workInput);
 }
 
 function createWorkItemInstruction(input: {
@@ -387,25 +523,39 @@ function createWorkItemInstruction(input: {
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const supabase = await createClient();
-  const db = createServiceClient();
+  const useLocalMode = isLocalAuthDisabled();
+  const supabase = useLocalMode ? null : await createClient();
+  const db = useLocalMode ? null : createServiceClient();
 
   const body = (await request.json()) as JsonRecord;
 
-  const { data: { user } } = await supabase.auth.getUser();
+  const actor = useLocalMode ? getLocalMissionControlUser() : null;
+
+  let user: { email?: string | null; id?: string | null } | null = actor ? { email: actor.email, id: actor.email } : null;
+  if (!useLocalMode) {
+    const authResult = await supabase!.auth.getUser();
+    user = authResult.data.user;
+  }
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const { data: item, error: fetchError } = await db
-    .from("pipeline_items")
-    .select("*")
-    .eq("id", id)
-    .eq("pipeline_type", "video")
-    .single();
+  const item = useLocalMode
+    ? await getPipelineItemLocal(id, "video")
+    : await (async () => {
+        const { data, error } = await db!
+          .from("pipeline_items")
+          .select("*")
+          .eq("id", id)
+          .eq("pipeline_type", "video")
+          .single();
+        if (error) throw new Error(error.message);
+        return data;
+      })().catch(() => null);
 
-  if (fetchError || !item) {
-    return NextResponse.json({ error: fetchError?.message || "Video item not found" }, { status: 404 });
+  if (!item) {
+    return NextResponse.json({ error: "Video item not found" }, { status: 404 });
   }
 
+  const actorIdentity = String(user.email || user.id || "local@mission-control");
   const now = new Date().toISOString();
   const metadata = getYouTubeMetadata(item.metadata);
   const requestedAction = typeof body.action === "string" ? body.action : null;
@@ -417,26 +567,36 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       ...existingLearning,
       ...learning,
       updated_at: now,
-      updated_by: user.email || user.id,
+      updated_by: actorIdentity,
     };
     const nextMetadata = {
       ...metadata,
       youtube_learning_v1: nextLearning,
     };
 
-    const { data: updated, error: updateError } = await db
-      .from("pipeline_items")
-      .update({
-        owner_agent: item.owner_agent || "youtube",
-        metadata: nextMetadata,
-        updated_at: now,
-      })
-      .eq("id", id)
-      .select("id, pipeline_type, title, slug, status, priority, owner_agent, requested_by, source_type, source_id, scheduled_for, published_at, current_url, content_path, content_format, metadata, created_at, updated_at")
-      .single();
+    const updated = useLocalMode
+      ? await updatePipelineItemLocal(id, {
+          owner_agent: item.owner_agent || "youtube",
+          metadata: nextMetadata,
+          updated_at: now,
+        })
+      : await (async () => {
+          const { data, error } = await db!
+            .from("pipeline_items")
+            .update({
+              owner_agent: item.owner_agent || "youtube",
+              metadata: nextMetadata,
+              updated_at: now,
+            })
+            .eq("id", id)
+            .select("id, pipeline_type, title, slug, status, priority, owner_agent, requested_by, source_type, source_id, scheduled_for, published_at, current_url, content_path, content_format, metadata, created_at, updated_at")
+            .single();
+          if (error) throw new Error(error.message);
+          return data;
+        })().catch(() => null);
 
-    if (updateError) {
-      return NextResponse.json({ error: updateError.message }, { status: 500 });
+    if (!updated) {
+      return NextResponse.json({ error: "Failed to update learning review" }, { status: 500 });
     }
 
     return NextResponse.json({ item: updated });
@@ -489,7 +649,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         ...v0History,
         {
           at: now,
-          by: user.email || user.id,
+          by: actorIdentity,
           action: "set_stage",
           from_status: item.status,
           to_status: requestedStage,
@@ -513,42 +673,64 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       if (youtubeUrl) updatePayload.current_url = youtubeUrl;
     }
 
-    const { data: updated, error: updateError } = await db
-      .from("pipeline_items")
-      .update(updatePayload)
-      .eq("id", id)
-      .select("id, pipeline_type, title, slug, status, priority, owner_agent, requested_by, source_type, source_id, scheduled_for, published_at, current_url, content_path, content_format, metadata, created_at, updated_at")
-      .single();
+    const updated = useLocalMode
+      ? await updatePipelineItemLocal(id, updatePayload)
+      : await (async () => {
+          const { data, error } = await db!
+            .from("pipeline_items")
+            .update(updatePayload)
+            .eq("id", id)
+            .select("id, pipeline_type, title, slug, status, priority, owner_agent, requested_by, source_type, source_id, scheduled_for, published_at, current_url, content_path, content_format, metadata, created_at, updated_at")
+            .single();
+          if (error) throw new Error(error.message);
+          return data;
+        })().catch(() => null);
 
-    if (updateError) {
-      return NextResponse.json({ error: updateError.message }, { status: 500 });
+    if (!updated) {
+      return NextResponse.json({ error: "Failed to update stage" }, { status: 500 });
     }
 
     const stageAutomationWorkItem = await createStageAutomationWorkItem({
-      db,
+      db: db || undefined,
+      localMode: useLocalMode,
       pipelineItemId: item.id,
       title: item.title,
       stage: requestedStage,
       priority: item.priority,
-      requestedBy: user.email || user.id,
+      requestedBy: actorIdentity,
       note,
       existingSummary,
     });
 
     const snapshotWorkItems = requestedStage === "published" && (youtubeUrl || videoId)
       ? await createPublishedSnapshotWorkItems({
-        db,
-        pipelineItemId: item.id,
-        title: item.title,
-        priority: item.priority,
-        requestedBy: user.email || user.id,
-        publishedAt: now,
-        youtubeUrl,
-        videoId,
-      })
+          db: db || undefined,
+          localMode: useLocalMode,
+          pipelineItemId: item.id,
+          title: item.title,
+          priority: item.priority,
+          requestedBy: actorIdentity,
+          publishedAt: now,
+          youtubeUrl,
+          videoId,
+        })
       : [];
 
-    return NextResponse.json({ item: updated, stageAutomationWorkItem, snapshotWorkItems });
+    const emailAnnouncementWorkItem = requestedStage === "published"
+      ? await createVideoAnnouncementEmailWorkItem({
+          db: db || undefined,
+          localMode: useLocalMode,
+          videoPipelineItemId: item.id,
+          title: item.title,
+          priority: item.priority,
+          requestedBy: actorIdentity,
+          youtubeUrl,
+          videoId,
+          summary: existingSummary,
+        })
+      : null;
+
+    return NextResponse.json({ item: updated, stageAutomationWorkItem, snapshotWorkItems, emailAnnouncementWorkItem });
   }
 
   const currentDecision = getNextDecision(metadata);
@@ -599,13 +781,13 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     evidence_summary: safeEvidenceSummary || previousGate.evidence_summary || undefined,
     next_action: safeNextAction || previousGate.next_action || undefined,
     decided_at: now,
-    decided_by: user.email || user.id,
+    decided_by: actorIdentity,
     updated_at: now,
     history: [
       ...((Array.isArray(previousGate.history) ? previousGate.history : []) || []),
       buildGateHistoryEntry({
         at: now,
-        by: user.email || user.id,
+        by: actorIdentity,
         status: nextGateStatus,
         reason: safeReason,
         evidenceSummary: actionType === "send_to_agent" ? null : safeEvidenceSummary,
@@ -637,7 +819,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       ? `Investigate ${YOUTUBE_GATE_META[gateKey].label}: ${item.title}`
       : `YouTube ${YOUTUBE_GATE_META[gateKey].label}: ${item.title}`;
 
-    const result = await createPipelineWorkItem(db, {
+    const workInput = {
       pipelineItemId: item.id,
       pipelineType: "video",
       title,
@@ -652,13 +834,16 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       }),
       priority: priorityLevelFromScore(scores.priority),
       ownerAgent: "youtube",
-      requestedBy: user.email || user.id,
+      requestedBy: actorIdentity,
       relationType,
       mapRelationType: "investigate",
       payloadRelationType: relationType,
       action: `youtube_gate_${gateKey}`,
       trigger: "youtube_decision_board",
-    });
+    };
+    const result = useLocalMode
+      ? await createPipelineWorkItemLocal(workInput)
+      : await createPipelineWorkItem(db!, workInput);
     workItem = result.workItem || null;
     if (workItem?.id) {
       nextMetadata.gates[gateKey] = {
@@ -668,21 +853,33 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     }
   }
 
-  const { data: updated, error: updateError } = await db
-    .from("pipeline_items")
-    .update({
-      status: derivedStatus,
-      priority: priorityLevelFromScore(scores.priority),
-      owner_agent: "youtube",
-      metadata: nextMetadata,
-      updated_at: now,
-    })
-    .eq("id", id)
-    .select("id, pipeline_type, title, slug, status, priority, owner_agent, requested_by, source_type, source_id, scheduled_for, published_at, current_url, content_path, content_format, metadata, created_at, updated_at")
-    .single();
+  const updated = useLocalMode
+    ? await updatePipelineItemLocal(id, {
+        status: derivedStatus,
+        priority: priorityLevelFromScore(scores.priority),
+        owner_agent: "youtube",
+        metadata: nextMetadata,
+        updated_at: now,
+      })
+    : await (async () => {
+        const { data, error } = await db!
+          .from("pipeline_items")
+          .update({
+            status: derivedStatus,
+            priority: priorityLevelFromScore(scores.priority),
+            owner_agent: "youtube",
+            metadata: nextMetadata,
+            updated_at: now,
+          })
+          .eq("id", id)
+          .select("id, pipeline_type, title, slug, status, priority, owner_agent, requested_by, source_type, source_id, scheduled_for, published_at, current_url, content_path, content_format, metadata, created_at, updated_at")
+          .single();
+        if (error) throw new Error(error.message);
+        return data;
+      })().catch(() => null);
 
-  if (updateError) {
-    return NextResponse.json({ error: updateError.message }, { status: 500 });
+  if (!updated) {
+    return NextResponse.json({ error: "Failed to update gate state" }, { status: 500 });
   }
 
   return NextResponse.json({ item: updated, workItem });

@@ -1,7 +1,18 @@
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { CostsClient } from "@/components/costs/CostsClient";
+import { isLocalAuthDisabled } from "@/lib/auth/local";
+import { query } from "@/lib/db/postgres";
 
 export const dynamic = "force-dynamic";
+
+type UsageRow = {
+  agent: string;
+  date: string;
+  model: string;
+  input_tokens: number | string;
+  output_tokens: number | string;
+  cost_usd: number | string;
+};
 
 export default async function CostsPage() {
   const today = new Date();
@@ -22,13 +33,24 @@ export default async function CostsPage() {
   const thirtyDaysStr = thirtyDaysAgo.toISOString().split("T")[0];
 
   // Fetch all usage data for the last 30 days
-  const { data: usageData } = await supabaseAdmin
-    .from("usage_logs")
-    .select("agent, date, model, input_tokens, output_tokens, cost_usd")
-    .gte("date", thirtyDaysStr)
-    .order("date", { ascending: true });
-
-  const rows = usageData ?? [];
+  let rows: UsageRow[];
+  if (isLocalAuthDisabled()) {
+    const result = await query(
+      `select agent, date::text, model, input_tokens, output_tokens, cost_usd
+         from public.usage_logs
+        where date >= $1::date
+        order by date asc`,
+      [thirtyDaysStr],
+    );
+    rows = result.rows as UsageRow[];
+  } else {
+    const { data: usageData } = await supabaseAdmin
+      .from("usage_logs")
+      .select("agent, date, model, input_tokens, output_tokens, cost_usd")
+      .gte("date", thirtyDaysStr)
+      .order("date", { ascending: true });
+    rows = (usageData ?? []) as UsageRow[];
+  }
 
   // Calculate summary stats
   const todayTotal = rows

@@ -11,6 +11,7 @@ function isPublicPath(pathname: string) {
     pathname.startsWith("/api/agent/") ||
     pathname.startsWith("/api/memory/") ||
     pathname.startsWith("/api/work-items/") ||
+    pathname === "/api/youtube/launch-package" ||
     pathname === "/api/projects/materialize-queued" ||
     pathname === "/api/projects/plan-pending"
   );
@@ -20,6 +21,10 @@ export async function middleware(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });
   const pathname = request.nextUrl.pathname;
   const isPublic = isPublicPath(pathname);
+
+  if (process.env.MISSION_CONTROL_LOCAL_AUTH_DISABLED !== "false") {
+    return supabaseResponse;
+  }
 
   if (isPublic) {
     return supabaseResponse;

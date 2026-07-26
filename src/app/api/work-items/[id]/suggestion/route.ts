@@ -1,5 +1,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase/admin";
+import { isLocalAuthDisabled } from "@/lib/auth/local";
+import { normalizeRow } from "@/lib/db/mission-control";
+import { withTransaction } from "@/lib/db/postgres";
 
 export const dynamic = "force-dynamic";
 
@@ -24,6 +27,73 @@ export async function POST(
 
   if (!action) {
     return NextResponse.json({ error: "Invalid action" }, { status: 400 });
+  }
+
+  if (isLocalAuthDisabled()) {
+    const result = await withTransaction(async (client) => {
+      const existingResult = await client.query(`select * from public.work_items where id = $1 for update`, [id]);
+      const existing = existingResult.rows[0];
+      if (!existing) return { error: "Work item not found", status: 404 as const };
+
+      const payload = ((existing.payload || {}) as Record<string, unknown>) || {};
+      if (payload.requires_human_approval !== true) {
+        return { error: "Work item is not an approval suggestion", status: 400 as const };
+      }
+      if (!["blocked", "draft"].includes(existing.status)) {
+        return { error: `Cannot ${action} status: ${existing.status}`, status: 400 as const };
+      }
+
+      const now = new Date().toISOString();
+      const nextPayload = {
+        ...payload,
+        requires_human_approval: false,
+        suggestion_resolved_at: now,
+        suggestion_resolution: action,
+        suggestion_resolution_reason: reason,
+        approved_by: action === "approve" ? "dashboard" : payload.approved_by,
+        dismissed_by: action === "dismiss" ? "dashboard" : payload.dismissed_by,
+      };
+      const updated = action === "approve"
+        ? await client.query(
+            `update public.work_items
+                set status = 'ready', scheduled_for = coalesce(scheduled_for, $1::timestamptz),
+                    updated_at = $1::timestamptz, payload = $2::jsonb
+              where id = $3
+              returning *`,
+            [now, JSON.stringify(nextPayload), id],
+          )
+        : await client.query(
+            `update public.work_items
+                set status = 'canceled', completed_at = $1::timestamptz,
+                    updated_at = $1::timestamptz, payload = $2::jsonb
+              where id = $3
+              returning *`,
+            [now, JSON.stringify(nextPayload), id],
+          );
+
+      await client.query(
+        `insert into public.event_log (domain, event_type, entity_type, entity_id, actor, payload)
+         values ('work', $1, 'work_item', $2, 'dashboard', $3::jsonb)`,
+        [
+          action === "approve" ? "work_item.suggestion_approved" : "work_item.suggestion_dismissed",
+          id,
+          JSON.stringify({
+            reason,
+            title: existing.title,
+            owner_agent: existing.owner_agent,
+            target_agent_id: existing.target_agent_id,
+            source_type: existing.source_type,
+            source_id: existing.source_id,
+            proposed_action: payload.proposed_action,
+            risk: payload.risk,
+          }),
+        ],
+      );
+      return { data: normalizeRow(updated.rows[0]) };
+    });
+
+    if ("error" in result) return NextResponse.json({ error: result.error }, { status: result.status });
+    return NextResponse.json(result.data);
   }
 
   const { data: existing, error: existingError } = await supabaseAdmin

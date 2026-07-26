@@ -1,12 +1,12 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { createServiceClient } from "@/lib/supabase/admin";
+import { query, withTransaction } from "@/lib/db/postgres";
 import { getExecutionWindowConfig, isExecutionWindowOpenNow } from "@/lib/execution-window";
 import {
-  getPrimaryExecutionWorkItem,
+  getPrimaryExecutionWorkItemLocal,
   isPrimaryExecutionOpen,
-  reconcileProjectStatusWithPrimaryExecution,
-  supersedePrimaryExecutionLinks,
-} from "@/lib/projects/lifecycle";
+  reconcileProjectStatusWithPrimaryExecutionLocal,
+  supersedePrimaryExecutionLinksLocal,
+} from "@/lib/projects/lifecycle-local";
 
 type ClarificationQuestion = {
   id?: string;
@@ -86,7 +86,6 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const supabase = createServiceClient();
   const now = new Date().toISOString();
   const executionWindowConfig = await getExecutionWindowConfig();
 
@@ -108,15 +107,15 @@ export async function POST(request: NextRequest) {
     });
   }
 
-  const { data: projects, error } = await supabase
-    .from("projects")
-    .select("id,name,description,summary,status,priority,owner_agent,target_outcome,plan,clarification_questions,metadata,approval_scope,last_approved_at,updated_at")
-    .eq("status", "queued")
-    .order("updated_at", { ascending: true })
-    .limit(20);
+  const { rows: projects } = await query(`
+    SELECT id,name,description,summary,status,priority,owner_agent,target_outcome,plan,clarification_questions,metadata,approval_scope,last_approved_at,updated_at
+    FROM public.projects
+    WHERE status = 'queued'
+    ORDER BY updated_at ASC
+    LIMIT 20
+  `);
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  if (!projects?.length) return NextResponse.json({ materialized: 0, skipped: 0, details: [] });
+  if (!projects.length) return NextResponse.json({ materialized: 0, skipped: 0, details: [] });
 
   let materialized = 0;
   let skipped = 0;
@@ -135,123 +134,113 @@ export async function POST(request: NextRequest) {
       continue;
     }
 
-    let primaryExecution = null;
-
     try {
-      primaryExecution = await getPrimaryExecutionWorkItem(supabase, project.id);
-    } catch (existingError) {
+      const outcome = await withTransaction(async (client) => {
+        const primaryExecution = await getPrimaryExecutionWorkItemLocal(project.id, client);
+
+        if (primaryExecution && isPrimaryExecutionOpen(primaryExecution.status)) {
+          await reconcileProjectStatusWithPrimaryExecutionLocal(client, {
+            projectId: project.id,
+            projectStatus: project.status,
+            primaryExecution,
+            actor: "project-execution-materializer",
+            reason: "materialize_queued_existing_primary_execution",
+            projectUpdates: { last_started_at: now },
+            now,
+          });
+
+          return { action: "reconciled_existing" as const, workItemId: primaryExecution.workItemId };
+        }
+
+        const workItem = await client.query<{ id: string }>(`
+          INSERT INTO public.work_items (
+            project_id,
+            parent_id,
+            kind,
+            source_type,
+            source_id,
+            title,
+            instruction,
+            status,
+            priority,
+            owner_agent,
+            requested_by,
+            payload
+          ) VALUES ($1, NULL, 'task', 'project', $2, $3, $4, 'ready', $5, $6, 'system', $7::jsonb)
+          RETURNING id
+        `, [
+          project.id,
+          project.id,
+          `Execute project: ${project.name || "Untitled Project"}`,
+          buildInstruction(project),
+          project.priority || "medium",
+          project.owner_agent,
+          JSON.stringify({
+            materialized_from_project: true,
+            source_project_id: project.id,
+            source_project_title: project.name || "Untitled Project",
+            materializer: "project-execution-materializer",
+            project_status_at_materialization: project.status,
+          }),
+        ]);
+
+        const workItemId = workItem.rows[0]?.id;
+        if (!workItemId) throw new Error("work_item_insert_failed");
+
+        await supersedePrimaryExecutionLinksLocal(client, project.id, workItemId, "project-execution-materializer");
+
+        await client.query(`
+          INSERT INTO public.project_work_items (project_id, work_item_id, relation_type)
+          VALUES ($1, $2, 'primary_execution')
+        `, [project.id, workItemId]);
+
+        const projectUpdate = await client.query(`
+          UPDATE public.projects
+          SET status = 'in_progress',
+              last_started_at = $1::timestamptz,
+              updated_at = $1::timestamptz
+          WHERE id = $2
+            AND status = 'queued'
+          RETURNING id
+        `, [now, project.id]);
+
+        if (!projectUpdate.rows[0]) throw new Error("project_status_changed");
+
+        await client.query(`
+          INSERT INTO public.project_events (project_id, event_type, from_status, to_status, actor, payload)
+          VALUES
+            ($1, 'project.execution_materialized', 'queued', 'in_progress', 'project-execution-materializer', $2::jsonb),
+            ($1, 'project.started', 'queued', 'in_progress', 'project-execution-materializer', $3::jsonb)
+        `, [
+          project.id,
+          JSON.stringify({
+            work_item_id: workItemId,
+            relation_type: "primary_execution",
+          }),
+          JSON.stringify({
+            work_item_id: workItemId,
+            owner_agent: project.owner_agent,
+          }),
+        ]);
+
+        return { action: "materialized" as const, workItemId };
+      });
+
+      if (outcome.action === "reconciled_existing") {
+        skipped++;
+        details.push({ projectId: project.id, action: "reconciled_existing", workItemId: outcome.workItemId });
+      } else {
+        materialized++;
+        details.push({ projectId: project.id, action: "materialized", workItemId: outcome.workItemId });
+      }
+    } catch (error) {
       skipped++;
       details.push({
         projectId: project.id,
         action: "skipped",
-        reason: existingError instanceof Error ? existingError.message : "primary_execution_lookup_failed",
+        reason: error instanceof Error ? error.message : "materialization_failed",
       });
-      continue;
     }
-
-    if (primaryExecution && isPrimaryExecutionOpen(primaryExecution.status)) {
-      await reconcileProjectStatusWithPrimaryExecution(supabase, {
-        projectId: project.id,
-        projectStatus: project.status,
-        primaryExecution,
-        actor: "project-execution-materializer",
-        reason: "materialize_queued_existing_primary_execution",
-        projectUpdates: { last_started_at: now },
-        now,
-      });
-
-      skipped++;
-      details.push({ projectId: project.id, action: "reconciled_existing", workItemId: primaryExecution.workItemId });
-      continue;
-    }
-
-    const { data: workItem, error: workItemError } = await supabase
-      .from("work_items")
-      .insert({
-        project_id: project.id,
-        parent_id: null,
-        kind: "task",
-        source_type: "project",
-        source_id: project.id,
-        title: `Execute project: ${project.name || "Untitled Project"}`,
-        instruction: buildInstruction(project),
-        status: "ready",
-        priority: project.priority || "medium",
-        owner_agent: project.owner_agent,
-        requested_by: "system",
-        payload: {
-          materialized_from_project: true,
-          source_project_id: project.id,
-          source_project_title: project.name || "Untitled Project",
-          materializer: "project-execution-materializer",
-          project_status_at_materialization: project.status,
-        },
-      })
-      .select("id")
-      .single();
-
-    if (workItemError || !workItem) {
-      skipped++;
-      details.push({ projectId: project.id, action: "skipped", reason: workItemError?.message || "work_item_insert_failed" });
-      continue;
-    }
-
-    await supersedePrimaryExecutionLinks(supabase, project.id, workItem.id, "project-execution-materializer");
-
-    const { error: linkError } = await supabase.from("project_work_items").insert({
-      project_id: project.id,
-      work_item_id: workItem.id,
-      relation_type: "primary_execution",
-    });
-
-    if (linkError) {
-      await supabase.from("work_items").delete().eq("id", workItem.id);
-      skipped++;
-      details.push({ projectId: project.id, action: "skipped", reason: linkError.message, workItemId: workItem.id });
-      continue;
-    }
-
-    const { error: projectUpdateError } = await supabase.from("projects").update({
-      status: "in_progress",
-      last_started_at: now,
-      updated_at: now,
-    }).eq("id", project.id).eq("status", "queued");
-
-    if (projectUpdateError) {
-      await supabase.from("project_work_items").delete().eq("project_id", project.id).eq("work_item_id", workItem.id).eq("relation_type", "primary_execution");
-      await supabase.from("work_items").delete().eq("id", workItem.id);
-      skipped++;
-      details.push({ projectId: project.id, action: "skipped", reason: projectUpdateError.message, workItemId: workItem.id });
-      continue;
-    }
-
-    await supabase.from("project_events").insert([
-      {
-        project_id: project.id,
-        event_type: "project.execution_materialized",
-        from_status: "queued",
-        to_status: "in_progress",
-        actor: "project-execution-materializer",
-        payload: {
-          work_item_id: workItem.id,
-          relation_type: "primary_execution",
-        },
-      },
-      {
-        project_id: project.id,
-        event_type: "project.started",
-        from_status: "queued",
-        to_status: "in_progress",
-        actor: "project-execution-materializer",
-        payload: {
-          work_item_id: workItem.id,
-          owner_agent: project.owner_agent,
-        },
-      },
-    ]);
-
-    materialized++;
-    details.push({ projectId: project.id, action: "materialized", workItemId: workItem.id });
   }
 
   return NextResponse.json({

@@ -83,7 +83,7 @@ Runtime writes for `academy_daily_kpis` and `ops_daily_snapshots` now belong in 
 
 The scripts read:
 - Mission Control env: `aipaths-mission-control/.env.local`
-- Academy env: `/Users/joaco/Documents/openclaw/repos/aipaths-academy/.env.local`
+- Academy env: `/Users/joaco/openclaw/repos/aipaths-academy/.env.local`
 
 Expected keys:
 - `NEXT_PUBLIC_SUPABASE_URL`

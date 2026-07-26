@@ -1,4 +1,8 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { getLocalMissionControlUser, isLocalAuthDisabled } from "@/lib/auth/local";
+import { createPipelineWorkItemLocal, getPipelineItemLocal, updatePipelineItemLocal } from "@/lib/db/pipeline-local";
+import { query } from "@/lib/db/postgres";
+import { resolvePublicationSlotLocal } from "@/lib/publication/scheduling-local";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/admin";
 import { createPipelineWorkItem } from "@/lib/work-items/pipeline-materializer";
@@ -164,6 +168,19 @@ async function resolveBlogPublishSchedule(db: ReturnType<typeof createServiceCli
   });
 }
 
+async function resolveBlogPublishScheduleLocal(item: BlogTransitionItem) {
+  const metadata = item.metadata || {};
+  const explicitScheduledFor =
+    getNestedString(metadata, ["final_check", "scheduled_for"]) ||
+    getNestedString(metadata, ["final_package", "publish_assets", "scheduled_for"]);
+
+  return resolvePublicationSlotLocal({
+    explicitScheduledFor,
+    existingScheduledFor: item.scheduled_for || getNestedString(metadata, ["schedule", "scheduled_for"]),
+    pipelineItemId: item.id,
+  });
+}
+
 function createPublishInstruction(item: BlogTransitionItem) {
   const metadata = item.metadata || {};
   const slug = typeof item.slug === "string" ? item.slug : null;
@@ -285,16 +302,110 @@ async function ensurePublishWorkItem(db: ReturnType<typeof createServiceClient>,
   return publishWorkItem;
 }
 
+async function ensurePublishWorkItemLocal(item: BlogTransitionItem, requestedBy: string, scheduledFor: string) {
+  const existingRows = await query<{ id: string; status: string; payload: Record<string, unknown> | null }>(
+    `select id, status, payload
+       from work_items
+      where source_type = any($1::text[])
+        and source_id = $2
+        and status = any($3::text[])
+      order by created_at desc`,
+    [["pipeline_item", "service"], item.id, ["draft", "ready", "blocked", "in_progress"]],
+  );
+
+  const existingPublish = existingRows.rows.find((workItem) => {
+    const payload = workItem.payload || {};
+    return payload.action === "publish_blog" && payload.pipeline_item_id === item.id;
+  });
+
+  const publishPayload = {
+    ...((existingPublish?.payload || {}) as Record<string, unknown>),
+    trigger: "blog_final_check_approved",
+    pipeline_type: "blog",
+    pipeline_item_id: item.id,
+    relation_type: "publish",
+    action: "publish_blog",
+    schedule_kind: "publication",
+  };
+
+  if (existingPublish?.id) {
+    const updatedRows = await query<{ id: string; status: string; payload: Record<string, unknown> | null }>(
+      `update work_items
+          set title = $1,
+              instruction = $2,
+              status = $3,
+              scheduled_for = $4,
+              priority = $5,
+              owner_agent = 'dev',
+              target_agent_id = 'dev',
+              requested_by = $6,
+              payload = $7::jsonb,
+              updated_at = $8
+        where id = $9
+        returning id, status, payload`,
+      [
+        `Publish blog: ${item.title}`,
+        createPublishInstruction(item),
+        existingPublish.status === "in_progress" ? "in_progress" : "ready",
+        scheduledFor,
+        item.priority || "medium",
+        requestedBy,
+        JSON.stringify(publishPayload),
+        new Date().toISOString(),
+        existingPublish.id,
+      ],
+    );
+    return updatedRows.rows[0];
+  }
+
+  const insertedRows = await query<{ id: string; status: string; payload: Record<string, unknown> | null }>(
+    `insert into work_items (
+       kind, source_type, source_id, title, instruction, status, scheduled_for,
+       priority, owner_agent, target_agent_id, requested_by, payload
+     ) values (
+       'task', 'service', $1, $2, $3, 'ready', $4,
+       $5, 'dev', 'dev', $6, $7::jsonb
+     )
+     returning id, status, payload`,
+    [item.id, `Publish blog: ${item.title}`, createPublishInstruction(item), scheduledFor, item.priority || "medium", requestedBy, JSON.stringify(publishPayload)],
+  );
+  const publishWorkItem = insertedRows.rows[0];
+
+  try {
+    await query(
+      `insert into pipeline_work_map (pipeline_item_id, work_item_id, relation_type) values ($1, $2, 'publish')`,
+      [item.id, publishWorkItem.id],
+    );
+  } catch (error) {
+    if (!String(error).includes("duplicate")) throw error;
+  }
+
+  await query(
+    `insert into event_log (domain, event_type, entity_type, entity_id, actor, payload)
+     values ('work', 'work_item.publication_prepared', 'work_item', $1, 'blog-final-check', $2::jsonb)`,
+    [publishWorkItem.id, JSON.stringify({ pipeline_type: "blog", pipeline_item_id: item.id, action: "publish_blog", scheduled_for: scheduledFor })],
+  );
+
+  return publishWorkItem;
+}
+
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const supabase = await createClient();
-  const db = createServiceClient();
+  const useLocalMode = isLocalAuthDisabled();
+  const supabase = useLocalMode ? null : await createClient();
+  const db = useLocalMode ? null : createServiceClient();
+  const actor = useLocalMode ? getLocalMissionControlUser() : null;
 
-  const { data: { user } } = await supabase.auth.getUser();
+  let user: { email?: string | null; id?: string | null } | null = actor ? { email: actor.email, id: actor.email } : null;
+  if (!useLocalMode) {
+    const authResult = await supabase!.auth.getUser();
+    user = authResult.data.user;
+  }
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const actorIdentity = String(user.email || user.id || "local@mission-control");
 
   const { action, reviewNotes, current_url } = await request.json();
   const targetStatus = ACTION_TARGET[action];
@@ -302,15 +413,21 @@ export async function POST(
     return NextResponse.json({ error: "Invalid action" }, { status: 400 });
   }
 
-  const { data: item, error: fetchError } = await db
-    .from("pipeline_items")
-    .select("*")
-    .eq("id", id)
-    .eq("pipeline_type", "blog")
-    .single();
+  const item = useLocalMode
+    ? await getPipelineItemLocal(id, "blog")
+    : await (async () => {
+        const { data, error } = await db!
+          .from("pipeline_items")
+          .select("*")
+          .eq("id", id)
+          .eq("pipeline_type", "blog")
+          .single();
+        if (error) throw new Error(error.message);
+        return data;
+      })().catch(() => null);
 
-  if (fetchError || !item) {
-    return NextResponse.json({ error: fetchError?.message || "Blog item not found" }, { status: 404 });
+  if (!item) {
+    return NextResponse.json({ error: "Blog item not found" }, { status: 404 });
   }
 
   const allowedTargets = ALLOWED[item.status] || [];
@@ -329,7 +446,7 @@ export async function POST(
           review: {
             notes: String(reviewNotes).trim(),
             last_requested_at: new Date().toISOString(),
-            last_requested_by: user.email || user.id,
+            last_requested_by: actorIdentity,
           },
         }
       : {}),
@@ -340,7 +457,7 @@ export async function POST(
             status: "changes_requested",
             notes: String(reviewNotes).trim(),
             last_requested_at: new Date().toISOString(),
-            last_requested_by: user.email || user.id,
+            last_requested_by: actorIdentity,
           },
         }
       : {}),
@@ -350,19 +467,23 @@ export async function POST(
             ...(((item.metadata || {}) as Record<string, unknown>).final_check as Record<string, unknown> | undefined || {}),
             status: "approved",
             approved_at: new Date().toISOString(),
-            approved_by: user.email || user.id,
+            approved_by: actorIdentity,
           },
         }
       : {}),
   };
 
-  const publishSchedule = action === "approve_final" ? await resolveBlogPublishSchedule(db, item) : null;
+  const publishSchedule = action === "approve_final"
+    ? (useLocalMode ? await resolveBlogPublishScheduleLocal(item) : await resolveBlogPublishSchedule(db!, item))
+    : null;
   const publishScheduledFor = publishSchedule?.scheduledFor || null;
   let publishWorkItemId: string | null = null;
 
   if (action === "approve_final" && publishScheduledFor) {
     try {
-      const publishWorkItem = await ensurePublishWorkItem(db, item, user.email || user.id, publishScheduledFor);
+      const publishWorkItem = useLocalMode
+        ? await ensurePublishWorkItemLocal(item, actorIdentity, publishScheduledFor)
+        : await ensurePublishWorkItem(db!, item, actorIdentity, publishScheduledFor);
       publishWorkItemId = publishWorkItem?.id || null;
     } catch (err) {
       return NextResponse.json({ error: err instanceof Error ? err.message : "Failed to create publish work item" }, { status: 500 });
@@ -379,7 +500,7 @@ export async function POST(
             ...(((metadata.schedule || {}) as Record<string, unknown>)),
             scheduled_for: publishScheduledFor,
             scheduled_at: new Date().toISOString(),
-            scheduled_by: user.email || user.id,
+            scheduled_by: actorIdentity,
             source: publishSchedule?.source || "auto_allocated",
             publish_work_item_id: publishWorkItemId,
           },
@@ -401,15 +522,21 @@ export async function POST(
     updatePayload.current_url = current_url || null;
   }
 
-  const { data: updated, error: updateError } = await db
-    .from("pipeline_items")
-    .update(updatePayload)
-    .eq("id", id)
-    .select("id, pipeline_type, title, slug, status, priority, owner_agent, requested_by, source_type, source_id, published_at, current_url, metadata, created_at, updated_at")
-    .single();
+  const updated = useLocalMode
+    ? await updatePipelineItemLocal(id, updatePayload)
+    : await (async () => {
+        const { data, error } = await db!
+          .from("pipeline_items")
+          .update(updatePayload)
+          .eq("id", id)
+          .select("id, pipeline_type, title, slug, status, priority, owner_agent, requested_by, source_type, source_id, published_at, current_url, metadata, created_at, updated_at")
+          .single();
+        if (error) throw new Error(error.message);
+        return data;
+      })().catch(() => null);
 
-  if (updateError) {
-    return NextResponse.json({ error: updateError.message }, { status: 500 });
+  if (!updated) {
+    return NextResponse.json({ error: "Failed to update blog item" }, { status: 500 });
   }
 
   if (["promote", "request_changes", "approve", "request_final_changes"].includes(action)) {
@@ -417,19 +544,22 @@ export async function POST(
     const relationType = action === "promote" ? "investigate" : "followup";
     const actionName = action === "approve" || action === "request_final_changes" ? "localize_blog_to_en" : action === "promote" ? "develop_blog_draft" : "revise_blog_draft";
 
-    const { workItem } = await createPipelineWorkItem(db, {
+    const workInput = {
       pipelineItemId: item.id,
       pipelineType: "blog",
       title: createWorkItemTitle(action, item.title),
       instruction: createWorkItemInstruction(action, item, reviewNotes),
       priority: item.priority || "medium",
       ownerAgent: owner_agent,
-      requestedBy: user.email || user.id,
+      requestedBy: actorIdentity,
       relationType,
       action: actionName,
       trigger: "manual_transition",
       reviewNotes: action === "request_changes" || action === "request_final_changes" ? String(reviewNotes).trim() : undefined,
-    });
+    };
+    const { workItem } = useLocalMode
+      ? await createPipelineWorkItemLocal(workInput)
+      : await createPipelineWorkItem(db!, workInput);
 
     if (workItem?.id) {
       void notifyWorkItem(workItem.id, owner_agent, item.title);

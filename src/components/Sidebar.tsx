@@ -1,6 +1,5 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
@@ -11,15 +10,16 @@ const NAV_ITEMS = [
   { href: "/agents", label: "Agents", emoji: "🤖" },
   { href: "/work-items", label: "Work Queue", emoji: "⚙️" },
   { href: "/suggestions", label: "Suggestions", emoji: "💡" },
-  { href: "/projects", label: "Projects", emoji: "📐" },
   { href: "/email-campaigns", label: "Email Campaigns", emoji: "📧" },
   { href: "/blogs", label: "Blogs", emoji: "✍️" },
   { href: "/youtube", label: "YouTube", emoji: "🎬" },
+  { href: "/statistics", label: "Statistics", emoji: "📈" },
   { href: "/guides", label: "Guías", emoji: "📚" },
   { href: "/community", label: "Community", emoji: "🏘️" },
   { href: "/intel", label: "Intel Inbox", emoji: "🧠" },
   { href: "/execution-window", label: "Execution Window", emoji: "🕒" },
   { href: "/costs", label: "Costs", emoji: "💰" },
+  { href: "/runtime", label: "Runtime", emoji: "🧭" },
   { href: "/crons", label: "Crons", emoji: "🕐" },
   { href: "/memory", label: "Memory", emoji: "🧠" },
 ];
@@ -28,13 +28,6 @@ export default function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const supabase = createClient();
-  const [userEmail, setUserEmail] = useState<string | null>(null);
-
-  useEffect(() => {
-    supabase.auth.getUser().then(({ data: { user } }) => {
-      setUserEmail(user?.email ?? null);
-    });
-  }, [supabase.auth]);
 
   async function handleSignOut() {
     await supabase.auth.signOut();
@@ -72,11 +65,8 @@ export default function Sidebar() {
         })}
       </nav>
 
-      {/* Footer — User + Sign Out */}
+      {/* Footer — Sign Out */}
       <div className="border-t border-white/10 px-4 py-4">
-        {userEmail && (
-          <p className="mb-2 truncate text-xs text-gray-500">{userEmail}</p>
-        )}
         <button
           onClick={handleSignOut}
           className="w-full rounded-lg px-3 py-2 text-sm text-gray-400 transition hover:bg-white/5 hover:text-white"

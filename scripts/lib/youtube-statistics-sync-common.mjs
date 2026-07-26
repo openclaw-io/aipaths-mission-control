@@ -194,7 +194,7 @@ export function mergeOwnedVideoUpsertRow({ current, row }) {
     : row.video_kind;
   const isPublished = privacyStatus
     ? privacyStatus === 'public'
-    : (current?.is_published === false ? false : row.is_published);
+    : (current?.is_published === false ? false : (row.is_published ?? true));
 
   return {
     ...row,

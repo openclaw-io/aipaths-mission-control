@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
-import { createClient } from '@supabase/supabase-js';
+import { createMissionControlDb } from './lib/mission-control-db.mjs';
 import { loadEnvFile } from './lib/youtube-statistics-sync-common.mjs';
 import { classifyOwnedYoutubeVideo, parseIsoDurationSeconds } from './lib/youtube-owned-video-classification.mjs';
 
@@ -45,7 +45,8 @@ async function main() {
   if (options.help) return printUsage();
 
   const missionEnv = loadEnvFile(MISSION_ENV_PATH);
-  const supabase = createClient(missionEnv.NEXT_PUBLIC_SUPABASE_URL, missionEnv.SUPABASE_SERVICE_ROLE_KEY);
+  const db = createMissionControlDb({ env: missionEnv, envPath: MISSION_ENV_PATH });
+  console.log(`Mission Control DB: ${db.description}`);
   const youtubeEnv = loadEnvFile(YOUTUBE_MCP_ENV_PATH);
   const requireFromMcp = createRequire(path.join(YOUTUBE_MCP_ROOT, 'package.json'));
   const { google } = requireFromMcp('googleapis');
@@ -79,123 +80,118 @@ async function main() {
   });
 
   const youtube = google.youtube({ version: 'v3', auth: oauth });
-  let query = supabase
-    .from('ops_owned_videos')
-    .select('academy_video_id,title,video_kind,is_published,metadata_json')
-    .eq('platform', 'youtube')
-    .order('published_at', { ascending: false, nullsFirst: false });
-  if (options.ids.length) query = query.in('academy_video_id', options.ids);
-  if (!options.includeShorts) query = query.eq('video_kind', 'longform');
-  if (options.limit && !options.ids.length) query = query.limit(options.limit);
 
-  const { data: owned, error } = await query;
-  if (error) throw new Error(`Failed to load ops_owned_videos: ${error.message}`);
-
-  const refreshedAt = new Date().toISOString();
-  const summary = {
-    scanned: owned?.length ?? 0,
-    found: 0,
-    updated: 0,
-    public: 0,
-    nonPublic: 0,
-    short: 0,
-    longform: 0,
-    classTitle: 0,
-    missing: 0,
-    changed: 0,
-    dryRun: options.dryRun,
-  };
-  const nonPublic = [];
-  const changedRows = [];
-
-  for (const batch of chunk(owned || [], 50)) {
-    const response = await youtube.videos.list({
-      part: ['snippet', 'contentDetails', 'status'],
-      id: batch.map((row) => row.academy_video_id),
+  try {
+    const owned = await db.loadOwnedVideosForMetadata({
+      ids: options.ids,
+      includeShorts: options.includeShorts,
+      limit: options.limit,
     });
-    const byId = new Map((response.data.items || []).map((video) => [video.id, video]));
+    const refreshedAt = new Date().toISOString();
+    const summary = {
+      scanned: owned?.length ?? 0,
+      found: 0,
+      updated: 0,
+      public: 0,
+      nonPublic: 0,
+      short: 0,
+      longform: 0,
+      classTitle: 0,
+      missing: 0,
+      changed: 0,
+      dryRun: options.dryRun,
+    };
+    const nonPublic = [];
+    const changedRows = [];
 
-    for (const row of batch) {
-      const video = byId.get(row.academy_video_id);
-      if (!video) {
-        summary.missing += 1;
-        continue;
-      }
-      summary.found += 1;
+    for (const batch of chunk(owned || [], 50)) {
+      const response = await youtube.videos.list({
+        part: ['snippet', 'contentDetails', 'status'],
+        id: batch.map((row) => row.academy_video_id),
+      });
+      const byId = new Map((response.data.items || []).map((video) => [video.id, video]));
 
-      const title = video.snippet?.title || row.title;
-      const durationIso = video.contentDetails?.duration || null;
-      const durationSeconds = parseIsoDurationSeconds(durationIso);
-      const privacyStatus = video.status?.privacyStatus || null;
-      const classification = classifyOwnedYoutubeVideo({ title, durationSeconds, privacyStatus });
-      const isPublic = classification.is_published === true;
-      const nextIsPublished = classification.is_published ?? row.is_published;
-      const metadata = {
-        ...(isRecord(row.metadata_json) ? row.metadata_json : {}),
-        academy_video_id: row.academy_video_id,
-        duration_iso: durationIso,
-        duration_seconds: durationSeconds,
-        duration_formatted: durationSeconds === null ? null : formatDuration(durationSeconds),
-        privacy_status: privacyStatus,
-        youtube_title: title,
-        classification,
-        metadata_refreshed_at: refreshedAt,
-        source: 'youtube_metadata_refresh',
-      };
+      for (const row of batch) {
+        const video = byId.get(row.academy_video_id);
+        if (!video) {
+          summary.missing += 1;
+          continue;
+        }
+        summary.found += 1;
 
-      if (isPublic) summary.public += 1;
-      else if (privacyStatus) {
-        summary.nonPublic += 1;
-        nonPublic.push({ id: row.academy_video_id, title, privacy_status: privacyStatus });
-      }
-      if (classification.video_kind === 'short') summary.short += 1;
-      else summary.longform += 1;
-      if (classification.excluded_by_title) summary.classTitle += 1;
+        const title = video.snippet?.title || row.title;
+        const durationIso = video.contentDetails?.duration || null;
+        const durationSeconds = parseIsoDurationSeconds(durationIso);
+        const privacyStatus = video.status?.privacyStatus || null;
+        const classification = classifyOwnedYoutubeVideo({ title, durationSeconds, privacyStatus });
+        const isPublic = classification.is_published === true;
+        const nextIsPublished = classification.is_published ?? row.is_published;
+        const metadata = {
+          ...(isRecord(row.metadata_json) ? row.metadata_json : {}),
+          academy_video_id: row.academy_video_id,
+          duration_iso: durationIso,
+          duration_seconds: durationSeconds,
+          duration_formatted: durationSeconds === null ? null : formatDuration(durationSeconds),
+          privacy_status: privacyStatus,
+          youtube_title: title,
+          classification,
+          metadata_refreshed_at: refreshedAt,
+          source: 'youtube_metadata_refresh',
+        };
 
-      const changed = row.title !== title ||
-        row.video_kind !== classification.video_kind ||
-        row.is_published !== nextIsPublished ||
-        row.metadata_json?.duration_seconds !== durationSeconds ||
-        row.metadata_json?.privacy_status !== privacyStatus;
-      if (changed) {
-        summary.changed += 1;
-        changedRows.push({
-          id: row.academy_video_id,
-          title,
-          from: {
-            video_kind: row.video_kind,
-            is_published: row.is_published,
-            duration_seconds: row.metadata_json?.duration_seconds ?? null,
-            privacy_status: row.metadata_json?.privacy_status ?? null,
-          },
-          to: {
-            video_kind: classification.video_kind,
-            is_published: nextIsPublished,
-            duration_seconds: durationSeconds,
-            privacy_status: privacyStatus,
-            exclusion_reasons: classification.exclusion_reasons,
-          },
-        });
-      }
+        if (isPublic) summary.public += 1;
+        else if (privacyStatus) {
+          summary.nonPublic += 1;
+          nonPublic.push({ id: row.academy_video_id, title, privacy_status: privacyStatus });
+        }
+        if (classification.video_kind === 'short') summary.short += 1;
+        else summary.longform += 1;
+        if (classification.excluded_by_title) summary.classTitle += 1;
 
-      if (!options.dryRun) {
-        const { error: updateError } = await supabase
-          .from('ops_owned_videos')
-          .update({
+        const changed = row.title !== title ||
+          row.video_kind !== classification.video_kind ||
+          row.is_published !== nextIsPublished ||
+          row.metadata_json?.duration_seconds !== durationSeconds ||
+          row.metadata_json?.privacy_status !== privacyStatus;
+        if (changed) {
+          summary.changed += 1;
+          changedRows.push({
+            id: row.academy_video_id,
             title,
-            video_kind: classification.video_kind,
-            is_published: nextIsPublished,
-            metadata_json: metadata,
-            synced_at: refreshedAt,
-          })
-          .eq('academy_video_id', row.academy_video_id);
-        if (updateError) throw new Error(`Failed to update ${row.academy_video_id}: ${updateError.message}`);
-        summary.updated += 1;
+            from: {
+              video_kind: row.video_kind,
+              is_published: row.is_published,
+              duration_seconds: row.metadata_json?.duration_seconds ?? null,
+              privacy_status: row.metadata_json?.privacy_status ?? null,
+            },
+            to: {
+              video_kind: classification.video_kind,
+              is_published: nextIsPublished,
+              duration_seconds: durationSeconds,
+              privacy_status: privacyStatus,
+              exclusion_reasons: classification.exclusion_reasons,
+            },
+          });
+        }
+
+        if (!options.dryRun) {
+          await db.updateOwnedVideoMetadata({
+            academyVideoId: row.academy_video_id,
+            title,
+            videoKind: classification.video_kind,
+            isPublished: nextIsPublished,
+            metadata,
+            syncedAt: refreshedAt,
+          });
+          summary.updated += 1;
+        }
       }
     }
-  }
 
-  console.log(JSON.stringify({ ...summary, nonPublic: nonPublic.slice(0, 20), changedRows: changedRows.slice(0, 30) }, null, 2));
+    console.log(JSON.stringify({ ...summary, nonPublic: nonPublic.slice(0, 20), changedRows: changedRows.slice(0, 30) }, null, 2));
+  } finally {
+    await db.close();
+  }
 }
 
 function chunk(items, size) {

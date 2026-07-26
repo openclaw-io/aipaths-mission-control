@@ -8,7 +8,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>/opt/homebrew/bin/node</string>
-    <string>/Users/joaco/Documents/openclaw/repos/aipaths-mission-control/node_modules/next/dist/bin/next</string>
+    <string>/Users/joaco/openclaw/repos/aipaths-mission-control/node_modules/next/dist/bin/next</string>
     <string>start</string>
     <string>-H</string>
     <string>127.0.0.1</string>
@@ -17,7 +17,7 @@
   </array>
 
   <key>WorkingDirectory</key>
-  <string>/Users/joaco/Documents/openclaw/repos/aipaths-mission-control</string>
+  <string>/Users/joaco/openclaw/repos/aipaths-mission-control</string>
 
   <key>RunAtLoad</key>
   <true/>

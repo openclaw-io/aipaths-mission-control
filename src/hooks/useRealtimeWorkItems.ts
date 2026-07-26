@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import type { LinkedWorkItem } from "@/app/blogs/page";
 
+const REALTIME_ENABLED = process.env.NEXT_PUBLIC_ENABLE_SUPABASE_REALTIME === "true";
+
 export function useRealtimeWorkItems(initialItems: LinkedWorkItem[]): LinkedWorkItem[] {
   const [items, setItems] = useState<LinkedWorkItem[]>(initialItems);
   const supabase = useMemo(() => createClient(), []);
@@ -13,6 +15,8 @@ export function useRealtimeWorkItems(initialItems: LinkedWorkItem[]): LinkedWork
   }, [initialItems]);
 
   useEffect(() => {
+    if (!REALTIME_ENABLED) return;
+
     const channel = supabase
       .channel("work-items-realtime-blog")
       .on(

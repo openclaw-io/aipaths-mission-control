@@ -41,7 +41,7 @@ const findings = [
     dedupe_key: "repo-hygiene:mission-control-live:ahead-9:2026-04-29",
     proposed_action: "Review and push the 9 local Mission Control live commits if safe.",
     approval_prompt: "Mission Control live has a clean working tree but is ahead of remote by 9 commits. Approve to queue a Systems review/push task instead of auto-pushing production-related commits.",
-    instruction: "Review /Users/joaco/Documents/openclaw/repos/aipaths-mission-control-live. It was reported clean working tree but ahead of remote by 9 commits. Inspect the commit range, verify no secrets or unsafe production changes, run the smallest relevant checks, then push if safe or report the blocker. Do not rewrite history.",
+    instruction: "Review /Users/joaco/openclaw/repos/aipaths-mission-control-live. It was reported clean working tree but ahead of remote by 9 commits. Inspect the commit range, verify no secrets or unsafe production changes, run the smallest relevant checks, then push if safe or report the blocker. Do not rewrite history.",
   },
   {
     title: "Review strategist repo — ahead 2 + intel/docs changes",
@@ -59,7 +59,7 @@ const findings = [
     dedupe_key: "repo-hygiene:systems:large-docs-scripts-sql-archive:2026-04-29",
     proposed_action: "Review and commit coherent systems-owned batches or split active work.",
     approval_prompt: "Systems has a large batch of docs/scripts/sql/archive changes without commit. Approve to queue a focused cleanup/commit pass.",
-    instruction: "Review /Users/joaco/Documents/openclaw/director-systems. There is a large docs/scripts/sql/archive batch without commit. Split active work from durable changes, run relevant lightweight checks, commit coherent systems-owned batches, and report anything that should remain uncommitted.",
+    instruction: "Review /Users/joaco/openclaw/director-systems. There is a large docs/scripts/sql/archive batch without commit. Split active work from durable changes, run relevant lightweight checks, commit coherent systems-owned batches, and report anything that should remain uncommitted.",
   },
   {
     title: "Review YouTube knowledge restructure",
@@ -77,7 +77,7 @@ const findings = [
     dedupe_key: "repo-hygiene:notion-dispatcher:ahead-11-new-workers:2026-04-29",
     proposed_action: "Review and push/commit dispatcher worker changes after safety check.",
     approval_prompt: "notion-dispatcher is ahead by 11 and has new workers. Approve to queue Systems review before pushing runtime worker changes.",
-    instruction: "Review /Users/joaco/Documents/openclaw/infra/notion-dispatcher. It was reported ahead 11 plus new workers. Inspect local commits and dirty files, verify runtime safety, commit/push safe batches, and report blockers. Be careful with scheduler/worker behavior.",
+    instruction: "Review /Users/joaco/openclaw/infra/notion-dispatcher. It was reported ahead 11 plus new workers. Inspect local commits and dirty files, verify runtime safety, commit/push safe batches, and report blockers. Be careful with scheduler/worker behavior.",
   },
   {
     title: "Review academy changes — email/types + migration 104 + content submodule",
@@ -86,7 +86,7 @@ const findings = [
     dedupe_key: "repo-hygiene:academy:email-types-migration-104-content-submodule:2026-04-29",
     proposed_action: "Review academy changes, validate migration/submodule state, commit/push safe batches.",
     approval_prompt: "Academy has email/types changes, migration 104, and a content submodule with a new blog. This is high risk because it touches web/product DB and content deployment state. Approve to queue Dev review.",
-    instruction: "Review /Users/joaco/Documents/openclaw/repos/aipaths-academy. Hygiene found email/types changes, migration 104, and content submodule with a new blog. Validate migration and submodule state, run relevant checks, commit/push only safe coherent batches, and report any deployment or content-publish blocker.",
+    instruction: "Review /Users/joaco/openclaw/repos/aipaths-academy. Hygiene found email/types changes, migration 104, and content submodule with a new blog. Validate migration and submodule state, run relevant checks, commit/push only safe coherent batches, and report any deployment or content-publish blocker.",
   },
   {
     title: "Review content repo context/docs/drafts",

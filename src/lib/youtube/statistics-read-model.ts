@@ -1,3 +1,6 @@
+import { isLocalAuthDisabled } from "@/lib/auth/local";
+import { normalizeRows } from "@/lib/db/mission-control";
+import { query } from "@/lib/db/postgres";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import type { YouTubeManualLearning, YouTubeMetricSnapshot, YouTubeStatisticsRow } from "@/lib/youtube/statistics-types";
 
@@ -9,26 +12,52 @@ const PIPELINE_SELECT = "id, pipeline_type, title, slug, status, priority, owner
 const SNAPSHOT_SELECT = "academy_video_id, window_key, window_start_date, window_end_date, views, impressions, yt_ctr, avg_view_duration_seconds, avg_percent_viewed, retention_30s, retention_50pct, retention_75pct, watch_time_minutes, subscribers_gained, traffic_source_top, launch_day_impressions, launch_day_yt_ctr, first_7d_impressions, first_7d_yt_ctr, first_7d_reach_days_covered, source_freshness_json, raw_metrics_json, computed_at";
 
 export async function loadYouTubeStatisticsRows(): Promise<YouTubeStatisticsRow[]> {
-  const [{ data: pipelineItems, error: pipelineError }, { data: ownedVideos, error: ownedError }] = await Promise.all([
-    supabaseAdmin
-      .from("pipeline_items")
-      .select(PIPELINE_SELECT)
-      .eq("pipeline_type", "video")
-      .order("created_at", { ascending: false }),
-    supabaseAdmin
-      .from("ops_owned_videos")
-      .select("academy_video_id, platform_video_id, title, published_at, video_kind, is_published, metadata_json")
-      .eq("video_kind", "longform")
-      .order("published_at", { ascending: false }),
-  ]);
+  const localSupabasePlaceholder = isLocalSupabasePlaceholder();
 
-  if (pipelineError) console.error("[Statistics] Failed to fetch pipeline video items:", pipelineError);
-  if (ownedError) console.error("[Statistics] Failed to fetch owned YouTube videos:", ownedError);
+  let items: PipelineItemRow[] = [];
+  let videos: OwnedVideoRow[] = [];
 
-  const items = (pipelineItems ?? []) as PipelineItemRow[];
-  const videos = (ownedVideos ?? []) as OwnedVideoRow[];
+  if (localSupabasePlaceholder) {
+    const [pipelineItemsRes, ownedVideosRes] = await Promise.all([
+      query<PipelineItemRow>(
+        `select ${PIPELINE_SELECT}
+           from pipeline_items
+          where pipeline_type = 'video'
+          order by created_at desc`,
+      ),
+      query<OwnedVideoRow>(
+        `select academy_video_id, platform_video_id, title, published_at, video_kind, is_published, metadata_json
+           from ops_owned_videos
+          where video_kind = 'longform'
+          order by published_at desc nulls last`,
+      ),
+    ]);
+
+    items = normalizeRows(pipelineItemsRes.rows as PipelineItemRow[]);
+    videos = normalizeRows(ownedVideosRes.rows as OwnedVideoRow[]);
+  } else {
+    const [{ data: pipelineItems, error: pipelineError }, { data: ownedVideos, error: ownedError }] = await Promise.all([
+      supabaseAdmin
+        .from("pipeline_items")
+        .select(PIPELINE_SELECT)
+        .eq("pipeline_type", "video")
+        .order("created_at", { ascending: false }),
+      supabaseAdmin
+        .from("ops_owned_videos")
+        .select("academy_video_id, platform_video_id, title, published_at, video_kind, is_published, metadata_json")
+        .eq("video_kind", "longform")
+        .order("published_at", { ascending: false }),
+    ]);
+
+    if (pipelineError) console.error("[Statistics] Failed to fetch pipeline video items:", pipelineError);
+    if (ownedError) console.error("[Statistics] Failed to fetch owned YouTube videos:", ownedError);
+
+    items = (pipelineItems ?? []) as PipelineItemRow[];
+    videos = (ownedVideos ?? []) as OwnedVideoRow[];
+  }
+
   const videoIds = [...new Set(videos.map((video) => video.academy_video_id).filter(Boolean))];
-  const snapshotMap = await loadSnapshotMap(videoIds);
+  const snapshotMap = await loadSnapshotMap(videoIds, localSupabasePlaceholder);
   const videoById = new Map(videos.map((video) => [video.academy_video_id, video]));
   const usedPipelineItemIds = new Set<string>();
 
@@ -85,9 +114,27 @@ export function extractYouTubeVideoId(input: { current_url?: string | null; meta
   return null;
 }
 
-async function loadSnapshotMap(videoIds: string[]) {
+async function loadSnapshotMap(videoIds: string[], localSupabasePlaceholder: boolean) {
   const snapshotMap = new Map<string, YouTubeStatisticsRow["snapshots"]>();
   if (!videoIds.length) return snapshotMap;
+
+  if (localSupabasePlaceholder) {
+    const { rows } = await query<JsonRecord>(
+      `select ${SNAPSHOT_SELECT}
+         from ops_youtube_video_learning_snapshots
+        where academy_video_id = any($1::text[])`,
+      [videoIds],
+    );
+
+    for (const raw of normalizeRows(rows as JsonRecord[])) {
+      const snapshot = normalizeSnapshot(raw as JsonRecord);
+      const current = snapshotMap.get(snapshot.academy_video_id) || {};
+      current[snapshot.window_key] = snapshot;
+      snapshotMap.set(snapshot.academy_video_id, current);
+    }
+
+    return snapshotMap;
+  }
 
   const { data, error } = await supabaseAdmin
     .from("ops_youtube_video_learning_snapshots")
@@ -107,6 +154,10 @@ async function loadSnapshotMap(videoIds: string[]) {
   }
 
   return snapshotMap;
+}
+
+function isLocalSupabasePlaceholder() {
+  return isLocalAuthDisabled();
 }
 
 function makeStatisticsRow({

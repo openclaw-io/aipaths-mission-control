@@ -2,6 +2,8 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { NextResponse, type NextRequest } from "next/server";
 import { createServiceClient } from "@/lib/supabase/admin";
+import { isLocalAuthDisabled } from "@/lib/auth/local";
+import { getPipelineItemLocal } from "@/lib/db/pipeline-local";
 
 export const dynamic = "force-dynamic";
 
@@ -9,7 +11,7 @@ type JsonRecord = Record<string, unknown>;
 
 const ALLOWED_IMAGE_ROOTS = [
   "/Users/joaco/.openclaw/media",
-  "/Users/joaco/Documents/openclaw/director-content/work/localizations",
+  "/Users/joaco/openclaw/director-content/work/localizations",
 ];
 
 function getNestedRecord(value: unknown, key: string) {
@@ -45,10 +47,16 @@ function isAllowedPath(filePath: string) {
 
 export async function GET(_request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const db = createServiceClient();
-
-  const { data: item, error } = await db.from("pipeline_items").select("metadata").eq("id", id).eq("pipeline_type", "blog").single();
-  if (error || !item) return NextResponse.json({ error: "Blog not found" }, { status: 404 });
+  let item: { metadata?: unknown } | null = null;
+  if (isLocalAuthDisabled()) {
+    item = await getPipelineItemLocal(id, "blog");
+  } else {
+    const db = createServiceClient();
+    const { data, error } = await db.from("pipeline_items").select("metadata").eq("id", id).eq("pipeline_type", "blog").single();
+    if (error) return NextResponse.json({ error: "Blog not found" }, { status: 404 });
+    item = data;
+  }
+  if (!item) return NextResponse.json({ error: "Blog not found" }, { status: 404 });
 
   const metadata = (item.metadata || {}) as JsonRecord;
   const hero = getNestedRecord(metadata, "hero_image") || getNestedRecord(metadata, "cover_image");

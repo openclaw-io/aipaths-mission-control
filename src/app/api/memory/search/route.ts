@@ -1,4 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { isLocalAuthDisabled } from "@/lib/auth/local";
+import { searchMemories } from "@/lib/db/mission-control";
 import { createServiceClient } from "@/lib/supabase/admin";
 import { generateEmbedding } from "@/lib/embeddings";
 
@@ -20,6 +22,16 @@ export async function POST(req: NextRequest) {
 
   if (!query) {
     return NextResponse.json({ error: "query required" }, { status: 400 });
+  }
+
+  if (isLocalAuthDisabled()) {
+    const results = await searchMemories({
+      text: query,
+      agent: agent || null,
+      type: type || null,
+      limit,
+    });
+    return NextResponse.json({ results });
   }
 
   const supabase = createServiceClient();

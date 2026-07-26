@@ -104,7 +104,7 @@ tail -n 100 ~/Library/Logs/com.aipaths.mission-control.err.log
 
 Current production-like local service facts on the Mac Mini:
 - LaunchAgent label: `com.aipaths.mission-control`
-- Working directory: `/Users/joaco/Documents/openclaw/repos/aipaths-mission-control-live`
+- Working directory: `/Users/joaco/openclaw/repos/aipaths-mission-control-live`
 - Start command: `next start -H 127.0.0.1 -p 3001`
 - Tunnel target should therefore reflect the app served from port `3001`
 

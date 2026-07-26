@@ -1,7 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useState } from "react";
 import { CreateProjectModal } from "./CreateProjectModal";
 import { ProjectCard } from "./ProjectCard";
 import { ProjectDetail } from "./ProjectDetail";
@@ -16,26 +15,9 @@ export function ProjectsClient({
   projects: ProjectGalleryCard[];
   projectDetails: Record<string, ProjectDetailPayload>;
 }) {
-  const router = useRouter();
   const [showCreate, setShowCreate] = useState(false);
   const [expandedProject, setExpandedProject] = useState<string | null>(null);
   const [showCompleted, setShowCompleted] = useState(false);
-
-  useEffect(() => {
-    const hasLiveProjects = projects.some((p) =>
-      ["planning", "queued", "in_progress", "active", "needs_clarification", "needs_approval", "in_review"].includes(p.status)
-    );
-
-    if (!hasLiveProjects) return;
-
-    const interval = window.setInterval(() => {
-      if (document.visibilityState === "visible") {
-        router.refresh();
-      }
-    }, 5000);
-
-    return () => window.clearInterval(interval);
-  }, [projects, router]);
 
   const completedCount = projects.filter((p) => p.status === "completed").length;
   const priorityOrder = { high: 0, medium: 1, low: 2 };

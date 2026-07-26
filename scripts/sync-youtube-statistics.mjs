@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
-import { createClient } from '@supabase/supabase-js';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createMissionControlDb, getMissionControlDatabaseUrl } from './lib/mission-control-db.mjs';
 import {
   isDashboardMetricRowEligibleForStatistics,
   loadEnvFile,
@@ -41,20 +41,18 @@ async function main() {
   }
 
   const env = loadEnvFile(ENV_PATH);
-  const supabaseUrl = env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceKey = env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!supabaseUrl || !serviceKey) {
-    throw new Error(`Missing Supabase env in ${ENV_PATH}`);
-  }
-
-  const supabase = createClient(supabaseUrl, serviceKey);
+  const db = options.dryRun ? null : createMissionControlDb({ env, envPath: ENV_PATH });
+  const dbDescription = db?.description || (getMissionControlDatabaseUrl(env)
+    ? 'local Postgres via MISSION_CONTROL_DATABASE_URL (dry-run; no writes)'
+    : 'Supabase fallback (dry-run; no writes; MISSION_CONTROL_DATABASE_URL not set)');
+  console.log(`Mission Control DB: ${dbDescription}`);
   const computedAt = new Date().toISOString();
   let runId = null;
   let totalRows = 0;
   const perWindow = [];
 
   if (!options.dryRun) {
-    runId = await createPipelineRun(supabase, options);
+    runId = await db.createPipelineRun(options);
     console.log(`pipeline_runs.id=${runId}`);
   }
 
@@ -95,16 +93,16 @@ async function main() {
         }));
         console.log(JSON.stringify({ sample }, null, 2));
       } else if (metricRows.length > 0) {
-        await upsertOwnedVideoRows(supabase, metricRows.map((metric) => mapDashboardMetricRowToOwnedVideo(metric, computedAt)));
+        await upsertOwnedVideoRows(db, metricRows.map((metric) => mapDashboardMetricRowToOwnedVideo(metric, computedAt)));
         if (rows.length > 0) {
-          await upsertSnapshotRows(supabase, rows);
+          await db.upsertSnapshotRows(rows);
         }
         console.log(`Upserted ${metricRows.length} rows into ops_owned_videos and ${rows.length} rows into ops_youtube_video_learning_snapshots`);
       }
     }
 
     if (!options.dryRun) {
-      await finishPipelineRun(supabase, runId, {
+      await db.finishPipelineRun(runId, {
         status: 'ok',
         rows_read: totalRows,
         rows_written: totalRows,
@@ -116,7 +114,7 @@ async function main() {
     console.log(JSON.stringify({ dryRun: options.dryRun, totalRows, perWindow }, null, 2));
   } catch (error) {
     if (!options.dryRun && runId != null) {
-      await finishPipelineRun(supabase, runId, {
+      await db.finishPipelineRun(runId, {
         status: 'error',
         rows_read: totalRows,
         rows_written: 0,
@@ -124,6 +122,8 @@ async function main() {
       });
     }
     throw error;
+  } finally {
+    if (db) await db.close();
   }
 }
 
@@ -238,45 +238,9 @@ function callMcpTool(toolName, toolArgs, timeoutMs = 600000) {
   });
 }
 
-async function createPipelineRun(supabase, options) {
-  const { data, error } = await supabase
-    .from('pipeline_runs')
-    .insert({
-      run_type: 'sync:youtube-statistics',
-      status: 'running',
-      source_system: 'youtube_mcp',
-      metadata_json: {
-        windows: options.windows,
-        video_type: options.videoType,
-        limit: options.limit,
-        offset: options.offset,
-        include_retention_curve: options.includeRetentionCurve,
-      },
-    })
-    .select('id')
-    .single();
-  if (error) throw new Error(`create pipeline_runs failed: ${error.message}`);
-  return data.id;
-}
-
-async function finishPipelineRun(supabase, runId, patch) {
-  const { error } = await supabase
-    .from('pipeline_runs')
-    .update({
-      ...patch,
-      finished_at: new Date().toISOString(),
-    })
-    .eq('id', runId);
-  if (error) throw new Error(`finish pipeline_runs failed: ${error.message}`);
-}
-
-async function upsertOwnedVideoRows(supabase, rows) {
+async function upsertOwnedVideoRows(db, rows) {
   const ids = rows.map((row) => row.academy_video_id);
-  const { data: existing, error: existingError } = await supabase
-    .from('ops_owned_videos')
-    .select('academy_video_id,video_kind,is_published,metadata_json')
-    .in('academy_video_id', ids);
-  if (existingError) throw new Error(`select ops_owned_videos failed: ${existingError.message}`);
+  const existing = await db.loadOwnedVideoRowsByIds(ids);
 
   const existingById = new Map((existing || []).map((row) => [row.academy_video_id, row]));
   const mergedRows = rows.map((row) => mergeOwnedVideoUpsertRow({
@@ -284,17 +248,7 @@ async function upsertOwnedVideoRows(supabase, rows) {
     row,
   }));
 
-  const { error } = await supabase
-    .from('ops_owned_videos')
-    .upsert(mergedRows, { onConflict: 'academy_video_id' });
-  if (error) throw new Error(`upsert ops_owned_videos failed: ${error.message}`);
-}
-
-async function upsertSnapshotRows(supabase, rows) {
-  const { error } = await supabase
-    .from('ops_youtube_video_learning_snapshots')
-    .upsert(rows, { onConflict: 'academy_video_id,window_key' });
-  if (error) throw new Error(`upsert ops_youtube_video_learning_snapshots failed: ${error.message}`);
+  await db.upsertOwnedVideoRows(mergedRows);
 }
 
 main().catch((error) => {

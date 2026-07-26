@@ -73,7 +73,7 @@ export async function createPipelineWorkItem(db: SupabaseClient, input: Pipeline
       scheduled_for: input.scheduledFor || null,
       payload,
     })
-    .select("id, title, status, source_type, owner_agent, target_agent_id, payload")
+    .select("id, title, status, source_type, owner_agent, target_agent_id, scheduled_for, payload")
     .single();
 
   if (error) throw error;
@@ -83,7 +83,17 @@ export async function createPipelineWorkItem(db: SupabaseClient, input: Pipeline
     work_item_id: workItem.id,
     relation_type: mapRelationType,
   });
-  if (mapError) throw mapError;
+  if (mapError) {
+    // Mapping is useful for pipeline traceability, but it must not make the
+    // caller partially fail after the work item has already been created.
+    // Some legacy relation_type constraints can reject newer workflow labels.
+    console.error("[pipeline-materializer] Failed to insert pipeline_work_map", {
+      pipelineItemId: input.pipelineItemId,
+      workItemId: workItem.id,
+      relationType: mapRelationType,
+      error: mapError.message,
+    });
+  }
 
   const { error: eventError } = await db.from("pipeline_events").insert({
     pipeline_item_id: input.pipelineItemId,
@@ -101,7 +111,14 @@ export async function createPipelineWorkItem(db: SupabaseClient, input: Pipeline
       action: input.action,
     },
   });
-  if (eventError) throw eventError;
+  if (eventError) {
+    console.error("[pipeline-materializer] Failed to insert pipeline_events", {
+      pipelineItemId: input.pipelineItemId,
+      workItemId: workItem.id,
+      relationType: payloadRelationType,
+      error: eventError.message,
+    });
+  }
 
   return { workItem, created: true };
 }

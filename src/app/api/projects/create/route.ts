@@ -1,4 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { getLocalMissionControlUser, isLocalAuthDisabled } from "@/lib/auth/local";
+import { query } from "@/lib/db/postgres";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/admin";
 
@@ -33,16 +35,35 @@ async function buildUniqueKey(supabase: ReturnType<typeof createServiceClient>, 
   return `${baseKey}-${Date.now()}`.slice(0, 100);
 }
 
+async function buildUniqueKeyLocal(input: string) {
+  const baseKey = slugify(input) || `project-${Date.now()}`;
+  const { rows } = await query<{ key: string }>(`select key from projects where key like $1`, [`${baseKey}%`]);
+  const existingKeys = new Set((rows || []).map((row) => row.key));
+  if (!existingKeys.has(baseKey)) return baseKey;
+
+  for (let i = 2; i < 1000; i++) {
+    const candidate = `${baseKey}-${i}`.slice(0, 100);
+    if (!existingKeys.has(candidate)) return candidate;
+  }
+
+  return `${baseKey}-${Date.now()}`.slice(0, 100);
+}
+
 export async function POST(request: NextRequest) {
-  const authClient = await createClient();
-  const {
-    data: { user },
-  } = await authClient.auth.getUser();
+  const useLocalMode = isLocalAuthDisabled();
+  const authClient = useLocalMode ? null : await createClient();
+  const actor = useLocalMode ? getLocalMissionControlUser() : null;
+  let user: { email?: string | null; id?: string | null } | null = actor ? { email: actor.email, id: actor.email } : null;
+  if (!useLocalMode) {
+    const authResult = await authClient!.auth.getUser();
+    user = authResult.data.user;
+  }
 
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  const actorIdentity = String(user.email || user.id || "local@mission-control");
   const body = await request.json().catch(() => ({}));
   const input = typeof body?.input === "string" ? body.input.trim() : "";
 
@@ -50,8 +71,51 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Project input is required" }, { status: 400 });
   }
 
-  const supabase = createServiceClient();
   const now = new Date().toISOString();
+
+  if (useLocalMode) {
+    const key = await buildUniqueKeyLocal(input);
+    const inserted = await query<{ id: string; key: string; status: string }>(
+      `insert into projects (
+         key, name, description, summary, type, status, priority, owner_agent,
+         metadata, plan, clarification_questions, approval_scope, created_by, updated_at
+       ) values (
+         $1, $2, $3, $4, 'ops', 'planning', 'medium', 'systems',
+         $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9, $10
+       ) returning id, key, status`,
+      [
+        key,
+        input,
+        input,
+        input,
+        JSON.stringify({ created_from: 'quick_project_box' }),
+        JSON.stringify([]),
+        JSON.stringify([]),
+        JSON.stringify({
+          approved: false,
+          approved_by: null,
+          approved_at: null,
+          can_execute_unattended: true,
+          allowed_actions: ['planning', 'implementation'],
+          forbidden_actions: ['publish_external_output'],
+          notes: null,
+        }),
+        actorIdentity,
+        now,
+      ],
+    );
+    const data = inserted.rows[0];
+
+    await query(
+      `insert into project_events (project_id, event_type, from_status, to_status, actor, payload, created_at)
+       values ($1, 'project.created', null, 'planning', $2, $3::jsonb, $4)`,
+      [data.id, actorIdentity, JSON.stringify({ source: 'quick_project_box', input }), now],
+    );
+
+    return NextResponse.json({ ok: true, project: data });
+  }
+
+  const supabase = createServiceClient();
   const key = await buildUniqueKey(supabase, input);
 
   const { data, error } = await supabase
@@ -79,7 +143,7 @@ export async function POST(request: NextRequest) {
         forbidden_actions: ["publish_external_output"],
         notes: null,
       },
-      created_by: user.email || user.id,
+      created_by: actorIdentity,
       updated_at: now,
     })
     .select("id, key, status")
@@ -94,7 +158,7 @@ export async function POST(request: NextRequest) {
     event_type: "project.created",
     from_status: null,
     to_status: "planning",
-    actor: user.email || user.id,
+    actor: actorIdentity,
     payload: { source: "quick_project_box", input },
     created_at: now,
   });

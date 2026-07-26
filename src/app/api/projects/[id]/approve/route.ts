@@ -1,4 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { getLocalMissionControlUser, isLocalAuthDisabled } from "@/lib/auth/local";
+import { query } from "@/lib/db/postgres";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/admin";
 
@@ -9,20 +11,50 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-
-  const authClient = await createClient();
-  const {
-    data: { user },
-  } = await authClient.auth.getUser();
+  const useLocalMode = isLocalAuthDisabled();
+  const authClient = useLocalMode ? null : await createClient();
+  const actor = useLocalMode ? getLocalMissionControlUser() : null;
+  let user: { email?: string | null; id?: string | null } | null = actor ? { email: actor.email, id: actor.email } : null;
+  if (!useLocalMode) {
+    const authResult = await authClient!.auth.getUser();
+    user = authResult.data.user;
+  }
 
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  const actorIdentity = String(user.email || user.id || "local@mission-control");
   const body = await request.json().catch(() => ({}));
   const action = body?.action === "rework" ? "rework" : "approve";
   const queue = action === "approve" && body?.queue !== false;
   const comment = typeof body?.comment === "string" ? body.comment.trim() : "";
+  const now = new Date().toISOString();
+  const nextStatus = action === "rework" ? "planning" : queue ? "queued" : "approved";
+
+  if (useLocalMode) {
+    const projectRows = await query<{ id: string; status: string; approval_scope: Record<string, unknown> | null }>(
+      `select id, status, approval_scope from projects where id = $1 limit 1`,
+      [id],
+    );
+    const project = projectRows.rows[0];
+    if (!project) return NextResponse.json({ error: "Project not found" }, { status: 404 });
+
+    const approvalScope = action === "rework"
+      ? { ...(project.approval_scope || {}), approved: false, approved_by: null, approved_at: null }
+      : { ...(project.approval_scope || {}), approved: true, approved_by: actorIdentity, approved_at: now, can_execute_unattended: true };
+
+    await query(
+      `update projects set status = $1, approval_scope = $2::jsonb, last_approved_at = $3, updated_at = $3 where id = $4`,
+      [nextStatus, JSON.stringify(approvalScope), now, id],
+    );
+    await query(
+      `insert into project_events (project_id, event_type, from_status, to_status, actor, payload, created_at)
+       values ($1, $2, $3, $4, $5, $6::jsonb, $7)`,
+      [id, action === 'rework' ? 'project.plan_rework_requested' : queue ? 'project.queued' : 'project.approved', project.status, nextStatus, actorIdentity, JSON.stringify({ mode: 'manual', queue, comment: comment || null, action }), now],
+    );
+    return NextResponse.json({ ok: true, id, status: nextStatus });
+  }
 
   const supabase = createServiceClient();
 
@@ -40,8 +72,6 @@ export async function POST(
     return NextResponse.json({ error: "Project not found" }, { status: 404 });
   }
 
-  const now = new Date().toISOString();
-  const nextStatus = action === "rework" ? "planning" : queue ? "queued" : "approved";
   const approvalScope = action === "rework"
     ? {
         ...(project.approval_scope || {}),
@@ -52,7 +82,7 @@ export async function POST(
     : {
         ...(project.approval_scope || {}),
         approved: true,
-        approved_by: user.email || user.id,
+        approved_by: actorIdentity,
         approved_at: now,
         can_execute_unattended: true,
       };
@@ -76,7 +106,7 @@ export async function POST(
     event_type: action === "rework" ? "project.plan_rework_requested" : queue ? "project.queued" : "project.approved",
     from_status: project.status,
     to_status: nextStatus,
-    actor: user.email || user.id,
+    actor: actorIdentity,
     payload: {
       mode: "manual",
       queue,
