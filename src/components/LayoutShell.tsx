@@ -5,7 +5,13 @@ import Sidebar from "./Sidebar";
 import GatewayStatus from "./GatewayStatus";
 import ExecutionWindowTopbar from "./ExecutionWindowTopbar";
 
-export function LayoutShell({ children }: { children: React.ReactNode }) {
+export function LayoutShell({
+  children,
+  authEnabled,
+}: {
+  children: React.ReactNode;
+  authEnabled: boolean;
+}) {
   const pathname = usePathname();
   const isLoginPage = pathname === "/login";
 
@@ -15,7 +21,7 @@ export function LayoutShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="min-h-screen overflow-x-hidden">
-      <Sidebar />
+      <Sidebar authEnabled={authEnabled} />
       <main className="ml-64 flex min-h-screen w-[calc(100%-16rem)] min-w-0 flex-col">
         <div className="flex shrink-0 items-center justify-end gap-3 px-8 py-3">
           <ExecutionWindowTopbar />

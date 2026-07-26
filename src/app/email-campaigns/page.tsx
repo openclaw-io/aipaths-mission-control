@@ -1,3 +1,6 @@
+import { isLocalAuthDisabled } from "@/lib/auth/local";
+import { normalizeRows } from "@/lib/db/mission-control";
+import { query } from "@/lib/db/postgres";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { createClient } from "@supabase/supabase-js";
 import {
@@ -125,49 +128,44 @@ async function fetchWebsiteData(errors: string[]): Promise<{
 
 export default async function EmailCampaignsPage() {
   const errors: string[] = [];
+  const useLocalMode = isLocalAuthDisabled();
 
-  const { data: pipelineRows, error: pipelineError } = await supabaseAdmin
-    .from("pipeline_items")
-    .select("*")
-    .eq("pipeline_type", "email_campaign");
+  const pipelineResult = useLocalMode
+    ? await query<Record<string, unknown>>(`select * from pipeline_items where pipeline_type = 'email_campaign' order by created_at desc`)
+    : await supabaseAdmin
+      .from("pipeline_items")
+      .select("*")
+      .eq("pipeline_type", "email_campaign");
 
-  if (pipelineError) {
-    console.error("[EmailCampaignsPage] Failed to fetch pipeline items:", pipelineError);
-    errors.push(`Pipeline items query failed: ${pipelineError.message}`);
-  }
-
-  const pipelineItems = ((pipelineRows ?? []) as EmailCampaignPipelineItem[]).filter(Boolean);
+  const pipelineItems = normalizeRows((((pipelineResult as { rows?: Record<string, unknown>[]; data?: Record<string, unknown>[] }).rows) ?? ((pipelineResult as { data?: Record<string, unknown>[] }).data) ?? [])).filter(Boolean) as EmailCampaignPipelineItem[];
   const pipelineIds = pipelineItems
     .map((item) => item.id)
     .filter((value): value is string => typeof value === "string" && value.length > 0);
 
-  const [workByPayloadRes, workBySourceRes] = await Promise.all([
-    supabaseAdmin
-      .from("work_items")
-      .select("*")
-      .eq("payload->>pipeline_type", "email_campaign"),
-    pipelineIds.length > 0
-      ? supabaseAdmin
-        .from("work_items")
-        .select("*")
-        .in("source_id", pipelineIds)
-      : Promise.resolve({ data: [], error: null }),
-  ]);
-
-  if (workByPayloadRes.error) {
-    console.error("[EmailCampaignsPage] Failed to fetch work items by payload:", workByPayloadRes.error);
-    errors.push(`Work items payload query failed: ${workByPayloadRes.error.message}`);
-  }
-
-  if (workBySourceRes.error) {
-    console.error("[EmailCampaignsPage] Failed to fetch work items by source:", workBySourceRes.error);
-    errors.push(`Work items source query failed: ${workBySourceRes.error.message}`);
-  }
+  const [workByPayloadRes, workBySourceRes] = useLocalMode
+    ? await Promise.all([
+        query<Record<string, unknown>>(`select * from work_items where payload ->> 'pipeline_type' = 'email_campaign' order by created_at desc`),
+        pipelineIds.length > 0
+          ? query<Record<string, unknown>>(`select * from work_items where source_id = any($1::text[]) order by created_at desc`, [pipelineIds])
+          : Promise.resolve({ rows: [] as Record<string, unknown>[] }),
+      ])
+    : await Promise.all([
+        supabaseAdmin
+          .from("work_items")
+          .select("*")
+          .eq("payload->>pipeline_type", "email_campaign"),
+        pipelineIds.length > 0
+          ? supabaseAdmin
+            .from("work_items")
+            .select("*")
+            .in("source_id", pipelineIds)
+          : Promise.resolve({ data: [], error: null }),
+      ]);
 
   const workItems = uniqueById(
     [
-      ...((workByPayloadRes.data ?? []) as EmailCampaignWorkItem[]),
-      ...((workBySourceRes.data ?? []) as EmailCampaignWorkItem[]),
+      ...(normalizeRows((((workByPayloadRes as { rows?: Record<string, unknown>[]; data?: Record<string, unknown>[] }).rows) ?? ((workByPayloadRes as { data?: Record<string, unknown>[] }).data) ?? [])) as EmailCampaignWorkItem[]),
+      ...(normalizeRows((((workBySourceRes as { rows?: Record<string, unknown>[]; data?: Record<string, unknown>[] }).rows) ?? ((workBySourceRes as { data?: Record<string, unknown>[] }).data) ?? [])) as EmailCampaignWorkItem[]),
     ].filter(Boolean)
   );
 

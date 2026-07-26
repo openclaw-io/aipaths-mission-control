@@ -1,9 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { createClient } from "@/lib/supabase/client";
 import { isPublicationWorkItem } from "@/lib/publication/scheduling";
-import { COMPACT_WORK_QUEUE_ITEM_SELECT, compactWorkItemRow } from "@/lib/work-items/compact-payload";
 
 type Tab = "live" | "calendar" | "recurring";
 
@@ -83,7 +81,9 @@ const STATUS_STYLES: Record<string, string> = {
   canceled: "bg-gray-500/20 text-gray-300 border-gray-500/20",
 };
 
-const FALLBACK_REFRESH_MS = 90_000;
+const FALLBACK_REFRESH_MS = 300_000;
+const NOW_TICK_MS = 60_000;
+const MIN_AUTO_REFRESH_GAP_MS = 60_000;
 
 function pretty(value: string | null | undefined) {
   return value ? value.replaceAll("_", " ") : "—";
@@ -162,92 +162,56 @@ export function WorkItemsClient({ initialItems, initialEvents, initialRules = []
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const refreshInFlightRef = useRef(false);
+  const lastRefreshAtRef = useRef<number>(0);
 
-  const supabase = useMemo(() => createClient(), []);
-
-  const refresh = useCallback(async (options: { includeRules?: boolean } = {}) => {
+  const refresh = useCallback(async (options: { includeRules?: boolean; force?: boolean; source?: "focus" | "timer" } = {}) => {
     if (refreshInFlightRef.current) return;
+    const nowTs = Date.now();
+    if (!options.force && options.source === "focus" && lastRefreshAtRef.current && nowTs - lastRefreshAtRef.current < MIN_AUTO_REFRESH_GAP_MS) return;
     refreshInFlightRef.current = true;
     setRefreshing(true);
 
     try {
-      const [itemsRes, eventsRes] = await Promise.all([
-        supabase
-          .from("work_items")
-          .select(COMPACT_WORK_QUEUE_ITEM_SELECT)
-          .order("created_at", { ascending: false })
-          .limit(200),
-        supabase
-          .from("event_log")
-          .select("id,domain,event_type,entity_type,entity_id,actor,payload,created_at")
-          .eq("domain", "work")
-          .order("created_at", { ascending: false })
-          .limit(100),
-      ]);
-
-      if (!itemsRes.error) setItems((itemsRes.data || []).map((item) => compactWorkItemRow(item as unknown as Record<string, unknown>)) as unknown as WorkItem[]);
-      if (!eventsRes.error) setEvents((eventsRes.data || []) as WorkEvent[]);
-      if (options.includeRules) {
-        const body = await fetch("/api/work-items/recurring-rules").then((res) => res.ok ? res.json() : null).catch(() => null);
-        if (body?.rules) setRules(body.rules as RecurringWorkRule[]);
-      }
-      setLastRefreshAt(new Date());
+      const query = options.includeRules ? "?includeRules=1" : "";
+      const body = await fetch(`/api/work-items/board${query}`, { cache: "no-store" })
+        .then((res) => res.ok ? res.json() : null)
+        .catch(() => null);
+      if (!body) return;
+      if (body.items) setItems(body.items as WorkItem[]);
+      if (body.events) setEvents(body.events as WorkEvent[]);
+      if (options.includeRules && body.rules) setRules(body.rules as RecurringWorkRule[]);
+      lastRefreshAtRef.current = Date.now();
+      setLastRefreshAt(new Date(lastRefreshAtRef.current));
     } finally {
       refreshInFlightRef.current = false;
       setRefreshing(false);
     }
-  }, [supabase]);
+  }, []);
 
   useEffect(() => {
-    const upsertItem = (item: WorkItem) => {
-      setItems((current) => {
-        const index = current.findIndex((candidate) => candidate.id === item.id);
-        if (index === -1) return [item, ...current].slice(0, 200);
-        const next = [...current];
-        next[index] = { ...next[index], ...item };
-        return next;
-      });
-    };
-
-    const workChannel = supabase
-      .channel("work-queue-items")
-      .on("postgres_changes", { event: "*", schema: "public", table: "work_items" }, (payload) => {
-        if (payload.eventType === "DELETE") {
-          const item = payload.old as { id?: string };
-          if (item.id) setItems((current) => current.filter((candidate) => candidate.id !== item.id));
-          return;
-        }
-        upsertItem(payload.new as WorkItem);
-      })
-      .subscribe();
-
-    const eventChannel = supabase
-      .channel("work-queue-events")
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "event_log", filter: "domain=eq.work" }, (payload) => {
-        const event = payload.new as WorkEvent;
-        setEvents((current) => [event, ...current].slice(0, 100));
-      })
-      .subscribe();
-
-    const timer = window.setInterval(() => {
+    const nowTimer = window.setInterval(() => {
       setNow(Date.now());
-      if (document.visibilityState === "visible") void refresh();
+    }, NOW_TICK_MS);
+
+    const refreshTimer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void refresh({ source: "timer" });
     }, FALLBACK_REFRESH_MS);
 
     const handleVisibleRefresh = () => {
-      if (document.visibilityState === "visible") void refresh({ includeRules: true });
+      if (document.visibilityState === "visible") {
+        void refresh({ includeRules: true, source: "focus" });
+      }
     };
     window.addEventListener("focus", handleVisibleRefresh);
     document.addEventListener("visibilitychange", handleVisibleRefresh);
 
     return () => {
-      supabase.removeChannel(workChannel);
-      supabase.removeChannel(eventChannel);
-      window.clearInterval(timer);
+      window.clearInterval(nowTimer);
+      window.clearInterval(refreshTimer);
       window.removeEventListener("focus", handleVisibleRefresh);
       document.removeEventListener("visibilitychange", handleVisibleRefresh);
     };
-  }, [refresh, supabase]);
+  }, [refresh]);
 
   useEffect(() => {
     if (!selectedItemId) return;
@@ -281,12 +245,11 @@ export function WorkItemsClient({ initialItems, initialEvents, initialRules = []
   const sources = useMemo(() => Array.from(new Set(items.map((item) => item.source_type || "unknown"))).sort(), [items]);
 
   const readyNow = filteredItems.filter((item) => item.status === "ready" && (!item.scheduled_for || new Date(item.scheduled_for).getTime() <= now)).sort(sortBySchedule);
-  const scheduledLater = filteredItems.filter((item) => ["ready", "draft", "blocked"].includes(item.status) && item.scheduled_for && new Date(item.scheduled_for).getTime() > now).sort(sortBySchedule);
   const calendarItems = useMemo(() => filteredItems.filter((item) => {
     if (!item.scheduled_for || ["draft"].includes(item.status)) return false;
     const scheduleKind = payloadString(item.payload, "schedule_kind");
     if (scheduleKind === "dispatch_retry") return false;
-    if (["publication", "calendar", "recurring"].includes(scheduleKind || "")) return true;
+    if (["publication", "calendar", "recurring", "email_send"].includes(scheduleKind || "")) return true;
     if (isPublicationWorkItem(item)) return true;
     return payloadString(item.payload, "trigger") === "recurring_work_rule";
   }).sort(calendarItemSort()), [filteredItems]);
@@ -313,7 +276,7 @@ export function WorkItemsClient({ initialItems, initialEvents, initialRules = []
 
   const tabs: Array<{ id: Tab; label: string; count?: number }> = [
     { id: "live", label: "Live Board", count: readyNow.length + blocked.length + inProgress.length + failed.length },
-    { id: "calendar", label: "Calendar", count: scheduledLater.length },
+    { id: "calendar", label: "Calendar", count: calendarItems.length },
     { id: "recurring", label: "Recurring Tasks", count: rules.length },
   ];
 
@@ -345,7 +308,7 @@ export function WorkItemsClient({ initialItems, initialEvents, initialRules = []
 
         <button
           type="button"
-          onClick={() => refresh({ includeRules: true })}
+          onClick={() => refresh({ includeRules: true, force: true })}
           disabled={refreshing}
           className="rounded-lg border border-gray-700 bg-white/[0.03] px-3 py-1.5 text-sm font-medium text-gray-300 transition hover:border-gray-600 hover:bg-white/[0.06] hover:text-white disabled:cursor-wait disabled:opacity-60"
           title={lastRefreshAt ? `Last refreshed ${formatDate(lastRefreshAt.toISOString())}` : "Refresh work queue"}
@@ -804,6 +767,7 @@ function FailedColumn({ items, onOpen, onRequeue }: { items: WorkItem[]; onOpen:
             <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-red-500/10 pt-3">
               <div className="space-y-1 text-xs text-red-200/60">
                 <div>{payloadString(item.payload, "dispatch_failure_reason") || payloadString(item.payload, "error") || "No failure reason stored"}</div>
+                {payloadString(item.payload, "operator_alert") && <div className="text-red-100">{payloadString(item.payload, "operator_alert")}</div>}
                 {payloadString(item.payload, "dead_letter_reason") && <div>Dead letter: {payloadString(item.payload, "dead_letter_reason")}</div>}
               </div>
               <button

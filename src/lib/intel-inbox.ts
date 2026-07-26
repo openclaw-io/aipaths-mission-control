@@ -1,3 +1,7 @@
+import { isLocalAuthDisabled } from "@/lib/auth/local";
+import { normalizeRow, normalizeRows } from "@/lib/db/mission-control";
+import { createPipelineWorkItemLocal } from "@/lib/db/pipeline-local";
+import { query, withTransaction } from "@/lib/db/postgres";
 import { createServiceClient, supabaseAdmin } from "@/lib/supabase/admin";
 import {
   DESTINATION_ALIASES,
@@ -756,6 +760,246 @@ function isDuplicatePipelineItemError(error: unknown) {
   return code === "23505";
 }
 
+async function findExistingDestinationPipelineItemLocal(
+  enrichedId: number,
+  destinationKey: IntelDestinationKey
+) {
+  const { rows } = await query(
+    `select id, title, pipeline_type, status, owner_agent, updated_at
+       from pipeline_items
+      where metadata @> jsonb_build_object(
+        'intel_source_type', 'intel_inbox',
+        'intel_enriched_item_id', $1::bigint,
+        'intel_destination_key', $2::text
+      )
+      order by updated_at desc nulls last
+      limit 1`,
+    [enrichedId, destinationKey]
+  );
+
+  return rows[0] ? normalizeRow(rows[0]) as {
+    id: string;
+    title: string;
+    pipeline_type: string;
+    status: string;
+    owner_agent: string | null;
+    updated_at: string;
+  } : null;
+}
+
+async function ensurePrimaryDestinationWorkItemLocal(params: {
+  pipelineItemId: string;
+  title: string;
+  destination: IntelDestinationConfig;
+  reviewer: string;
+  summary: string;
+  notes?: string | null;
+}) {
+  const isCommunityDestination = params.destination.director === "community";
+  const relationType = isCommunityDestination ? "distribute_community" : "investigate";
+
+  const existingMap = await query(
+    `select work_item_id
+       from pipeline_work_map
+      where pipeline_item_id = $1
+        and relation_type = $2
+      limit 1`,
+    [params.pipelineItemId, relationType]
+  );
+
+  if ((existingMap.rows || []).length > 0) return;
+
+  const result = await createPipelineWorkItemLocal({
+    pipelineItemId: params.pipelineItemId,
+    pipelineType: params.destination.pipelineType,
+    title: `Develop ${params.destination.label.toLowerCase()}: ${params.title}`,
+    instruction: buildDestinationInstruction({
+      destination: params.destination,
+      title: params.title,
+      summary: params.summary,
+      reviewer: params.reviewer,
+      notes: params.notes,
+    }),
+    priority: "medium",
+    ownerAgent: params.destination.director,
+    requestedBy: params.reviewer,
+    relationType,
+    action: isCommunityDestination ? `draft_community_${params.destination.key}` : `develop_${params.destination.pipelineType}`,
+    trigger: "intel_inbox_promote",
+    reviewNotes: params.notes || undefined,
+  });
+
+  if (result.created) return;
+
+  await query(
+    `insert into pipeline_work_map (pipeline_item_id, work_item_id, relation_type)
+     values ($1, $2, $3)
+     on conflict do nothing`,
+    [params.pipelineItemId, result.workItem.id, relationType]
+  );
+
+  await query(
+    `insert into pipeline_events (pipeline_item_id, event_type, actor, payload)
+     values ($1, 'pipeline_item.work_item_created', 'intel-inbox', $2::jsonb)`,
+    [
+      params.pipelineItemId,
+      JSON.stringify({
+        work_item_id: result.workItem.id,
+        relation_type: relationType,
+        source_type: "pipeline_item",
+        target_agent_id: params.destination.director,
+        trigger: "intel_inbox_promote",
+        action: isCommunityDestination ? `draft_community_${params.destination.key}` : `develop_${params.destination.pipelineType}`,
+        repaired_missing_map: true,
+      }),
+    ]
+  );
+}
+
+async function fetchTranscriptSummariesByRawItemIdLocal(rawItemIds: number[]) {
+  const uniqueRawIds = Array.from(new Set(rawItemIds.filter(Number.isFinite)));
+  if (!uniqueRawIds.length) return new Map<number, string>();
+
+  const rawResult = await query(
+    `select id, external_id, raw_json->>'videoId' as video_id
+       from intel_items_raw
+      where id = any($1::bigint[])`,
+    [uniqueRawIds]
+  );
+
+  const videoByRawId = new Map<number, string>();
+  for (const row of normalizeRows(rawResult.rows as Array<Record<string, unknown>>)) {
+    const rawId = Number(row.id);
+    const videoId = String(row.video_id || row.external_id || "").trim();
+    if (Number.isFinite(rawId) && videoId) videoByRawId.set(rawId, videoId);
+  }
+
+  const videoIds = Array.from(new Set(videoByRawId.values()));
+  if (!videoIds.length) return new Map<number, string>();
+
+  const transcriptResult = await query(
+    `select video_id, summary_short, summary_status, summarized_at, updated_at
+       from competitor_transcripts
+      where video_id = any($1::text[])
+        and summary_status = 'summarized'`,
+    [videoIds]
+  );
+
+  const summaryByVideo = new Map<string, Record<string, unknown>>();
+  for (const row of normalizeRows(transcriptResult.rows as Array<Record<string, unknown>>)) {
+    const videoId = String(row.video_id || "");
+    const summary = typeof row.summary_short === "string" ? row.summary_short.trim() : "";
+    if (!videoId || !summary) continue;
+    const current = summaryByVideo.get(videoId);
+    const currentUpdated = String(current?.summarized_at || current?.updated_at || "");
+    const nextUpdated = String(row.summarized_at || row.updated_at || "");
+    if (!current || nextUpdated > currentUpdated) summaryByVideo.set(videoId, row);
+  }
+
+  const summaryByRawId = new Map<number, string>();
+  for (const [rawId, videoId] of videoByRawId.entries()) {
+    const summary = summaryByVideo.get(videoId)?.summary_short;
+    if (typeof summary === "string" && summary.trim()) summaryByRawId.set(rawId, summary.trim());
+  }
+  return summaryByRawId;
+}
+
+async function fetchLatestRunIdsLocal() {
+  const result = await query(
+    `select id, created_at,
+            metadata_json->>'ingestion_run_id' as ingestion_run_id,
+            metadata_json->>'ingestionRunId' as "ingestionRunId",
+            metadata_json->>'pipeline_run_id' as pipeline_run_id,
+            metadata_json->>'run_id' as run_id,
+            metadata_json->>'runId' as "runId"
+       from intel_items_enriched
+      order by created_at desc
+      limit 250`
+  );
+
+  return inferLatestRunIds(
+    normalizeRows(result.rows as Array<Record<string, unknown>>)
+      .map((row) => ({
+        id: Number(row.id),
+        createdAt: String(row.created_at || ""),
+        metadata: compactIntelMetadata(row),
+      }))
+      .filter((row) => Number.isFinite(row.id))
+  );
+}
+
+async function upsertIntelReviewLocal(input: {
+  enrichedItemId: number;
+  reviewer: string;
+  status: IntelInboxStatus;
+  notes?: string | null;
+  selectedPipelineType?: string | null;
+  selectedOwnerAgent?: string | null;
+  selectedCollaborators?: string[];
+  createdPipelineItemId?: string | null;
+  reviewedAt?: string | null;
+}) {
+  return withTransaction(async (client) => {
+    const existing = await client.query(
+      `select id
+         from intel_inbox_reviews
+        where enriched_item_id = $1
+          and reviewer = $2
+        limit 1`,
+      [input.enrichedItemId, input.reviewer]
+    );
+
+    const baseValues = [
+      input.status,
+      input.notes ?? null,
+      input.selectedPipelineType ?? null,
+      input.selectedOwnerAgent ?? null,
+      input.selectedCollaborators ?? [],
+      input.createdPipelineItemId ?? null,
+      input.reviewedAt ?? null,
+    ];
+
+    if (existing.rows[0]) {
+      const updated = await client.query(
+        `update intel_inbox_reviews
+            set status = $1,
+                notes = $2,
+                selected_pipeline_type = coalesce($3, selected_pipeline_type),
+                selected_owner_agent = coalesce($4, selected_owner_agent),
+                selected_collaborators = $5::text[],
+                created_pipeline_item_id = coalesce($6, created_pipeline_item_id),
+                reviewed_at = coalesce($7::timestamptz, reviewed_at),
+                updated_at = now()
+          where id = $8
+          returning id, status, created_pipeline_item_id`,
+        [...baseValues, existing.rows[0].id]
+      );
+      return normalizeRow(updated.rows[0]);
+    }
+
+    const inserted = await client.query(
+      `insert into intel_inbox_reviews (
+         enriched_item_id, reviewer, status, notes,
+         selected_pipeline_type, selected_owner_agent, selected_collaborators,
+         created_pipeline_item_id, reviewed_at
+       ) values ($1, $2, $3, $4, $5, $6, $7::text[], $8, $9::timestamptz)
+       returning id, status, created_pipeline_item_id`,
+      [
+        input.enrichedItemId,
+        input.reviewer,
+        input.status,
+        input.notes ?? null,
+        input.selectedPipelineType ?? null,
+        input.selectedOwnerAgent ?? null,
+        input.selectedCollaborators ?? [],
+        input.createdPipelineItemId ?? null,
+        input.reviewedAt ?? null,
+      ]
+    );
+    return normalizeRow(inserted.rows[0]);
+  });
+}
+
 async function fetchTranscriptSummariesByRawItemId(
   db: ReturnType<typeof createServiceClient> | typeof supabaseAdmin,
   rawItemIds: number[]
@@ -826,9 +1070,105 @@ async function fetchLatestRunIds(db: ReturnType<typeof createServiceClient> | ty
 }
 
 export async function getIntelInboxHealth(): Promise<IntelInboxHealth> {
-  const db = supabaseAdmin;
   const recentCutoff = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
 
+  if (isLocalAuthDisabled()) {
+    const [runsRes, competitorsRes, sourcesRes, rawRecentRes, enrichedRecentRes, enrichedMetaRes, transcriptRowsRes, snapshotRowsRes] = await Promise.all([
+      query(`select id, status, started_at, finished_at, error_summary, metadata_json from intel_runs order by id desc limit 20`),
+      query(`select id, name, enabled, channel_id from competitor_channels`),
+      query(`select id, name, enabled, config_json from intel_sources where lane = 'competitor'`),
+      query(`select count(*)::int as count from intel_items_raw where first_seen_at >= $1`, [recentCutoff]),
+      query(`select count(*)::int as count from intel_items_enriched where created_at >= $1`, [recentCutoff]),
+      query(
+        `select id, lane, created_at,
+                metadata_json->>'comments_used' as comments_used,
+                metadata_json->>'transcript_summary_used' as transcript_summary_used,
+                metadata_json->>'ingestion_run_id' as ingestion_run_id,
+                metadata_json->>'ingestionRunId' as "ingestionRunId",
+                metadata_json->>'pipeline_run_id' as pipeline_run_id,
+                metadata_json->>'run_id' as run_id,
+                metadata_json->>'runId' as "runId"
+           from intel_items_enriched
+          where created_at >= $1
+          order by created_at desc
+          limit 500`,
+        [recentCutoff]
+      ),
+      query(`select id, fetch_status, summary_status from competitor_transcripts`),
+      query(`select id, competitor_channel_id, video_id, snapshot_at from competitor_video_snapshots order by snapshot_at desc limit 5000`),
+    ]);
+
+    const runs = normalizeRows(runsRes.rows as Array<Record<string, unknown>>);
+    const competitors = normalizeRows(competitorsRes.rows as Array<Record<string, unknown>>);
+    const sources = normalizeRows(sourcesRes.rows as Array<Record<string, unknown>>);
+    const rawRecent = Number(rawRecentRes.rows[0]?.count || 0);
+    const enrichedRecent = Number(enrichedRecentRes.rows[0]?.count || 0);
+    const enrichedMetaRows = normalizeRows(enrichedMetaRes.rows as Array<Record<string, unknown>>);
+    const transcriptRows = normalizeRows(transcriptRowsRes.rows as Array<Record<string, unknown>>);
+    const snapshotRows = normalizeRows(snapshotRowsRes.rows as Array<Record<string, unknown>>);
+
+    const latestCompetitorRun = runs.find((run) => {
+      const metadata = toObject(run.metadata_json);
+      return metadata.lane === "competitor" || toObject(metadata.health_summary).competitor;
+    });
+    const enabledCompetitors = competitors.filter((row) => row.enabled !== false);
+    const unresolvedCompetitors = enabledCompetitors.filter((row) => !row.channel_id).length;
+    const failingSources = sources.filter((row) => {
+      if (row.enabled === false) return false;
+      const health = toObject(toObject(row.config_json).health);
+      return health.quarantine === true || Number(health.consecutive_failures || 0) > 0;
+    });
+    const lastError = String(latestCompetitorRun?.error_summary || "").trim() || null;
+
+    const enrichedMeta = enrichedMetaRows.map((row) => ({
+      ...row,
+      metadata: compactIntelMetadata(row),
+    }));
+    const redditWithDiscussion = enrichedMeta.filter((row) => toNumber(row.metadata.comments_used) > 0).length;
+    const youtubeTranscriptSummaries = enrichedMeta.filter((row) => row.metadata.transcript_summary_used === true).length;
+
+    const transcriptsFetched = transcriptRows.filter((row) => row.fetch_status === "fetched").length;
+    const transcriptsSummarized = transcriptRows.filter((row) => row.summary_status === "summarized").length;
+    const transcriptsUnavailable = transcriptRows.filter((row) => row.fetch_status === "unavailable").length;
+    const transcriptsFailed = transcriptRows.filter((row) => row.fetch_status === "failed" || row.summary_status === "failed").length;
+
+    const snapshotGroups = new Map<string, number>();
+    for (const row of snapshotRows) {
+      const key = `${row.competitor_channel_id || "unknown"}:${row.video_id || ""}`;
+      snapshotGroups.set(key, (snapshotGroups.get(key) || 0) + 1);
+    }
+    const duplicateCounts = Array.from(snapshotGroups.values()).filter((count) => count > 1);
+    const duplicateSnapshotGroups = duplicateCounts.length;
+    const duplicateSnapshotRows = duplicateCounts.reduce((acc, count) => acc + count - 1, 0);
+
+    const visibleInbox = await listIntelInbox({ status: "all", includeOlderNew: true, limit: 1, offset: 0 }).then((result) => result.total).catch(() => 0);
+    const status = unresolvedCompetitors > 0 || failingSources.length > 0 || lastError || transcriptsFailed > 0 || duplicateSnapshotRows > 0 ? "warn" : "ok";
+
+    return {
+      status,
+      latestCompetitorRunAt: latestCompetitorRun ? String(latestCompetitorRun.finished_at || latestCompetitorRun.started_at || "") || null : null,
+      latestCompetitorRunStatus: latestCompetitorRun ? String(latestCompetitorRun.status || "") || null : null,
+      enabledCompetitors: enabledCompetitors.length,
+      unresolvedCompetitors,
+      failingSources: failingSources.length,
+      lastError,
+      pipeline: {
+        rawRecent,
+        enrichedRecent,
+        visibleInbox,
+        redditWithDiscussion,
+        youtubeTranscriptSummaries,
+        transcriptsFetched,
+        transcriptsSummarized,
+        transcriptsUnavailable,
+        transcriptsFailed,
+        duplicateSnapshotGroups,
+        duplicateSnapshotRows,
+      },
+    };
+  }
+
+  const db = supabaseAdmin;
   const [
     { data: runs, error: runsError },
     { data: competitors, error: competitorsError },
@@ -955,21 +1295,193 @@ export async function listIntelInbox(options?: {
   includeOlderNew?: boolean;
   freshDays?: number;
 }) {
-  const db = supabaseAdmin;
   const limit = options?.limit ?? 50;
   const offset = options?.offset ?? 0;
 
-  let query = db
+  if (isLocalAuthDisabled()) {
+    const params: unknown[] = [];
+    const conditions: string[] = [];
+    if (options?.lane && options.lane !== "all") {
+      params.push(options.lane);
+      conditions.push(`lane = $${params.length}`);
+    }
+    if (options?.owner && options.owner !== "all") {
+      params.push(options.owner);
+      conditions.push(`promote_owner = $${params.length}`);
+    }
+
+    const enrichedRes = await query(
+      `select id, raw_item_id, lane, summary_short, summary_display, why_it_matters, primary_topic,
+              suggested_owner, suggested_destination, overall_score, promote_title, promote_type,
+              promote_owner, promote_status_default, created_at,
+              metadata_json->>'headline_short' as headline_short,
+              metadata_json->>'transcript_summary_used' as transcript_summary_used,
+              metadata_json->>'comments_used' as comments_used,
+              metadata_json->'suggested_destinations' as suggested_destinations,
+              metadata_json->>'ingestion_run_id' as ingestion_run_id,
+              metadata_json->>'ingestionRunId' as "ingestionRunId",
+              metadata_json->>'pipeline_run_id' as pipeline_run_id,
+              metadata_json->>'run_id' as run_id,
+              metadata_json->>'runId' as "runId"
+         from intel_items_enriched
+         ${conditions.length ? `where ${conditions.join(" and ")}` : ""}
+        order by created_at desc, overall_score desc
+        limit 250`,
+      params
+    );
+
+    const rows = normalizeRows(enrichedRes.rows as Array<Record<string, unknown>>);
+    const latestRunIds = await fetchLatestRunIdsLocal();
+
+    const enrichedIds = rows.map((row) => Number(row.id)).filter(Number.isFinite);
+    const reviewsRes = enrichedIds.length
+      ? await query(
+          `select id, enriched_item_id, status, created_pipeline_item_id, updated_at, created_at
+             from intel_inbox_reviews
+            where enriched_item_id = any($1::bigint[])`,
+          [enrichedIds]
+        )
+      : { rows: [] as Array<Record<string, unknown>> };
+
+    const rawIds = rows.map((row) => Number(row.raw_item_id)).filter(Number.isFinite);
+    const rawRowsRes = rawIds.length
+      ? await query(
+          `select id, lane, url, canonical_url, source_context, raw_json->>'source' as raw_source
+             from intel_items_raw
+            where id = any($1::bigint[])`,
+          [rawIds]
+        )
+      : { rows: [] as Array<Record<string, unknown>> };
+
+    const rawById = new Map<number, Record<string, unknown>>(
+      normalizeRows(rawRowsRes.rows as Array<Record<string, unknown>>).map((row) => [Number(row.id), row])
+    );
+
+    const transcriptSummaryByRawId = await fetchTranscriptSummariesByRawItemIdLocal(
+      rows.filter((row) => row.lane === "competitor").map((row) => Number(row.raw_item_id))
+    );
+
+    const reviewByItem = new Map<number, Record<string, unknown>>();
+    for (const review of normalizeRows(reviewsRes.rows as Array<Record<string, unknown>>)) {
+      const enrichedItemId = Number(review.enriched_item_id);
+      if (!Number.isFinite(enrichedItemId)) continue;
+      const current = reviewByItem.get(enrichedItemId);
+      if (!current) {
+        reviewByItem.set(enrichedItemId, review);
+        continue;
+      }
+      const currentUpdated = String(current.updated_at || current.created_at || "");
+      const nextUpdated = String(review.updated_at || review.created_at || "");
+      if (nextUpdated > currentUpdated) reviewByItem.set(enrichedItemId, review);
+    }
+
+    const freshCutoffMs = Date.now() - (options?.freshDays ?? 3) * 24 * 60 * 60 * 1000;
+
+    const filteredItems: IntelInboxListItem[] = rows
+      .map((row) => {
+        const id = Number(row.id);
+        const metadata = compactIntelMetadata(row);
+        const review = reviewByItem.get(id);
+        const title = String(row.promote_title || metadata.headline_short || row.summary_short || `Intel item ${id}`);
+        const rawSource = rawById.get(Number(row.raw_item_id)) || null;
+        const sourceKind = classifySourceKind({
+          lane: rawSource?.lane || row.lane,
+          url: rawSource?.url,
+          canonicalUrl: rawSource?.canonical_url,
+          sourceContext: rawSource?.source_context,
+          rawJson: rawSource ? { source: rawSource.raw_source } : null,
+        });
+        const sourceLabel = sourceLabelFromKind(sourceKind, hostnameFromUrl(rawSource?.canonical_url) || hostnameFromUrl(rawSource?.url));
+        const transcriptSummary = transcriptSummaryByRawId.get(Number(row.raw_item_id)) || null;
+        const headlineShort = typeof metadata.headline_short === "string" ? metadata.headline_short : null;
+        const readyForInbox = isEditorialSummaryReady({
+          title,
+          summaryDisplay: row.summary_display,
+          summaryShort: row.summary_short,
+          whyItMatters: row.why_it_matters,
+          headlineShort,
+          transcriptSummary,
+        });
+        const summary =
+          transcriptSummary ||
+          (typeof row.summary_display === "string" && row.summary_display.trim()
+            ? row.summary_display.trim()
+            : buildReadableSummary({
+                title,
+                summaryShort: typeof row.summary_short === "string" ? row.summary_short : null,
+                whyItMatters: typeof row.why_it_matters === "string" ? row.why_it_matters : null,
+                rawTitle: null,
+                rawContentText: null,
+                transcriptSummary,
+              }));
+
+        return {
+          id: String(id),
+          enrichedItemId: id,
+          title,
+          summary,
+          miniDescription: buildMiniDescription(summary),
+          sourceKind,
+          sourceLabel,
+          discussionContext: getDiscussionContext({ sourceKind, metadata, rawJson: rawSource ? { source: rawSource.raw_source } : null }),
+          lane: typeof row.lane === "string" ? row.lane : null,
+          primaryTopic: typeof row.primary_topic === "string" ? row.primary_topic : null,
+          suggestedOwner: typeof row.suggested_owner === "string" ? row.suggested_owner : null,
+          suggestedDestination: typeof row.suggested_destination === "string" ? row.suggested_destination : null,
+          suggestedDestinations: getDestinationSuggestions({
+            suggestedDestination: row.suggested_destination,
+            promoteType: row.promote_type,
+            metadata,
+          }),
+          promoteType: typeof row.promote_type === "string" ? row.promote_type : null,
+          promoteOwner: typeof row.promote_owner === "string" ? row.promote_owner : null,
+          promoteStatusDefault: typeof row.promote_status_default === "string" ? row.promote_status_default : null,
+          overallScore: displayIntelScore({ score: row.overall_score, createdAt: row.created_at, title }),
+          reviewStatus: normalizeStatus(review?.status),
+          reviewId: review?.id ? String(review.id) : null,
+          createdPipelineItemId: review?.created_pipeline_item_id ? String(review.created_pipeline_item_id) : null,
+          updatedAt: String(review?.updated_at || row.created_at || new Date().toISOString()),
+          createdAt: String(row.created_at || new Date().toISOString()),
+          isLatestRun: latestRunIds.has(id),
+          readyForInbox,
+        };
+      })
+      .filter((item) => item.readyForInbox)
+      .filter((item) => (options?.status && options.status !== "all" ? item.reviewStatus === options.status : true))
+      .filter((item) => {
+        if (options?.includeOlderNew) return true;
+        if ((options?.status || "new") !== "new") return true;
+        if (item.reviewStatus !== "new") return true;
+        const createdAtMs = new Date(item.createdAt).getTime();
+        return Number.isFinite(createdAtMs) ? createdAtMs >= freshCutoffMs : true;
+      })
+      .sort((a, b) => {
+        if (a.isLatestRun !== b.isLatestRun) return a.isLatestRun ? -1 : 1;
+        if (b.overallScore !== a.overallScore) return b.overallScore - a.overallScore;
+        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      });
+
+    return {
+      items: filteredItems.slice(offset, offset + limit),
+      total: filteredItems.length,
+      limit,
+      offset,
+    };
+  }
+
+  const db = supabaseAdmin;
+
+  let inboxQuery = db
     .from("intel_items_enriched")
     .select("id,raw_item_id,lane,summary_short,summary_display,why_it_matters,primary_topic,suggested_owner,suggested_destination,overall_score,promote_title,promote_type,promote_owner,promote_status_default,created_at,headline_short:metadata_json->>headline_short,transcript_summary_used:metadata_json->>transcript_summary_used,comments_used:metadata_json->>comments_used,suggested_destinations:metadata_json->suggested_destinations,ingestion_run_id:metadata_json->>ingestion_run_id,ingestionRunId:metadata_json->>ingestionRunId,pipeline_run_id:metadata_json->>pipeline_run_id,run_id:metadata_json->>run_id,runId:metadata_json->>runId")
     .order("created_at", { ascending: false })
     .order("overall_score", { ascending: false })
     .limit(250);
 
-  if (options?.lane && options.lane !== "all") query = query.eq("lane", options.lane);
-  if (options?.owner && options.owner !== "all") query = query.eq("promote_owner", options.owner);
+  if (options?.lane && options.lane !== "all") inboxQuery = inboxQuery.eq("lane", options.lane);
+  if (options?.owner && options.owner !== "all") inboxQuery = inboxQuery.eq("promote_owner", options.owner);
 
-  const { data: enrichedRows, error } = await query;
+  const { data: enrichedRows, error } = await inboxQuery;
   if (error) throw error;
 
   const rows = (enrichedRows || []) as Array<Record<string, unknown>>;
@@ -1118,6 +1630,168 @@ export async function listIntelInbox(options?: {
 export async function getIntelInboxDetail(id: string) {
   const enrichedId = Number(id);
   if (!Number.isFinite(enrichedId)) return null;
+
+  if (isLocalAuthDisabled()) {
+    const enrichedRes = await query(`select * from intel_items_enriched where id = $1 limit 1`, [enrichedId]);
+    const enriched = enrichedRes.rows[0] ? normalizeRow(enrichedRes.rows[0]) as Record<string, unknown> : null;
+    if (!enriched) return null;
+
+    const reviewRes = await query(
+      `select * from intel_inbox_reviews where enriched_item_id = $1 order by updated_at desc limit 1`,
+      [enrichedId]
+    );
+    const review = reviewRes.rows[0] ? normalizeRow(reviewRes.rows[0]) as Record<string, unknown> : null;
+
+    const rawItemId = Number(enriched.raw_item_id);
+    let rawSource: IntelInboxDetail["rawSource"] = null;
+    if (Number.isFinite(rawItemId)) {
+      const rawRes = await query(
+        `select id, title, url, canonical_url, source_context, author, lane, content_text,
+                published_at, first_seen_at, engagement_score, engagement_count, raw_json, metadata_json
+           from intel_items_raw
+          where id = $1
+          limit 1`,
+        [rawItemId]
+      );
+      const raw = rawRes.rows[0] ? normalizeRow(rawRes.rows[0]) as Record<string, unknown> : null;
+      if (raw) {
+        rawSource = {
+          id: Number(raw.id),
+          title: typeof raw.title === "string" ? raw.title : null,
+          url: typeof raw.url === "string" ? raw.url : null,
+          canonicalUrl: typeof raw.canonical_url === "string" ? raw.canonical_url : null,
+          sourceContext: typeof raw.source_context === "string" ? raw.source_context : null,
+          author: typeof raw.author === "string" ? raw.author : null,
+          lane: typeof raw.lane === "string" ? raw.lane : null,
+          contentText: typeof raw.content_text === "string" ? raw.content_text : null,
+          publishedAt: typeof raw.published_at === "string" ? raw.published_at : null,
+          firstSeenAt: typeof raw.first_seen_at === "string" ? raw.first_seen_at : null,
+          engagementScore: toNumber(raw.engagement_score),
+          engagementCount: typeof raw.engagement_count === "number" ? raw.engagement_count : null,
+          rawJson: toObject(raw.raw_json),
+          metadataJson: toObject(raw.metadata_json),
+        };
+      }
+    }
+
+    let pipelineItem: IntelInboxDetail["pipelineItem"] = null;
+    if (review?.created_pipeline_item_id) {
+      const pipelineRes = await query(
+        `select id, title, pipeline_type, status, owner_agent, updated_at
+           from pipeline_items
+          where id = $1
+          limit 1`,
+        [String(review.created_pipeline_item_id)]
+      );
+      const pipeline = pipelineRes.rows[0] ? normalizeRow(pipelineRes.rows[0]) as Record<string, unknown> : null;
+      if (pipeline) {
+        pipelineItem = {
+          id: String(pipeline.id),
+          title: String(pipeline.title || ""),
+          pipelineType: String(pipeline.pipeline_type || ""),
+          status: String(pipeline.status || ""),
+          ownerAgent: typeof pipeline.owner_agent === "string" ? pipeline.owner_agent : null,
+          updatedAt: String(pipeline.updated_at || ""),
+        };
+      }
+    }
+
+    const metadata = toObject(enriched.metadata_json);
+    const title = String(enriched.promote_title || metadata.headline_short || enriched.summary_short || `Intel item ${enriched.id}`);
+    const transcriptSummary = Number.isFinite(rawItemId)
+      ? (await fetchTranscriptSummariesByRawItemIdLocal([rawItemId])).get(rawItemId) || null
+      : null;
+    const readableSummary =
+      transcriptSummary ||
+      (typeof enriched.summary_display === "string" && enriched.summary_display.trim()
+        ? enriched.summary_display.trim()
+        : buildReadableSummary({
+            title,
+            summaryShort: typeof enriched.summary_short === "string" ? enriched.summary_short : null,
+            whyItMatters: typeof enriched.why_it_matters === "string" ? enriched.why_it_matters : null,
+            rawTitle: rawSource?.title || null,
+            rawContentText: rawSource?.contentText || null,
+            transcriptSummary,
+          }));
+
+    const sourceKind = classifySourceKind({
+      lane: rawSource?.lane || enriched.lane,
+      url: rawSource?.url,
+      canonicalUrl: rawSource?.canonicalUrl,
+      sourceContext: rawSource?.sourceContext,
+      rawJson: rawSource?.rawJson,
+    });
+    const sourceLabel = sourceLabelFromKind(sourceKind, hostnameFromUrl(rawSource?.canonicalUrl) || hostnameFromUrl(rawSource?.url));
+
+    const parsedNotes = parseStoredReviewNotes(review?.notes);
+    const reviewDestinations = parsedNotes.promotionMeta?.destinations.map((entry) => entry.key) || [];
+    const fallbackReviewDestination = normalizeDestinationKey(review?.selected_pipeline_type);
+    const selectedDestinations = reviewDestinations.length > 0 ? reviewDestinations : fallbackReviewDestination ? [fallbackReviewDestination] : [];
+    const latestRunIds = await fetchLatestRunIdsLocal();
+
+    return {
+      item: {
+        id: String(enriched.id),
+        enrichedItemId: Number(enriched.id),
+        title,
+        summary: readableSummary,
+        miniDescription: buildMiniDescription(readableSummary),
+        sourceKind,
+        sourceLabel,
+        discussionContext: getDiscussionContext({ sourceKind, metadata, rawJson: rawSource?.rawJson }),
+        lane: typeof enriched.lane === "string" ? enriched.lane : null,
+        primaryTopic: typeof enriched.primary_topic === "string" ? enriched.primary_topic : null,
+        suggestedOwner: typeof enriched.suggested_owner === "string" ? enriched.suggested_owner : null,
+        suggestedDestination: typeof enriched.suggested_destination === "string" ? enriched.suggested_destination : null,
+        suggestedDestinations: getDestinationSuggestions({
+          suggestedDestination: enriched.suggested_destination,
+          promoteType: enriched.promote_type,
+          metadata,
+        }),
+        promoteType: typeof enriched.promote_type === "string" ? enriched.promote_type : null,
+        promoteOwner: typeof enriched.promote_owner === "string" ? enriched.promote_owner : null,
+        promoteStatusDefault: typeof enriched.promote_status_default === "string" ? enriched.promote_status_default : null,
+        overallScore: displayIntelScore({ score: enriched.overall_score, createdAt: enriched.created_at, title }),
+        reviewStatus: normalizeStatus(review?.status),
+        reviewId: review?.id ? String(review.id) : null,
+        createdPipelineItemId: review?.created_pipeline_item_id ? String(review.created_pipeline_item_id) : null,
+        updatedAt: String(review?.updated_at || enriched.created_at || new Date().toISOString()),
+        createdAt: String(enriched.created_at || new Date().toISOString()),
+        isLatestRun: latestRunIds.has(Number(enriched.id)),
+        whyItMatters: typeof enriched.why_it_matters === "string" ? enriched.why_it_matters : null,
+        rawItemId: Number.isFinite(rawItemId) ? rawItemId : null,
+        metadata,
+        formatScores: {
+          doc: toNumber(enriched.format_doc_score),
+          video: toNumber(enriched.format_video_score),
+          email_campaign: toNumber(enriched.format_email_campaign_score),
+        },
+        promoteCollaborators: Array.isArray(metadata.promote_collaborators)
+          ? metadata.promote_collaborators.filter((value): value is string => typeof value === "string")
+          : [],
+      },
+      rawSource,
+      review: review
+        ? {
+            id: review.id ? String(review.id) : null,
+            reviewer: typeof review.reviewer === "string" ? review.reviewer : null,
+            status: normalizeStatus(review.status),
+            selectedPipelineType: typeof review.selected_pipeline_type === "string" ? review.selected_pipeline_type : null,
+            selectedOwnerAgent: typeof review.selected_owner_agent === "string" ? review.selected_owner_agent : null,
+            selectedCollaborators: Array.isArray(review.selected_collaborators)
+              ? review.selected_collaborators.filter((value): value is string => typeof value === "string")
+              : [],
+            selectedDestinations,
+            decisionReasoning: typeof review.decision_reasoning === "string" ? review.decision_reasoning : null,
+            notes: parsedNotes.userNotes,
+            createdPipelineItemId: review.created_pipeline_item_id ? String(review.created_pipeline_item_id) : null,
+            reviewedAt: typeof review.reviewed_at === "string" ? review.reviewed_at : null,
+            updatedAt: typeof review.updated_at === "string" ? review.updated_at : null,
+          }
+        : null,
+      pipelineItem,
+    } satisfies IntelInboxDetail;
+  }
 
   const db = supabaseAdmin;
   const { data: enriched, error } = await db
@@ -1295,13 +1969,23 @@ export async function saveIntelInboxDecision(params: {
   status: IntelInboxStatus;
   notes?: string | null;
 }) {
-  const db = createServiceClient();
   const enrichedId = Number(params.enrichedItemId);
   if (!Number.isFinite(enrichedId)) {
     const err = new Error("Invalid enriched item id");
     (err as Error & { status?: number }).status = 400;
     throw err;
   }
+
+  if (isLocalAuthDisabled()) {
+    return upsertIntelReviewLocal({
+      enrichedItemId: enrichedId,
+      reviewer: params.reviewer,
+      status: params.status,
+      notes: trimToNull(params.notes || undefined),
+    });
+  }
+
+  const db = createServiceClient();
 
   const payload = {
     enriched_item_id: enrichedId,
@@ -1329,13 +2013,192 @@ export async function promoteIntelInboxItem(params: {
   ownerAgent?: string | null;
   collaborators?: string[];
 }) {
-  const db = createServiceClient();
   const enrichedId = Number(params.enrichedItemId);
   if (!Number.isFinite(enrichedId)) {
     const err = new Error("Invalid enriched item id");
     (err as Error & { status?: number }).status = 400;
     throw err;
   }
+
+  if (isLocalAuthDisabled()) {
+    const enrichedRes = await query(`select * from intel_items_enriched where id = $1 limit 1`, [enrichedId]);
+    const enriched = enrichedRes.rows[0] ? normalizeRow(enrichedRes.rows[0]) as Record<string, unknown> : null;
+    if (!enriched) {
+      const err = new Error("Intel item not found");
+      (err as Error & { status?: number }).status = 404;
+      throw err;
+    }
+
+    const metadata = toObject(enriched.metadata_json);
+    const requestedDestinations = uniqueDestinationKeys(params.destinations || []);
+    const destinationKeys: IntelDestinationKey[] =
+      requestedDestinations.length > 0
+        ? requestedDestinations
+        : getLegacyFallbackDestinations({
+            suggestedDestination: enriched.suggested_destination,
+            promoteType: enriched.promote_type,
+            metadata,
+            ownerAgent: params.ownerAgent || null,
+          });
+
+    if (destinationKeys.length === 0) {
+      const err = new Error("Select at least one valid destination");
+      (err as Error & { status?: number }).status = 400;
+      throw err;
+    }
+
+    const invalidDestinations = (params.destinations || []).filter((value) => !normalizeDestinationKey(value));
+    if (invalidDestinations.length > 0) {
+      const err = new Error(`Invalid destination: ${invalidDestinations[0]}`);
+      (err as Error & { status?: number }).status = 400;
+      throw err;
+    }
+
+    const title = String(enriched.promote_title || metadata.headline_short || enriched.summary_short || `Intel item ${enriched.id}`);
+    const summary =
+      typeof enriched.summary_display === "string" && enriched.summary_display.trim()
+        ? enriched.summary_display.trim()
+        : buildReadableSummary({
+            title,
+            summaryShort: typeof enriched.summary_short === "string" ? enriched.summary_short : null,
+            whyItMatters: typeof enriched.why_it_matters === "string" ? enriched.why_it_matters : null,
+            rawTitle: null,
+            rawContentText: null,
+          });
+    const sourceId = enriched.raw_item_id ? String(enriched.raw_item_id) : String(enriched.id);
+    const metadataShell = toObject(metadata.promote_metadata_shell);
+    const reviewNotes = trimToNull(params.notes || undefined);
+    const collaborators = Array.from(new Set((params.collaborators || []).map((value) => value.trim()).filter(Boolean)));
+
+    const promotedDestinations: Array<{
+      key: IntelDestinationKey;
+      label: string;
+      director: IntelDestinationConfig["director"];
+      pipelineItemId: string;
+      pipelineType: IntelDestinationConfig["pipelineType"];
+      created: boolean;
+    }> = [];
+
+    for (const destinationKey of destinationKeys) {
+      const destination = INTEL_DESTINATION_CONFIG[destinationKey];
+      let pipelineItem = await findExistingDestinationPipelineItemLocal(enrichedId, destinationKey);
+      let created = false;
+
+      if (!pipelineItem) {
+        const communityTarget = getCommunityDestinationTarget(destinationKey);
+        const pipelineMetadata = {
+          ...metadataShell,
+          intel_source_type: "intel_inbox",
+          intel_enriched_item_id: enriched.id,
+          intel_raw_item_id: enriched.raw_item_id,
+          intel_destination_key: destination.key,
+          destination_label: destination.label,
+          kind: communityTarget?.kind || destination.key,
+          ...(communityTarget ? { target: communityTarget.target } : {}),
+          collaborators,
+          notify_agents: Array.from(new Set([destination.director, ...collaborators])),
+          notes: reviewNotes,
+        };
+
+        try {
+          const insertRes = await query(
+            `insert into pipeline_items (
+               title, pipeline_type, status, priority, owner_agent, requested_by,
+               source_type, source_id, metadata, asset_role, updated_at
+             ) values ($1, $2, $3, 'medium', $4, $5, 'manual', $6, $7::jsonb, 'standalone', $8)
+             returning id, title, pipeline_type, status, owner_agent, updated_at`,
+            [
+              title,
+              destination.pipelineType,
+              enriched.promote_status_default || "draft",
+              destination.director,
+              params.reviewer,
+              sourceId,
+              JSON.stringify(pipelineMetadata),
+              new Date().toISOString(),
+            ]
+          );
+          pipelineItem = normalizeRow(insertRes.rows[0]) as {
+            id: string;
+            title: string;
+            pipeline_type: string;
+            status: string;
+            owner_agent: string | null;
+            updated_at: string;
+          };
+          created = true;
+        } catch (error) {
+          if (isDuplicatePipelineItemError(error)) {
+            pipelineItem = await findExistingDestinationPipelineItemLocal(enrichedId, destinationKey);
+          } else {
+            throw error;
+          }
+        }
+      }
+
+      if (!pipelineItem) {
+        throw new Error(`Failed to resolve ${destination.label} pipeline item`);
+      }
+
+      if (destination.key !== "email") {
+        await ensurePrimaryDestinationWorkItemLocal({
+          pipelineItemId: pipelineItem.id,
+          title,
+          destination,
+          reviewer: params.reviewer,
+          summary,
+          notes: reviewNotes,
+        });
+      }
+
+      promotedDestinations.push({
+        key: destination.key,
+        label: destination.label,
+        director: destination.director,
+        pipelineItemId: pipelineItem.id,
+        pipelineType: destination.pipelineType,
+        created,
+      });
+    }
+
+    const primary = promotedDestinations[0] || null;
+    const promotionMeta: StoredPromotionMeta = {
+      version: 1,
+      destinations: promotedDestinations.map((entry) => ({
+        key: entry.key,
+        label: entry.label,
+        director: entry.director,
+        pipelineItemId: entry.pipelineItemId,
+        pipelineType: entry.pipelineType,
+      })),
+    };
+
+    await upsertIntelReviewLocal({
+      enrichedItemId: enrichedId,
+      reviewer: params.reviewer,
+      status: "promoted",
+      notes: serializeReviewNotes(reviewNotes, promotionMeta),
+      selectedPipelineType: primary?.pipelineType || null,
+      selectedOwnerAgent: primary?.director || null,
+      selectedCollaborators: collaborators,
+      createdPipelineItemId: primary?.pipelineItemId || null,
+      reviewedAt: new Date().toISOString(),
+    });
+
+    return {
+      id: String(enrichedId),
+      status: "promoted" as const,
+      primaryPipelineItemId: primary?.pipelineItemId || null,
+      destinations: promotedDestinations.map((entry) => ({
+        key: entry.key,
+        label: entry.label,
+        pipelineItemId: entry.pipelineItemId,
+        created: entry.created,
+      })),
+    };
+  }
+
+  const db = createServiceClient();
 
   const { data: enriched, error: enrichedError } = await db
     .from("intel_items_enriched")
@@ -1454,15 +2317,19 @@ export async function promoteIntelInboxItem(params: {
       throw new Error(`Failed to resolve ${destination.label} pipeline item`);
     }
 
-    await ensurePrimaryDestinationWorkItem({
-      db,
-      pipelineItemId: pipelineItem.id,
-      title,
-      destination,
-      reviewer: params.reviewer,
-      summary,
-      notes: reviewNotes,
-    });
+    // Email promotions are topic intake only. The Email Campaigns UI lets Gonza
+    // select multiple promoted topics and then creates the newsletter draft work item.
+    if (destination.key !== "email") {
+      await ensurePrimaryDestinationWorkItem({
+        db,
+        pipelineItemId: pipelineItem.id,
+        title,
+        destination,
+        reviewer: params.reviewer,
+        summary,
+        notes: reviewNotes,
+      });
+    }
 
     promotedDestinations.push({
       key: destination.key,

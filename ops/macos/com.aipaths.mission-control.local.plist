@@ -7,7 +7,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>/opt/homebrew/bin/node</string>
-    <string>/Users/joaco/Documents/openclaw/repos/aipaths-mission-control-live/node_modules/next/dist/bin/next</string>
+    <string>/Users/joaco/openclaw/repos/aipaths-mission-control-live/node_modules/next/dist/bin/next</string>
     <string>start</string>
     <string>-H</string>
     <string>127.0.0.1</string>
@@ -15,7 +15,18 @@
     <string>3001</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>/Users/joaco/Documents/openclaw/repos/aipaths-mission-control-live</string>
+  <string>/Users/joaco/openclaw/repos/aipaths-mission-control-live</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>NODE_ENV</key>
+    <string>production</string>
+    <key>MISSION_CONTROL_DATABASE_URL</key>
+    <string>postgres://joaco@127.0.0.1:5432/aipaths_mission_control_local</string>
+    <key>MISSION_CONTROL_LOCAL_AUTH_DISABLED</key>
+    <string>true</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/opt/postgresql@16/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>

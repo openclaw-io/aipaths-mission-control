@@ -1,3 +1,6 @@
+import { isLocalAuthDisabled } from "@/lib/auth/local";
+import { normalizeRows } from "@/lib/db/mission-control";
+import { query } from "@/lib/db/postgres";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { AGENTS } from "@/lib/agents";
 import { AgentsClient } from "@/components/agents/AgentsClient";
@@ -20,25 +23,31 @@ export default async function AgentsPage() {
   const today = new Date();
   const sevenDaysAgo = new Date(today);
   sevenDaysAgo.setDate(today.getDate() - 6);
+  const useLocalMode = isLocalAuthDisabled();
 
   // Fetch all data in bulk
-  const [tasksRes, usageRes, activityRes] = await Promise.all([
-    supabaseAdmin
-      .from("work_items")
-      .select("owner_agent, target_agent_id, status, created_at"),
-    supabaseAdmin
-      .from("usage_logs")
-      .select("agent, cost_usd, input_tokens, output_tokens"),
-    supabaseAdmin
-      .from("activity_log")
-      .select("agent, created_at")
-      .order("created_at", { ascending: false })
-      .limit(200),
-  ]);
-
-  const allTasks = tasksRes.data || [];
-  const allUsage = usageRes.data || [];
-  const allActivity = activityRes.data || [];
+  const [allTasks, allUsage, allActivity] = useLocalMode
+    ? await Promise.all([
+        query("select owner_agent, target_agent_id, status, created_at from work_items").then((res) => normalizeRows(res.rows)),
+        query("select agent, cost_usd, input_tokens, output_tokens from usage_logs").then((res) => normalizeRows(res.rows)),
+        query("select agent, created_at from activity_log order by created_at desc limit 200").then((res) => normalizeRows(res.rows)),
+      ])
+    : await Promise.all([
+        supabaseAdmin
+          .from("work_items")
+          .select("owner_agent, target_agent_id, status, created_at")
+          .then((res) => res.data || []),
+        supabaseAdmin
+          .from("usage_logs")
+          .select("agent, cost_usd, input_tokens, output_tokens")
+          .then((res) => res.data || []),
+        supabaseAdmin
+          .from("activity_log")
+          .select("agent, created_at")
+          .order("created_at", { ascending: false })
+          .limit(200)
+          .then((res) => res.data || []),
+      ]);
 
   // Build per-agent stats
   const agentStats: Record<string, AgentStats> = {};

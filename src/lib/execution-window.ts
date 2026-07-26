@@ -1,3 +1,5 @@
+import { query } from "@/lib/db/postgres";
+import { isLocalAuthDisabled } from "@/lib/auth/local";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 
 export type ExecutionWindowOverrideMode = "auto" | "forced_on" | "forced_off";
@@ -68,14 +70,45 @@ function previousDayKey(dayKey: string) {
 }
 
 export async function getExecutionWindowConfig(): Promise<ExecutionWindowConfig | null> {
-  const { data, error } = await supabaseAdmin
-    .from("execution_window_config")
-    .select("id, timezone, base_schedule, override_mode, override_until, override_reason, updated_by, updated_at")
-    .eq("id", "global")
-    .maybeSingle();
+  if (!isLocalAuthDisabled()) {
+    const { data, error } = await supabaseAdmin
+      .from("execution_window_config")
+      .select("id, timezone, base_schedule, override_mode, override_until, override_reason, updated_by, updated_at")
+      .eq("id", "global")
+      .maybeSingle();
 
-  if (error) throw error;
-  return (data as ExecutionWindowConfig | null) || null;
+    if (error) throw error;
+    return (data as ExecutionWindowConfig | null) || null;
+  }
+
+  const { rows } = await query(`
+    SELECT
+      id,
+      timezone,
+      base_schedule,
+      override_mode,
+      override_until,
+      override_reason,
+      updated_by,
+      updated_at
+    FROM public.execution_window_config
+    WHERE id = 'global'
+    LIMIT 1
+  `);
+
+  const row = rows[0];
+  if (!row) return null;
+
+  return {
+    id: String(row.id),
+    timezone: String(row.timezone || "Europe/London"),
+    base_schedule: (row.base_schedule || {}) as ExecutionWindowSchedule,
+    override_mode: (row.override_mode || "auto") as ExecutionWindowOverrideMode,
+    override_until: row.override_until instanceof Date ? row.override_until.toISOString() : row.override_until ? String(row.override_until) : null,
+    override_reason: typeof row.override_reason === "string" ? row.override_reason : null,
+    updated_by: typeof row.updated_by === "string" ? row.updated_by : null,
+    updated_at: row.updated_at instanceof Date ? row.updated_at.toISOString() : String(row.updated_at || ""),
+  };
 }
 
 export function isExecutionWindowOpenNow(config: ExecutionWindowConfig, now = new Date()) {

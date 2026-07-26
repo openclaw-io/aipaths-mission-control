@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from
 import { createClient } from "@/lib/supabase/client";
 import type { CommunityItem } from "@/app/community/page";
 
+const REALTIME_ENABLED = process.env.NEXT_PUBLIC_ENABLE_SUPABASE_REALTIME === "true";
+
 export function useRealtimeCommunity(initialItems: CommunityItem[]): [CommunityItem[], Dispatch<SetStateAction<CommunityItem[]>>] {
   const [items, setItems] = useState<CommunityItem[]>(initialItems);
   const supabase = useMemo(() => createClient(), []);
@@ -13,6 +15,8 @@ export function useRealtimeCommunity(initialItems: CommunityItem[]): [CommunityI
   }, [initialItems]);
 
   useEffect(() => {
+    if (!REALTIME_ENABLED) return;
+
     const channel = supabase
       .channel("community-realtime")
       .on(

@@ -13,13 +13,22 @@
     "sync:youtube-statistics": "node scripts/sync-youtube-statistics.mjs",
     "sync:youtube-statistics:batch": "node scripts/sync-youtube-statistics-batch.mjs",
     "refresh:youtube-metadata": "node scripts/refresh-youtube-owned-video-metadata.mjs",
+    "test": "node --test scripts/lib/__tests__/*.test.mjs",
+    "test:loops": "node --test scripts/lib/__tests__/work-item-loop-contract.test.mjs scripts/lib/__tests__/loops-total-cutover.test.mjs scripts/lib/__tests__/loops-cutover-postgres.test.mjs",
+    "rehearse:loops": "node scripts/rehearse-loops-cutover.mjs",
+    "rehearse:loops:sql-editor": "node scripts/rehearse-loops-cutover.mjs --sql-editor",
+    "rehearse:loops:recovery": "node scripts/rehearse-loops-cutover.mjs --sql-editor --inject-all-checkpoints",
+    "guard:loops": "node scripts/guard-no-project-domain.mjs",
     "test:youtube-statistics": "node --test scripts/lib/__tests__/*.test.mjs"
   },
   "dependencies": {
     "@supabase/ssr": "^0.9.0",
     "@supabase/supabase-js": "^2.100.0",
+    "@types/pg": "^8.20.0",
+    "ipaddr.js": "^2.4.0",
     "lucide-react": "^1.0.1",
     "next": "^16.2.4",
+    "pg": "^8.22.0",
     "react": "19.2.4",
     "react-dom": "19.2.4"
   },

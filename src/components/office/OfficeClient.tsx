@@ -22,7 +22,7 @@ interface TaskRow {
 interface MemoryRow {
   agent: string;
   date: string;
-  content: string;
+  content?: string | null;
 }
 
 interface OfficeClientProps {

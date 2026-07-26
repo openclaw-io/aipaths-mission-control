@@ -1,4 +1,13 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { getLocalMissionControlUser, isLocalAuthDisabled } from "@/lib/auth/local";
+import {
+  createPipelineWorkItemLocal,
+  getPipelineItemLocal,
+  insertPipelineTransitionEventLocal,
+  updatePipelineItemLocal,
+  withLockedPipelineItemLocal,
+} from "@/lib/db/pipeline-local";
+import { resolveCommunityPublicationSlotLocal } from "@/lib/publication/scheduling-local";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/admin";
 import { resolveCommunityPublicationSlot, getCommunityPublicationSegment } from "@/lib/publication/scheduling";
@@ -91,8 +100,20 @@ function communityPublishTarget(metadata: Record<string, unknown>) {
 function createPublishInstruction(item: { id: string; title: string; metadata?: unknown }, scheduledFor: string | null) {
   const metadata = (item.metadata || {}) as Record<string, unknown>;
   const source = (metadata.source || {}) as Record<string, unknown>;
+  const sourceUrl = [source.url, source.video_url, source.playlist_url]
+    .find((value) => typeof value === "string" && value.trim()) as string | undefined;
+  const allowsYouTubePreview = source.type === "video" && !!sourceUrl && /(?:youtube\.com|youtu\.be)/i.test(sourceUrl);
   const target = communityPublishTarget(metadata);
   const copy = getCommunityCopy(item);
+  const youtubeGuard = allowsYouTubePreview
+    ? [
+        "",
+        "Live/public YouTube guard:",
+        "- Before publishing, verify the YouTube URL is live and public.",
+        "- Prefer YouTube Data API when available: privacyStatus must be public; block private, unlisted, scheduled, removed, or members-only states.",
+        "- If public/live status cannot be confirmed, mark this work item blocked with evidence and do not publish.",
+      ]
+    : [];
   return [
     `Community post item: ${item.title}`,
     `Pipeline item ID: ${item.id}`,
@@ -103,14 +124,21 @@ function createPublishInstruction(item: { id: string; title: string; metadata?: 
       : "- Publish this approved content-launch announcement now.",
     `- Publish to <#${target.channelId}> (${target.channelName}).`,
     "- Use only the approved copy below; do not rewrite it unless required for formatting.",
-    "- Wrap raw URLs as <https://...> to suppress Discord embeds/previews.",
+    allowsYouTubePreview
+      ? "- Keep the YouTube video URL raw/unwrapped (with playlist list= when available) so Discord shows the native preview."
+      : "- Wrap raw URLs as <https://...> to suppress Discord embeds/previews.",
     "- Complete this work item with current_url/published_at after publishing.",
     "",
     source.url ? `Source URL: ${String(source.url)}` : "Source URL: (none)",
+    ...youtubeGuard,
     "",
     "Approved copy:",
     copy || "(missing)",
   ].join("\n");
+}
+
+function hasPublicationRecord(item: { status?: string | null; published_at?: string | null; current_url?: string | null }) {
+  return item.status === "published" || item.status === "live" || !!item.published_at || !!item.current_url;
 }
 
 export async function POST(
@@ -118,11 +146,18 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const supabase = await createClient();
-  const db = createServiceClient();
+  const useLocalMode = isLocalAuthDisabled();
+  const supabase = useLocalMode ? null : await createClient();
+  const db = useLocalMode ? null : createServiceClient();
+  const actor = useLocalMode ? getLocalMissionControlUser() : null;
 
-  const { data: { user } } = await supabase.auth.getUser();
+  let user: { email?: string | null; id?: string | null } | null = actor ? { email: actor.email, id: actor.email } : null;
+  if (!useLocalMode) {
+    const authResult = await supabase!.auth.getUser();
+    user = authResult.data.user;
+  }
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const actorIdentity = String(user.email || user.id || "local@mission-control");
 
   const { action, reviewNotes, current_url } = await request.json();
   const targetStatus = ACTION_TARGET[action];
@@ -130,15 +165,21 @@ export async function POST(
     return NextResponse.json({ error: "Invalid action" }, { status: 400 });
   }
 
-  const { data: item, error: fetchError } = await db
-    .from("pipeline_items")
-    .select("*")
-    .eq("id", id)
-    .eq("pipeline_type", "community_post")
-    .single();
+  const item = useLocalMode
+    ? await getPipelineItemLocal(id, "community_post")
+    : await (async () => {
+        const { data, error } = await db!
+          .from("pipeline_items")
+          .select("*")
+          .eq("id", id)
+          .eq("pipeline_type", "community_post")
+          .single();
+        if (error) throw new Error(error.message);
+        return data;
+      })().catch(() => null);
 
-  if (fetchError || !item) {
-    return NextResponse.json({ error: fetchError?.message || "Community item not found" }, { status: 404 });
+  if (!item) {
+    return NextResponse.json({ error: "Community item not found" }, { status: 404 });
   }
 
   const allowedTargets = ALLOWED[item.status] || [];
@@ -154,45 +195,178 @@ export async function POST(
     return NextResponse.json({ error: "Cannot approve a community post without copy text" }, { status: 400 });
   }
 
-  const metadata = {
-    ...(item.metadata || {}),
+  if (action === "approve" && hasPublicationRecord(item)) {
+    return NextResponse.json({ error: "Community post already has a publication record" }, { status: 409 });
+  }
+
+  const buildMetadata = (transitionItem: { metadata?: Record<string, unknown> | null }): Record<string, unknown> => ({
+    ...(transitionItem.metadata || {}),
     review: {
-      ...((item.metadata || {}).review || {}),
+      ...(((transitionItem.metadata || {}).review as Record<string, unknown> | undefined) || {}),
       ...(action === "request_changes"
         ? {
             notes: String(reviewNotes).trim(),
             last_requested_at: new Date().toISOString(),
-            last_requested_by: user.email || user.id,
+            last_requested_by: actorIdentity,
           }
         : {}),
       ...(action === "approve"
         ? {
             approved_at: new Date().toISOString(),
-            approved_by: user.email || user.id,
+            approved_by: actorIdentity,
           }
         : {}),
     },
-  };
+  });
+  const metadata = buildMetadata(item);
+
+  if (useLocalMode) {
+    try {
+      const localResult = await withLockedPipelineItemLocal(id, ["community_post"], async ({ client, item: lockedRow }) => {
+        const lockedItem = lockedRow as unknown as typeof item;
+        if (String(lockedItem.updated_at || "") !== String(item.updated_at || "")) {
+          throw new Error("Concurrent community transition detected");
+        }
+        if (!(ALLOWED[lockedItem.status] || []).includes(targetStatus)) {
+          throw new Error(`Action ${action} not allowed from ${lockedItem.status}`);
+        }
+        if (action === "approve" && (!getCommunityCopy(lockedItem) || hasPublicationRecord(lockedItem))) {
+          throw new Error("Community post is no longer approvable");
+        }
+
+        const localMetadata = buildMetadata(lockedItem);
+        let localRevisionWorkItemId: string | null = null;
+        let localPublishWorkItemId: string | null = null;
+        let localScheduledFor: string | null = null;
+        let localScheduleSource: string | null = null;
+
+        if (action === "request_changes") {
+          const { workItem } = await createPipelineWorkItemLocal({
+            pipelineItemId: lockedItem.id,
+            pipelineType: "community_post",
+            title: `Revise community announcement: ${lockedItem.title}`,
+            instruction: createRevisionInstruction(lockedItem, String(reviewNotes).trim()),
+            priority: lockedItem.priority || "medium",
+            ownerAgent: "community",
+            requestedBy: actorIdentity,
+            relationType: "distribute_community",
+            action: "revise_community_announcement",
+            trigger: "community_review_changes_requested",
+            reviewNotes: String(reviewNotes).trim(),
+          }, client);
+          localRevisionWorkItemId = workItem?.id || null;
+        }
+
+        if (action === "approve") {
+          const scheduleMetadata = ((lockedItem.metadata || {}).schedule || {}) as Record<string, unknown>;
+          const explicitLaunchSchedule = [scheduleMetadata.target_publish_at, scheduleMetadata.scheduled_for]
+            .find((value) => typeof value === "string" && value.trim()) as string | undefined;
+          const slot = await resolveCommunityPublicationSlotLocal({
+            metadata: lockedItem.metadata || {},
+            explicitScheduledFor: explicitLaunchSchedule,
+            pipelineItemId: lockedItem.id,
+            client,
+          });
+          localScheduledFor = slot?.scheduledFor || null;
+          localScheduleSource = slot?.source || (slot === null ? "immediate_content_launch" : null);
+          const target = communityPublishTarget(lockedItem.metadata || {});
+          const source = ((lockedItem.metadata || {}).source || {}) as Record<string, unknown>;
+          const sourceUrl = [source.url, source.video_url, source.playlist_url]
+            .find((value) => typeof value === "string" && value.trim()) as string | undefined;
+          const allowsYouTubePreview = source.type === "video" && !!sourceUrl && /(?:youtube\.com|youtu\.be)/i.test(sourceUrl);
+          const { workItem } = await createPipelineWorkItemLocal({
+            pipelineItemId: lockedItem.id,
+            pipelineType: "community_post",
+            title: `Publish community post: ${lockedItem.title}`,
+            instruction: createPublishInstruction(lockedItem, localScheduledFor),
+            priority: lockedItem.priority || "medium",
+            ownerAgent: "community",
+            requestedBy: actorIdentity,
+            relationType: "publish",
+            action: "publish_community_post",
+            trigger: localScheduledFor ? "community_review_approved_scheduled" : "community_review_approved_immediate",
+            scheduledFor: localScheduledFor,
+            payloadExtra: {
+              schedule_kind: "publication",
+              community_segment: getCommunityPublicationSegment(lockedItem.metadata || {}),
+              target_channel_id: target.channelId,
+              target_channel_name: target.channelName,
+              log_channel_id: "1473660854800224316",
+              suppress_link_previews: !allowsYouTubePreview,
+            },
+          }, client);
+          localPublishWorkItemId = workItem?.id || null;
+        }
+
+        const nextStatus = action === "approve" && localPublishWorkItemId ? "scheduled" : targetStatus;
+        const localUpdatePayload: Record<string, unknown> = {
+          status: nextStatus,
+          metadata: action === "approve"
+            ? {
+                ...localMetadata,
+                schedule: {
+                  ...((localMetadata.schedule as Record<string, unknown> | undefined) || {}),
+                  source: localScheduleSource,
+                  scheduled_at: new Date().toISOString(),
+                  scheduled_by: actorIdentity,
+                  scheduled_for: localScheduledFor,
+                  publish_work_item_id: localPublishWorkItemId,
+                },
+              }
+            : localMetadata,
+          updated_at: new Date().toISOString(),
+        };
+        if (current_url) localUpdatePayload.current_url = current_url;
+        if (action === "mark_published") localUpdatePayload.published_at = new Date().toISOString();
+        const updatedItem = await updatePipelineItemLocal(id, localUpdatePayload, client);
+        await insertPipelineTransitionEventLocal(client, {
+          domain: "community",
+          eventType: `community_post.${action}`,
+          pipelineItemId: id,
+          actor: actorIdentity,
+          dedupeKey: `${action}:${String(item.updated_at || "")}`,
+          payload: {
+            status: nextStatus,
+            review_notes: action === "request_changes" ? String(reviewNotes).trim() : null,
+            revision_work_item_id: localRevisionWorkItemId,
+            publish_work_item_id: localPublishWorkItemId,
+            scheduled_for: localScheduledFor,
+            schedule_source: localScheduleSource,
+          },
+        });
+        return { updatedItem, localRevisionWorkItemId, localPublishWorkItemId, localScheduledFor };
+      });
+      if (!localResult?.updatedItem) return NextResponse.json({ error: "Failed to update community item" }, { status: 500 });
+      if (localResult.localRevisionWorkItemId) void notifyWorkItem(localResult.localRevisionWorkItemId, "community");
+      if (localResult.localPublishWorkItemId && !localResult.localScheduledFor) void notifyWorkItem(localResult.localPublishWorkItemId, "community");
+      return NextResponse.json(localResult.updatedItem);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed local community transition";
+      return NextResponse.json({ error: message }, { status: message.startsWith("Concurrent") ? 409 : 500 });
+    }
+  }
 
   let revisionWorkItemId: string | null = null;
   let publishWorkItemId: string | null = null;
   let approvedScheduledFor: string | null = null;
   let approvedScheduleSource: string | null = null;
+
   if (action === "request_changes") {
     try {
-      const { workItem } = await createPipelineWorkItem(db, {
+      const workInput = {
         pipelineItemId: item.id,
         pipelineType: "community_post",
         title: `Revise community announcement: ${item.title}`,
         instruction: createRevisionInstruction(item, String(reviewNotes).trim()),
         priority: item.priority || "medium",
         ownerAgent: "community",
-        requestedBy: user.email || user.id,
+        requestedBy: actorIdentity,
         relationType: "distribute_community",
         action: "revise_community_announcement",
         trigger: "community_review_changes_requested",
         reviewNotes: String(reviewNotes).trim(),
-      });
+      };
+      const { workItem } = await createPipelineWorkItem(db!, workInput);
       revisionWorkItemId = workItem?.id || null;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -204,21 +378,29 @@ export async function POST(
   if (action === "approve") {
     try {
       const metadataForSchedule = (item.metadata || {}) as Record<string, unknown>;
-      const slot = await resolveCommunityPublicationSlot(db, {
+      const scheduleMetadata = (metadataForSchedule.schedule || {}) as Record<string, unknown>;
+      const explicitLaunchSchedule = [scheduleMetadata.target_publish_at, scheduleMetadata.scheduled_for]
+        .find((value) => typeof value === "string" && value.trim()) as string | undefined;
+      const slot = await resolveCommunityPublicationSlot(db!, {
         metadata: metadataForSchedule,
+        explicitScheduledFor: explicitLaunchSchedule,
         pipelineItemId: item.id,
       });
       approvedScheduledFor = slot?.scheduledFor || null;
       approvedScheduleSource = slot?.source || (slot === null ? "immediate_content_launch" : null);
       const target = communityPublishTarget(metadataForSchedule);
-      const { workItem } = await createPipelineWorkItem(db, {
+      const source = (metadataForSchedule.source || {}) as Record<string, unknown>;
+      const sourceUrl = [source.url, source.video_url, source.playlist_url]
+        .find((value) => typeof value === "string" && value.trim()) as string | undefined;
+      const allowsYouTubePreview = source.type === "video" && !!sourceUrl && /(?:youtube\.com|youtu\.be)/i.test(sourceUrl);
+      const workInput = {
         pipelineItemId: item.id,
         pipelineType: "community_post",
         title: `Publish community post: ${item.title}`,
         instruction: createPublishInstruction(item, approvedScheduledFor),
         priority: item.priority || "medium",
         ownerAgent: "community",
-        requestedBy: user.email || user.id,
+        requestedBy: actorIdentity,
         relationType: "publish",
         action: "publish_community_post",
         trigger: approvedScheduledFor ? "community_review_approved_scheduled" : "community_review_approved_immediate",
@@ -229,9 +411,10 @@ export async function POST(
           target_channel_id: target.channelId,
           target_channel_name: target.channelName,
           log_channel_id: "1473660854800224316",
-          suppress_link_previews: true,
+          suppress_link_previews: !allowsYouTubePreview,
         },
-      });
+      };
+      const { workItem } = await createPipelineWorkItem(db!, workInput);
       publishWorkItemId = workItem?.id || null;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -240,17 +423,17 @@ export async function POST(
     }
   }
 
-  const nextStatus = action === "approve" && approvedScheduledFor ? "scheduled" : targetStatus;
+  const nextStatus = action === "approve" && publishWorkItemId ? "scheduled" : targetStatus;
   const updatePayload: Record<string, unknown> = {
     status: nextStatus,
     metadata: action === "approve"
       ? {
           ...metadata,
           schedule: {
-            ...((metadata.schedule || {}) as Record<string, unknown>),
+            ...((metadata.schedule as Record<string, unknown> | undefined) || {}),
             source: approvedScheduleSource,
             scheduled_at: new Date().toISOString(),
-            scheduled_by: user.email || user.id,
+            scheduled_by: actorIdentity,
             scheduled_for: approvedScheduledFor,
             publish_work_item_id: publishWorkItemId,
           },
@@ -262,26 +445,30 @@ export async function POST(
   if (current_url) updatePayload.current_url = current_url;
   if (action === "mark_published") updatePayload.published_at = new Date().toISOString();
 
-  const { data: updated, error: updateError } = await db
-    .from("pipeline_items")
-    .update(updatePayload)
-    .eq("id", id)
-    .select("id, pipeline_type, title, slug, status, priority, owner_agent, requested_by, source_type, source_id, published_at, current_url, content_path, content_format, metadata, created_at, updated_at")
-    .single();
+  const updated = await (async () => {
+    const { data, error } = await db!
+      .from("pipeline_items")
+      .update(updatePayload)
+      .eq("id", id)
+      .select("id, pipeline_type, title, slug, status, priority, owner_agent, requested_by, source_type, source_id, published_at, current_url, content_path, content_format, metadata, created_at, updated_at")
+      .single();
+    if (error) throw new Error(error.message);
+    return data;
+  })().catch(() => null);
 
-  if (updateError) {
-    return NextResponse.json({ error: updateError.message }, { status: 500 });
+  if (!updated) {
+    return NextResponse.json({ error: "Failed to update community item" }, { status: 500 });
   }
 
   if (revisionWorkItemId) void notifyWorkItem(revisionWorkItemId, "community");
   if (publishWorkItemId && !approvedScheduledFor) void notifyWorkItem(publishWorkItemId, "community");
 
-  await db.from("event_log").insert({
+  const { error: eventError } = await db!.from("event_log").insert({
     domain: "community",
     event_type: `community_post.${action}`,
     entity_type: "pipeline_item",
     entity_id: id,
-    actor: user.email || user.id,
+    actor: actorIdentity,
     payload: {
       status: nextStatus,
       review_notes: action === "request_changes" ? String(reviewNotes).trim() : null,
@@ -291,6 +478,7 @@ export async function POST(
       schedule_source: approvedScheduleSource,
     },
   });
+  if (eventError) return NextResponse.json({ error: eventError.message }, { status: 500 });
 
   return NextResponse.json(updated);
 }

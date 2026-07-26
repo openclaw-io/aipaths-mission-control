@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { createServiceClient } from "@/lib/supabase/admin";
 import { generateEmbedding } from "@/lib/embeddings";
+import { listMemories, upsertMemory } from "@/lib/db/mission-control";
 
 export const dynamic = "force-dynamic";
 
@@ -25,24 +25,12 @@ export async function GET(req: NextRequest) {
   const to = params.get("to");
   const limit = Math.min(Number(params.get("limit") || 50), 200);
 
-  const supabase = createServiceClient();
-
-  let query = supabase
-    .from("memories")
-    .select("id, agent, type, title, content, tags, date, created_at, updated_at")
-    .order("date", { ascending: false })
-    .limit(limit);
-
-  if (agent) query = query.eq("agent", agent);
-  if (type) query = query.eq("type", type);
-  if (from) query = query.gte("date", from);
-  if (to) query = query.lte("date", to);
-
-  const { data, error } = await query;
-
-  if (error)
-    return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json({ memories: data });
+  try {
+    const memories = await listMemories({ agent, type, from, to, limit });
+    return NextResponse.json({ memories });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "local_postgres_query_failed" }, { status: 500 });
+  }
 }
 
 /**
@@ -73,60 +61,22 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const supabase = createServiceClient();
   const memoryDate = date || new Date().toISOString().split("T")[0];
+  const safeTags = Array.isArray(tags) ? tags.filter((tag): tag is string => typeof tag === "string") : [];
+  const embedding = await generateEmbedding(String(content));
 
-  // For journal type, upsert by (agent, date, type) — append content if exists
-  if (type === "journal") {
-    const { data: existing } = await supabase
-      .from("memories")
-      .select("id, content")
-      .eq("agent", agent)
-      .eq("type", "journal")
-      .eq("date", memoryDate)
-      .maybeSingle();
-
-    if (existing) {
-      const merged = existing.content + "\n\n" + content;
-      const embedding = await generateEmbedding(merged);
-
-      const { data, error } = await supabase
-        .from("memories")
-        .update({
-          content: merged,
-          title: title || undefined,
-          tags: tags || undefined,
-          embedding,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", existing.id)
-        .select()
-        .single();
-
-      if (error)
-        return NextResponse.json({ error: error.message }, { status: 500 });
-      return NextResponse.json(data);
-    }
-  }
-
-  // Insert new memory
-  const embedding = await generateEmbedding(content);
-
-  const { data, error } = await supabase
-    .from("memories")
-    .insert({
+  try {
+    const data = await upsertMemory({
       agent,
       type,
       title: title || null,
       content,
-      tags: tags || [],
+      tags: safeTags,
       date: memoryDate,
       embedding,
-    })
-    .select()
-    .single();
-
-  if (error)
-    return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json(data, { status: 201 });
+    });
+    return NextResponse.json(data, { status: 201 });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "local_postgres_write_failed" }, { status: 500 });
+  }
 }

@@ -1,136 +1,203 @@
-import { supabaseAdmin } from "@/lib/supabase/admin";
-import { OverviewClient } from "@/components/overview/OverviewClient";
+import { OverviewClient, type BusinessOverviewProps } from "@/components/overview/OverviewClient";
+import { isLocalAuthDisabled } from "@/lib/auth/local";
+import { query } from "@/lib/db/postgres";
+import { loadYouTubeStatisticsRows } from "@/lib/youtube/statistics-read-model";
+import type { YouTubeMetricSnapshot, YouTubeStatisticsRow } from "@/lib/youtube/statistics-types";
 
 export const dynamic = "force-dynamic";
 
-export default async function OverviewPage() {
-  const today = new Date().toISOString().split("T")[0];
-  const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+type JsonRecord = Record<string, unknown>;
 
-  // Parallel queries
-  const [
-    todayCostRes,
-    tasksDoneTodayRes,
-    activeAgentsRes,
-    activeProjectsRes,
-    projectWorkItemsRes,
-    failedTasksRes,
-    cronHealthRes,
-    activityRes,
-    schedulerConfigRes,
-  ] = await Promise.all([
-    // 1. Today cost
-    supabaseAdmin
-      .from("usage_logs")
-      .select("cost_usd")
-      .eq("date", today),
-    // 2. Work items completed today
-    supabaseAdmin
-      .from("work_items")
-      .select("*", { count: "exact", head: true })
-      .eq("status", "done")
-      .gte("completed_at", `${today}T00:00:00`),
-    // 3. Active agents (distinct agents with in_progress work items)
-    supabaseAdmin
-      .from("work_items")
-      .select("owner_agent, target_agent_id")
-      .eq("status", "in_progress")
-      .or("target_agent_id.not.is.null,owner_agent.not.is.null"),
-    // 4. Active canonical projects
-    supabaseAdmin
-      .from("projects")
-      .select("id, name, status")
-      .not("status", "in", "(completed,canceled,archived)"),
-    // 5. Work items linked to projects for progress
-    supabaseAdmin
-      .from("project_work_items")
-      .select("project_id, work_items(id, status)"),
-    // 6. Failed work items (last 24h)
-    supabaseAdmin
-      .from("work_items")
-      .select("id, title, owner_agent, target_agent_id, completed_at, updated_at, payload")
-      .eq("status", "failed")
-      .gte("completed_at", yesterday)
-      .order("completed_at", { ascending: false })
-      .limit(5),
-    // 7. Cron health
-    supabaseAdmin
-      .from("cron_health")
-      .select("cron_name, last_status, last_error, last_run_at, enabled"),
-    // 8. Activity feed
-    supabaseAdmin
-      .from("activity_log")
-      .select("*")
-      .order("created_at", { ascending: false })
-      .limit(30),
-    // 9. Scheduler config (for budget)
-    supabaseAdmin
-      .from("cron_health")
-      .select("config")
-      .eq("cron_name", "work-item-scheduler")
-      .single(),
+type SnapshotRow = {
+  date: string;
+  academy_json: JsonRecord | null;
+  youtube_json: JsonRecord | null;
+  waitlist_json: JsonRecord | null;
+};
+
+type KpiRow = {
+  date: string;
+  total_users: number | null;
+  new_users_today: number | null;
+  total_subscribers: number | null;
+  total_sessions: number | null;
+};
+
+export default async function OverviewPage() {
+  const today = new Date();
+  const since30 = toDateString(daysAgo(today, 30));
+  const localSupabasePlaceholder = isLocalSupabasePlaceholder();
+
+  const [snapshotsRes, kpisRes, youtubeRows] = await Promise.all([
+    query<SnapshotRow>(
+      `select date, academy_json, youtube_json, waitlist_json
+         from ops_daily_snapshots
+        where date >= $1
+        order by date desc`,
+      [since30],
+    ),
+    query<KpiRow>(
+      `select date, total_users, new_users_today, total_subscribers, total_sessions
+         from academy_daily_kpis
+        where date >= $1
+        order by date desc`,
+      [since30],
+    ),
+    localSupabasePlaceholder ? Promise.resolve([] as YouTubeStatisticsRow[]) : loadYouTubeStatisticsRows(),
   ]);
 
-  // Process data
-  const todayCost = (todayCostRes.data || []).reduce((s, r) => s + Number(r.cost_usd), 0);
-  const tasksDoneToday = tasksDoneTodayRes.count || 0;
-  const activeAgents = [
-    ...new Set((activeAgentsRes.data || []).map((r) => r.target_agent_id || r.owner_agent).filter(Boolean)),
-  ];
+  const snapshots = (snapshotsRes.rows || []).filter((row) => row.date >= since30);
+  const kpis = (kpisRes.rows || []).filter((row) => row.date >= since30);
+  const latestSnapshot = snapshots[0] || null;
+  const latestAcademy = asRecord(latestSnapshot?.academy_json);
+  const latestKpi = kpis[0] || null;
+  const diagnosticTotals = summarizeDiagnostics(snapshots);
+  const audience = summarizeAudience(kpis, latestAcademy);
+  const youtubeViews = summarizeYouTubeViews(youtubeRows, snapshots);
+  const ctaClicks = diagnosticTotals.clicks;
+  const starts = diagnosticTotals.starts;
+  const completions = diagnosticTotals.completions;
 
-  // Project progress from canonical project_work_items -> work_items links
-  const linkedWorkItemsByProject = new Map<string, Array<{ status: string | null }>>();
-  for (const link of projectWorkItemsRes.data || []) {
-    const workItem = Array.isArray(link.work_items) ? link.work_items[0] : link.work_items;
-    if (!workItem) continue;
-    const existing = linkedWorkItemsByProject.get(link.project_id) || [];
-    existing.push(workItem as { status: string | null });
-    linkedWorkItemsByProject.set(link.project_id, existing);
-  }
+  const data: BusinessOverviewProps = {
+    updatedAt: latestSnapshot?.date || latestKpi?.date || today.toISOString(),
+    windowLabel: "Últimos 30 días",
+    audience,
+    diagnosticCompletions: completions,
+    funnel: [
+      {
+        label: "Views YT",
+        value: youtubeViews,
+        conversionFromPrevious: null,
+      },
+      {
+        label: "CTA clicks",
+        value: ctaClicks,
+        conversionFromPrevious: conversionRate(ctaClicks, youtubeViews),
+      },
+      {
+        label: "Diagnóstico starts",
+        value: starts,
+        conversionFromPrevious: conversionRate(starts, ctaClicks),
+      },
+      {
+        label: "Diagnósticos completados",
+        value: completions,
+        conversionFromPrevious: conversionRate(completions, starts),
+      },
+    ],
+    topRefs: topKeyCounts(snapshots, ["academy_json", "diagnostic", "top_landing_refs"]),
+  };
 
-  const projectProgress = (activeProjectsRes.data || []).map((project) => {
-    const linkedItems = linkedWorkItemsByProject.get(project.id) || [];
-    const done = linkedItems.filter((item) => item.status === "done").length;
-    const total = linkedItems.length;
-    return { id: project.id, title: project.name || project.id, done, total };
-  });
+  return <OverviewClient {...data} />;
+}
 
-  // Cron summary
-  const crons = cronHealthRes.data || [];
-  const cronOk = crons.filter((c) => c.last_status === "ok" && c.enabled).length;
-  const cronError = crons.filter((c) => c.last_status === "error" && c.enabled).length;
-  const cronTotal = crons.filter((c) => c.enabled).length;
-  const errorCrons = crons.filter((c) => c.last_status === "error" && c.enabled);
-
-  // Budget
-  const schedulerConfig = (schedulerConfigRes.data?.config as Record<string, unknown>) || {};
-  const dailyBudget = Number(schedulerConfig.daily_budget_usd || 50);
-  const budgetPct = dailyBudget > 0 ? (todayCost / dailyBudget) * 100 : 0;
-
-  return (
-    <OverviewClient
-      todayCost={todayCost}
-      dailyBudget={dailyBudget}
-      budgetPct={budgetPct}
-      tasksDoneToday={tasksDoneToday}
-      activeAgents={activeAgents}
-      cronOk={cronOk}
-      cronError={cronError}
-      cronTotal={cronTotal}
-      projectProgress={projectProgress}
-      failedTasks={(failedTasksRes.data || []).map((task) => {
-        const payload = (task.payload || {}) as Record<string, unknown>;
-        const error = payload.error || payload.dispatch_failure_reason || null;
-        return {
-          id: task.id,
-          title: task.title,
-          agent: task.target_agent_id || task.owner_agent || "unknown",
-          completed_at: task.completed_at || task.updated_at || new Date().toISOString(),
-          error: typeof error === "string" ? error : null,
-        };
-      })}
-      errorCrons={errorCrons.map((c) => ({ name: c.cron_name, error: c.last_error, lastRun: c.last_run_at }))}
-      initialActivity={activityRes.data || []}
-    />
+function summarizeDiagnostics(rows: SnapshotRow[]) {
+  return rows.reduce(
+    (total, row) => {
+      const diagnostic = getDiagnostic(row);
+      const responses = asRecord(diagnostic.responses);
+      total.starts += numberValue(diagnostic.start_sessions ?? diagnostic.starts);
+      total.completions += numberValue(diagnostic.completion_sessions ?? diagnostic.completions ?? responses.total);
+      total.clicks += numberValue(diagnostic.diagnostic_landing_sessions ?? diagnostic.diagnostic_unique_visitors);
+      return total;
+    },
+    { starts: 0, completions: 0, clicks: 0 },
   );
+}
+
+function summarizeAudience(kpis: KpiRow[], latestAcademy: JsonRecord): BusinessOverviewProps["audience"] {
+  const totals = kpis.reduce(
+    (acc, row) => {
+      acc.newUsers30 += numberValue(row.new_users_today);
+      acc.sessions30 += numberValue(row.total_sessions);
+      return acc;
+    },
+    { newUsers30: 0, sessions30: 0 },
+  );
+
+  const latestKpi = kpis[0] || null;
+  return {
+    totalUsers: numberValue(latestAcademy.total_users ?? latestKpi?.total_users),
+    totalSubscribers: numberValue(latestAcademy.total_subscribers ?? latestKpi?.total_subscribers),
+    ...totals,
+  };
+}
+
+function summarizeYouTubeViews(rows: YouTubeStatisticsRow[], snapshots: SnapshotRow[]) {
+  const snapshot28d = rows
+    .map((row) => row.snapshots["28d"])
+    .filter(Boolean) as YouTubeMetricSnapshot[];
+  const views = sum(snapshot28d, (snapshot) => numberValue(snapshot.views));
+
+  if (views > 0) return views;
+
+  return snapshots.reduce((total, row) => total + Math.max(0, numberValue(asRecord(row.youtube_json).views_delta)), 0);
+}
+
+function topKeyCounts(rows: SnapshotRow[], path: string[]) {
+  const map = new Map<string, number>();
+  for (const row of rows) {
+    const rawList = getPath(row as unknown as JsonRecord, path);
+    if (!Array.isArray(rawList)) continue;
+    for (const item of rawList) {
+      const record = asRecord(item);
+      const key = stringValue(record.key ?? record.source ?? record.ref ?? record.label) || "unknown";
+      const count = numberValue(record.count ?? record.sessions ?? record.visitors ?? record.value);
+      map.set(key, (map.get(key) || 0) + count);
+    }
+  }
+  return [...map.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([key, count]) => ({ key, count }));
+}
+
+function conversionRate(value: number | null, previous: number | null) {
+  if (value === null || previous === null || previous <= 0) return null;
+  return (value / previous) * 100;
+}
+
+function getDiagnostic(row: SnapshotRow | null | undefined) {
+  return asRecord(asRecord(row?.academy_json).diagnostic);
+}
+
+function getPath(record: JsonRecord, path: string[]): unknown {
+  let current: unknown = record;
+  for (const key of path) {
+    current = asRecord(current)[key];
+  }
+  return current;
+}
+
+function asRecord(value: unknown): JsonRecord {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as JsonRecord : {};
+}
+
+function numberValue(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function sum<T>(items: T[], getter: (item: T) => number) {
+  return items.reduce((total, item) => total + getter(item), 0);
+}
+
+function daysAgo(date: Date, days: number) {
+  return new Date(date.getTime() - days * 24 * 60 * 60 * 1000);
+}
+
+function toDateString(date: Date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function isLocalSupabasePlaceholder() {
+  return isLocalAuthDisabled();
 }

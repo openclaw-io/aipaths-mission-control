@@ -101,7 +101,7 @@ Mission Control may store temporary local/OpenClaw media paths in `metadata.hero
 See Systems plan:
 
 ```text
-/Users/joaco/Documents/openclaw/director-systems/plans/BLOG-FINAL-PACKAGE-HARDENING-PLAN-2026-04-28.md
+/Users/joaco/openclaw/director-systems/plans/BLOG-FINAL-PACKAGE-HARDENING-PLAN-2026-04-28.md
 ```
 
 Open follow-ups include:

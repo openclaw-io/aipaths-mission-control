@@ -82,10 +82,10 @@ Runtime writes for `academy_daily_kpis` and `ops_daily_snapshots` now belong in 
 ## Env assumptions
 
 The scripts read:
-- Mission Control env: `aipaths-mission-control/.env.local`
-- Academy env: `/Users/joaco/Documents/openclaw/repos/aipaths-academy/.env.local`
+- Mission Control env: `/Users/joaco/openclaw/repos/aipaths-mission-control-live/.env.local`
+- Academy env: `/Users/joaco/openclaw/repos/aipaths-academy/.env.local`
 
-Expected keys:
+This legacy backfill still uses explicit Supabase source/destination clients; it is not a runtime fallback for the local app. Expected keys for this operator-only flow:
 - `NEXT_PUBLIC_SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
 
@@ -154,6 +154,6 @@ npm run validate:strategist-backfill -- --all
 ## Caveats
 
 - `ops_owned_videos` uses `academy_video_id` as the unique local mirror key.
-- This tool assumes the seeded `intel_sources` rows exist in Mission Control.
+- `intel_sources` must come from the explicit bootstrap/backfill source; the local schema deliberately does not seed data tables.
 - `academy_daily_kpis` historical backfill is intentionally deferred because it should be built from conservative Academy rollups, not guessed from mixed legacy tables.
 - `ops_daily_snapshots` should be forward-filled by the runtime builder first. Any historical bootstrap should preserve lineage and avoid turning legacy `daily_digest` into the canonical source.

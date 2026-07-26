@@ -1,0 +1,152 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+import vm from "node:vm";
+import ts from "typescript";
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+const sourcePath = resolve(repoRoot, "src/lib/youtube-launch-package.ts");
+
+function loadModule() {
+  const source = readFileSync(sourcePath, "utf8");
+  const transpiled = ts.transpileModule(source, {
+    compilerOptions: {
+      module: ts.ModuleKind.CommonJS,
+      target: ts.ScriptTarget.ES2020,
+      esModuleInterop: true,
+    },
+    fileName: sourcePath,
+  }).outputText;
+
+  const cjsModule = { exports: {} };
+  const sandbox = {
+    module: cjsModule,
+    exports: cjsModule.exports,
+    require(specifier) {
+      if (specifier === "@supabase/supabase-js") return {};
+      throw new Error(`Unexpected require: ${specifier}`);
+    },
+    URL,
+    Date,
+    Number,
+    Set,
+    JSON,
+    String,
+    RegExp,
+  };
+
+  vm.runInNewContext(transpiled, sandbox, { filename: sourcePath });
+  return cjsModule.exports;
+}
+
+const launchPackage = loadModule();
+
+function baseContext(overrides = {}) {
+  return {
+    title: "Cómo construí un equipo usando IA",
+    youtubeUrl: "https://www.youtube.com/watch?v=Dn1pJz5fq-w",
+    videoId: "Dn1pJz5fq-w",
+    publishAt: "2026-07-07T14:00:00.000Z",
+    playlistContextUrl: "https://www.youtube.com/watch?v=Dn1pJz5fq-w&list=PLabc123",
+    targetCommunityPublishAt: "2026-07-07T14:30:00.000Z",
+    targetEmailSendAt: "2026-07-07T17:00:00.000Z",
+    emailTrackingRef: "email-youtube-Dn1pJz5fq-w",
+    optionalDiagnosticCta: "https://aipaths.academy/es/diagnostico-ia?ref=email-youtube-Dn1pJz5fq-w",
+    cta: "Ver el video y responder con tu caso",
+    ...overrides,
+  };
+}
+
+test("buildScheduledYouTubeLaunchWorkSpecs includes community, website, marketing and snapshot handoffs", () => {
+  assert.equal(typeof launchPackage.buildScheduledYouTubeLaunchWorkSpecs, "function");
+  const specs = launchPackage.buildScheduledYouTubeLaunchWorkSpecs(baseContext());
+  const byRelation = new Map(specs.map((spec) => [spec.relationType, spec]));
+
+  assert.deepEqual([...byRelation.keys()], [
+    "video_launch_activate",
+    "launch_community_draft",
+    "website_publish_video",
+    "marketing_email_campaign",
+    "youtube_snapshot_24h",
+    "youtube_snapshot_7d",
+    "youtube_snapshot_28d",
+  ]);
+  assert.equal(byRelation.get("video_launch_activate").scheduledFor, "2026-07-07T14:02:00.000Z");
+  assert.equal(byRelation.get("website_publish_video").scheduledFor, "2026-07-07T14:15:00.000Z");
+  assert.equal(byRelation.get("marketing_email_campaign").scheduledFor, "2026-07-07T17:00:00.000Z");
+  assert.equal(byRelation.get("youtube_snapshot_28d").scheduledFor, "2026-08-04T14:00:00.000Z");
+});
+
+test("launch work specs pass structured context without hardcoding community or marketing copy rules", () => {
+  const specs = launchPackage.buildScheduledYouTubeLaunchWorkSpecs(baseContext());
+  const community = specs.find((spec) => spec.relationType === "launch_community_draft");
+  const marketing = specs.find((spec) => spec.relationType === "marketing_email_campaign");
+
+  assert.equal(community.ownerAgent, "community");
+  assert.equal(community.payloadExtra.playlist_context_url, "https://www.youtube.com/watch?v=Dn1pJz5fq-w&list=PLabc123");
+  assert.equal(community.payloadExtra.suppress_link_previews, false);
+  assert.equal(community.payloadExtra.validation_requirements.playlist_context_url_required_when_present, true);
+  assert.match(community.instruction, /structured launch context/i);
+  assert.match(community.instruction, /Ready for Review/i);
+  assert.match(community.instruction, /Live\/public YouTube guard/i);
+  assert.doesNotMatch(community.instruction, /Newsletter\/email: out of scope/);
+
+  assert.equal(marketing.ownerAgent, "marketing");
+  assert.equal(marketing.pipelineType, "email_campaign");
+  assert.equal(marketing.action, "draft_video_announcement");
+  assert.equal(marketing.payloadExtra.target_send_at, "2026-07-07T17:00:00.000Z");
+  assert.equal(marketing.payloadExtra.email_tracking_ref, "email-youtube-Dn1pJz5fq-w");
+  assert.equal(marketing.payloadExtra.requires_gonza_approval, true);
+  assert.equal(marketing.payloadExtra.customer_facing_guard, true);
+  assert.match(marketing.instruction, /Marketing owns copy/i);
+  assert.match(marketing.instruction, /do not send/i);
+  assert.match(marketing.instruction, /Live\/public YouTube guard/i);
+});
+
+test("validateCommunityLaunchDraftOutput enforces playlist context and raw YouTube embed requirements", () => {
+  assert.equal(typeof launchPackage.validateCommunityLaunchDraftOutput, "function");
+  const context = baseContext();
+  const validCopy = `Nuevo video de AIPaths:\n\n${context.playlistContextUrl}`;
+
+  const valid = launchPackage.validateCommunityLaunchDraftOutput({
+    finalCopy: validCopy,
+    status: "ready_for_review",
+    playlistContextUrl: context.playlistContextUrl,
+    watchUrl: context.youtubeUrl,
+    suppressLinkPreviews: false,
+  });
+  assert.equal(valid.ok, true);
+  assert.deepEqual([...valid.errors], []);
+
+  const bareWatch = launchPackage.validateCommunityLaunchDraftOutput({
+    finalCopy: `Nuevo video\n${context.youtubeUrl}`,
+    status: "ready_for_review",
+    playlistContextUrl: context.playlistContextUrl,
+    watchUrl: context.youtubeUrl,
+    suppressLinkPreviews: false,
+  });
+  assert.equal(bareWatch.ok, false);
+  assert.match(bareWatch.errors.join("\n"), /playlist_context_url/);
+
+  const wrapped = launchPackage.validateCommunityLaunchDraftOutput({
+    finalCopy: `Nuevo video\n<${context.playlistContextUrl}>`,
+    status: "ready_for_review",
+    playlistContextUrl: context.playlistContextUrl,
+    watchUrl: context.youtubeUrl,
+    suppressLinkPreviews: false,
+  });
+  assert.equal(wrapped.ok, false);
+  assert.match(wrapped.errors.join("\n"), /raw\/unwrapped/);
+
+  const draftStatus = launchPackage.validateCommunityLaunchDraftOutput({
+    finalCopy: validCopy,
+    status: "draft",
+    playlistContextUrl: context.playlistContextUrl,
+    watchUrl: context.youtubeUrl,
+    suppressLinkPreviews: false,
+  });
+  assert.equal(draftStatus.ok, false);
+  assert.match(draftStatus.errors.join("\n"), /ready_for_review/);
+});

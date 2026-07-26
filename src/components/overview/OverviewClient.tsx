@@ -1,167 +1,159 @@
 "use client";
 
-import { ActivityFeed } from "@/components/ActivityFeed";
-import type { ActivityEvent } from "@/hooks/useRealtimeActivity";
-import { timeAgo } from "@/lib/utils";
-
-const AGENT_EMOJI: Record<string, string> = {
-  strategist: "🧠", youtube: "🎬", content: "✍️", marketing: "📣",
-  dev: "💻", community: "🌐", editor: "📝", legal: "⚖️", gonza: "👤",
+export type BusinessOverviewProps = {
+  updatedAt: string;
+  windowLabel: string;
+  audience: {
+    totalUsers: number;
+    totalSubscribers: number;
+    sessions30: number;
+    newUsers30: number;
+  };
+  diagnosticCompletions: number;
+  funnel: Array<{
+    label: string;
+    value: number | null;
+    conversionFromPrevious: number | null;
+    suffix?: string;
+  }>;
+  topRefs: Array<{ key: string; count: number }>;
 };
 
-function fmt(n: number): string {
-  return n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
-
-interface Props {
-  todayCost: number;
-  dailyBudget: number;
-  budgetPct: number;
-  tasksDoneToday: number;
-  activeAgents: string[];
-  cronOk: number;
-  cronError: number;
-  cronTotal: number;
-  projectProgress: Array<{ id: string; title: string; done: number; total: number }>;
-  failedTasks: Array<{ id: string; title: string; agent: string; completed_at: string; error: string | null }>;
-  errorCrons: Array<{ name: string; error: string | null; lastRun: string | null }>;
-  initialActivity: ActivityEvent[];
-}
+const PYRAMID_WIDTHS = [100, 82, 64, 48];
 
 export function OverviewClient({
-  todayCost, dailyBudget, budgetPct,
-  tasksDoneToday, activeAgents,
-  cronOk, cronError, cronTotal,
-  projectProgress, failedTasks, errorCrons,
-  initialActivity,
-}: Props) {
-  const hasAlerts = failedTasks.length > 0 || errorCrons.length > 0 || budgetPct > 80;
-
+  updatedAt,
+  windowLabel,
+  audience,
+  diagnosticCompletions,
+  funnel,
+  topRefs,
+}: BusinessOverviewProps) {
   return (
-    <div>
-      <h1 className="text-2xl font-bold text-white">📊 Overview</h1>
-      <p className="mt-1 text-sm text-gray-500">Your agent system at a glance</p>
+    <div className="space-y-6 pb-10">
+      <header className="rounded-3xl border border-white/10 bg-[#111118] p-6 shadow-2xl shadow-black/20 md:p-8">
+        <p className="text-xs font-semibold uppercase tracking-[0.28em] text-emerald-300/80">Business Command Center</p>
+        <h1 className="mt-3 text-3xl font-semibold tracking-tight text-white md:text-5xl">Diagnóstico IA pulse</h1>
+        <p className="mt-5 text-xs text-gray-500">Último snapshot: {formatDate(updatedAt)}</p>
+      </header>
 
-      {/* Summary Cards */}
-      <div className="mt-6 grid grid-cols-2 gap-4 lg:grid-cols-4">
-        {/* Cost Today */}
-        <div className="rounded-xl border border-gray-800 bg-[#111118] p-5">
-          <p className="text-xs font-medium text-gray-500 uppercase tracking-wider">💰 Cost Today</p>
-          <p className="mt-2 text-2xl font-bold text-white">${fmt(todayCost)}</p>
-          <div className="mt-2 flex items-center gap-2">
-            <div className="flex-1 h-1.5 rounded-full bg-gray-800 overflow-hidden">
-              <div
-                className={`h-full transition-all ${budgetPct > 80 ? "bg-red-500" : budgetPct > 50 ? "bg-yellow-500" : "bg-green-500"}`}
-                style={{ width: `${Math.min(budgetPct, 100)}%` }}
+      <section className="grid grid-cols-2 gap-3 xl:grid-cols-5">
+        <MetricCard label="Usuarios totales" value={audience.totalUsers} />
+        <MetricCard label="Newsletter" value={audience.totalSubscribers} />
+        <MetricCard label="Sesiones Web 30D" value={audience.sessions30} />
+        <MetricCard label="Nuevos Usuarios 30D" value={audience.newUsers30} />
+        <MetricCard label="Diagnósticos completados" value={diagnosticCompletions} highlight />
+      </section>
+
+      <section className="grid gap-4 xl:grid-cols-[1.45fr_0.8fr]">
+        <div className="rounded-3xl border border-white/10 bg-[#111118] p-5 md:p-7">
+          <div className="flex flex-col gap-1 md:flex-row md:items-end md:justify-between">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.22em] text-gray-500">Funnel · {windowLabel}</p>
+              <h2 className="mt-1 text-xl font-semibold text-white">Pirámide invertida del diagnóstico</h2>
+            </div>
+            <p className="text-sm text-gray-500">Views → CTA clicks → starts → completados</p>
+          </div>
+
+          <div className="mt-7 flex flex-col items-center gap-2">
+            {funnel.map((step, index) => (
+              <PyramidStep
+                key={step.label}
+                step={step}
+                width={PYRAMID_WIDTHS[index] ?? 42}
+                showConversion={index > 0}
               />
-            </div>
-            <span className="text-xs text-gray-600">${fmt(dailyBudget)}</span>
-          </div>
-        </div>
-
-        {/* Tasks Done */}
-        <div className="rounded-xl border border-gray-800 bg-[#111118] p-5">
-          <p className="text-xs font-medium text-gray-500 uppercase tracking-wider">✅ Done Today</p>
-          <p className="mt-2 text-2xl font-bold text-white">{tasksDoneToday}</p>
-          <p className="mt-1 text-xs text-gray-600">tasks completed</p>
-        </div>
-
-        {/* Active Agents */}
-        <div className="rounded-xl border border-gray-800 bg-[#111118] p-5">
-          <p className="text-xs font-medium text-gray-500 uppercase tracking-wider">🤖 Active Now</p>
-          <p className="mt-2 text-2xl font-bold text-white">{activeAgents.length}</p>
-          <div className="mt-1 flex gap-1">
-            {activeAgents.map((a) => (
-              <span key={a} className="text-sm" title={a}>{AGENT_EMOJI[a] || "🤖"}</span>
             ))}
-            {activeAgents.length === 0 && <span className="text-xs text-gray-600">all idle</span>}
           </div>
         </div>
 
-        {/* Cron Health */}
-        <div className="rounded-xl border border-gray-800 bg-[#111118] p-5">
-          <p className="text-xs font-medium text-gray-500 uppercase tracking-wider">🕐 Crons</p>
-          <p className="mt-2 text-2xl font-bold text-white">
-            {cronOk}<span className="text-gray-600">/{cronTotal}</span>
-          </p>
-          <div className="mt-1 flex items-center gap-2">
-            <span className={`h-2 w-2 rounded-full ${cronError > 0 ? "bg-red-500" : "bg-green-500"}`} />
-            <span className="text-xs text-gray-600">
-              {cronError > 0 ? `${cronError} error${cronError > 1 ? "s" : ""}` : "all healthy"}
-            </span>
-          </div>
-        </div>
-      </div>
-
-      {/* Middle: Activity + Alerts */}
-      <div className="mt-6 grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {/* Activity Feed (2/3 width) */}
-        <div className="lg:col-span-2 rounded-xl border border-gray-800 bg-[#111118] p-4">
-          <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">⚡ Live Activity</h2>
-          <ActivityFeed initialEvents={initialActivity} />
-        </div>
-
-        {/* Alerts (1/3 width) */}
-        <div className="rounded-xl border border-gray-800 bg-[#111118] p-4">
-          <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">
-            🔔 Alerts
-          </h2>
-          {!hasAlerts ? (
-            <div className="flex items-center gap-2 text-sm text-green-400 py-4 justify-center">
-              <span className="h-2 w-2 rounded-full bg-green-500" />
-              All clear
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {failedTasks.map((t) => (
-                <div key={t.id} className="rounded-lg border border-red-500/20 bg-red-500/5 px-3 py-2">
-                  <p className="text-xs text-red-400 font-medium">{t.title}</p>
-                  <p className="text-xs text-red-500/60 mt-0.5">
-                    {AGENT_EMOJI[t.agent] || "🤖"} {t.agent} · {timeAgo(t.completed_at)}
-                  </p>
-                </div>
-              ))}
-              {errorCrons.map((c) => (
-                <div key={c.name} className="rounded-lg border border-orange-500/20 bg-orange-500/5 px-3 py-2">
-                  <p className="text-xs text-orange-400 font-medium">{c.name}</p>
-                  <p className="text-xs text-orange-500/60 mt-0.5 line-clamp-1">{c.error || "error"}</p>
-                </div>
-              ))}
-              {budgetPct > 80 && (
-                <div className="rounded-lg border border-yellow-500/20 bg-yellow-500/5 px-3 py-2">
-                  <p className="text-xs text-yellow-400 font-medium">Budget Warning</p>
-                  <p className="text-xs text-yellow-500/60 mt-0.5">
-                    {budgetPct.toFixed(0)}% of daily budget used (${fmt(todayCost)} / ${fmt(dailyBudget)})
-                  </p>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Active Projects */}
-      {projectProgress.length > 0 && (
-        <div className="mt-6">
-          <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">📐 Active Projects</h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-            {projectProgress.map((p) => {
-              const pct = p.total > 0 ? Math.round((p.done / p.total) * 100) : 0;
-              return (
-                <div key={p.id} className="rounded-xl border border-gray-800 bg-[#111118] px-4 py-3">
-                  <p className="text-sm font-medium text-white truncate">{p.title}</p>
-                  <div className="mt-2 flex items-center gap-2">
-                    <div className="flex-1 h-1.5 rounded-full bg-gray-800 overflow-hidden">
-                      <div className="h-full bg-green-500 transition-all" style={{ width: `${pct}%` }} />
-                    </div>
-                    <span className="text-xs text-gray-500">{p.done}/{p.total}</span>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
+        <Panel title="Refs que traen diagnóstico" eyebrow="Top landing refs · 30d">
+          <KeyCountList items={topRefs} empty="Sin refs registradas." />
+        </Panel>
+      </section>
     </div>
   );
+}
+
+function PyramidStep({
+  step,
+  width,
+  showConversion,
+}: {
+  step: BusinessOverviewProps["funnel"][number];
+  width: number;
+  showConversion: boolean;
+}) {
+  return (
+    <div className="flex w-full flex-col items-center">
+      {showConversion && (
+        <div className="mb-2 rounded-full border border-white/10 bg-black/30 px-3 py-1 text-[11px] font-semibold text-emerald-200/85">
+          {step.conversionFromPrevious === null ? "sin tracking" : formatPercent(step.conversionFromPrevious)}
+        </div>
+      )}
+      <div
+        className="relative overflow-hidden rounded-[1.6rem] border border-white/10 bg-gradient-to-br from-emerald-400/18 via-sky-400/12 to-white/[0.03] px-5 py-5 text-center shadow-lg shadow-black/20"
+        style={{ width: `${width}%` }}
+      >
+        <div className="absolute inset-x-8 top-0 h-px bg-gradient-to-r from-transparent via-white/40 to-transparent" />
+        <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-gray-400">{step.label}</p>
+        <p className="mt-2 text-3xl font-semibold tracking-tight text-white md:text-4xl">
+          {formatValue(step.value)}{step.suffix ? <span className="ml-1 text-base text-gray-400">{step.suffix}</span> : null}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function MetricCard({ label, value, highlight = false }: { label: string; value: number | null; highlight?: boolean }) {
+  return (
+    <div className={`rounded-2xl border p-4 ${highlight ? "border-emerald-400/25 bg-emerald-400/10" : "border-white/10 bg-[#111118]"}`}>
+      <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-gray-500">{label}</p>
+      <p className="mt-2 text-2xl font-semibold text-white">{formatValue(value)}</p>
+    </div>
+  );
+}
+
+function Panel({ title, eyebrow, children }: { title: string; eyebrow: string; children: React.ReactNode }) {
+  return (
+    <section className="rounded-3xl border border-white/10 bg-[#111118] p-5">
+      <p className="text-xs font-semibold uppercase tracking-[0.22em] text-gray-500">{eyebrow}</p>
+      <h2 className="mt-1 text-lg font-semibold text-white">{title}</h2>
+      <div className="mt-4">{children}</div>
+    </section>
+  );
+}
+
+function KeyCountList({ items, empty }: { items: Array<{ key: string; count: number }>; empty: string }) {
+  if (items.length === 0) return <p className="text-sm text-gray-500">{empty}</p>;
+  const max = Math.max(...items.map((item) => item.count), 1);
+  return (
+    <div className="space-y-3">
+      {items.map((item) => (
+        <div key={item.key}>
+          <div className="mb-1 flex items-center justify-between gap-3 text-xs">
+            <span className="truncate text-gray-300">{item.key}</span>
+            <span className="font-semibold text-white">{formatValue(item.count)}</span>
+          </div>
+          <div className="h-1.5 overflow-hidden rounded-full bg-white/5">
+            <div className="h-full rounded-full bg-emerald-400/80" style={{ width: `${Math.max(6, (item.count / max) * 100)}%` }} />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function formatValue(value: number | null | undefined) {
+  if (value === null || value === undefined) return "—";
+  return Math.round(value).toLocaleString("es-ES");
+}
+
+function formatPercent(value: number) {
+  return `${value.toLocaleString("es-ES", { maximumFractionDigits: 1 })}%`;
+}
+
+function formatDate(value: string | null | undefined) {
+  if (!value) return "—";
+  return new Intl.DateTimeFormat("es-ES", { day: "2-digit", month: "short", year: "numeric" }).format(new Date(value));
 }

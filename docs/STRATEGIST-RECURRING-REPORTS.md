@@ -41,8 +41,10 @@ Report tasks should read Mission Control canonical tables:
 - `ops_youtube_short_daily`
 - `ops_community_daily`
 - `ops_youtube_comments`
-- `intel_items_raw`
-- `intel_trend_daily`
+
+The primary daily field is `ops_daily_snapshots.academy_json.diagnostic`.
+Routine trends, Intel Inbox, broad rankings, and mandatory director-task fan-out are no longer part of the daily reporting contract.
+Weekly/monthly reports may reference broader sources only when they materially change a diagnostic funnel, audience, offer, or revenue decision.
 
 Legacy Academy `daily_digest` is archival and must not be a new-report source.
 

@@ -1,3 +1,6 @@
+import { isLocalAuthDisabled } from "@/lib/auth/local";
+import { normalizeRows } from "@/lib/db/mission-control";
+import { query } from "@/lib/db/postgres";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { GuidesClient } from "@/components/guides/GuidesClient";
 import { COMPACT_LINKED_WORK_ITEM_SELECT, compactWorkItemRow } from "@/lib/work-items/compact-payload";
@@ -41,29 +44,27 @@ export interface LinkedWorkItem {
 }
 
 export default async function GuidesPage() {
-  const [{ data, error }, { data: workItems, error: workError }] = await Promise.all([
-    supabaseAdmin
-      .from("pipeline_items")
-      .select(COMPACT_EDITORIAL_PIPELINE_SELECT)
-      .in("pipeline_type", ["doc", "guide"])
-      .order("created_at", { ascending: false }),
-    supabaseAdmin
-      .from("work_items")
-      .select(COMPACT_LINKED_WORK_ITEM_SELECT)
-      .in("source_type", ["pipeline_item", "service"])
-      .in("payload->>pipeline_type", ["doc", "guide"])
-      .order("created_at", { ascending: false }),
-  ]);
+  const useLocalMode = isLocalAuthDisabled();
 
-  if (error) {
-    console.error("[GuidesPage] Failed to fetch guide items:", error);
-  }
-  if (workError) {
-    console.error("[GuidesPage] Failed to fetch work items:", workError);
-  }
+  const [pipelineRows, workRows] = useLocalMode
+    ? await Promise.all([
+        query<Record<string, unknown>>(`select * from pipeline_items where pipeline_type = any($1::text[]) order by created_at desc`, [["doc", "guide"]]),
+        query<Record<string, unknown>>(`select * from work_items where source_type = any($1::text[]) and payload ->> 'pipeline_type' = any($2::text[]) order by created_at desc`, [["pipeline_item", "service"], ["doc", "guide"]]),
+      ])
+    : await Promise.all([
+        supabaseAdmin
+          .from("pipeline_items")
+          .select(COMPACT_EDITORIAL_PIPELINE_SELECT)
+          .in("pipeline_type", ["doc", "guide"]),
+        supabaseAdmin
+          .from("work_items")
+          .select(COMPACT_LINKED_WORK_ITEM_SELECT)
+          .in("source_type", ["pipeline_item", "service"])
+          .in("payload->>pipeline_type", ["doc", "guide"]),
+      ]);
 
-  const guides = (data ?? []).map((item) => compactEditorialPipelineItem(item as unknown as Record<string, unknown>)) as unknown as GuideItem[];
-  const linkedWorkItems = (workItems ?? []).map((item) => compactWorkItemRow(item as unknown as Record<string, unknown>)).filter((item) => {
+  const guides = normalizeRows(((pipelineRows as { rows?: Record<string, unknown>[]; data?: Record<string, unknown>[] }).rows ?? (pipelineRows as { data?: Record<string, unknown>[] }).data ?? [])).map((item) => compactEditorialPipelineItem(item as unknown as Record<string, unknown>)) as unknown as GuideItem[];
+  const linkedWorkItems = normalizeRows(((workRows as { rows?: Record<string, unknown>[]; data?: Record<string, unknown>[] }).rows ?? (workRows as { data?: Record<string, unknown>[] }).data ?? [])).map((item) => compactWorkItemRow(item as unknown as Record<string, unknown>)).filter((item) => {
     const payload = item.payload || {};
     const isLegacyManualTransition = item.source_type === "service" && payload.trigger === "manual_transition";
     return ["doc", "guide"].includes(String(payload.pipeline_type)) && !isLegacyManualTransition;

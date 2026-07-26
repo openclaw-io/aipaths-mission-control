@@ -1,6 +1,8 @@
+import { isLocalAuthDisabled } from "@/lib/auth/local";
+import { normalizeRows } from "@/lib/db/mission-control";
+import { query } from "@/lib/db/postgres";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { YouTubeDecisionBoard } from "@/components/youtube/YouTubeDecisionBoard";
-import { COMPACT_LINKED_WORK_ITEM_SELECT, compactWorkItemRow } from "@/lib/work-items/compact-payload";
 
 export const dynamic = "force-dynamic";
 
@@ -40,32 +42,60 @@ export interface LinkedWorkItem {
 }
 
 export default async function YouTubePage() {
-  const [{ data, error }, { data: workItems, error: workError }] = await Promise.all([
-    supabaseAdmin
-      .from("pipeline_items")
-      .select("id, pipeline_type, title, slug, status, priority, owner_agent, requested_by, source_type, source_id, scheduled_for, published_at, current_url, content_path, content_format, metadata, created_at, updated_at")
-      .eq("pipeline_type", "video")
-      .order("created_at", { ascending: false }),
-    supabaseAdmin
-      .from("work_items")
-      .select(COMPACT_LINKED_WORK_ITEM_SELECT)
-      .in("source_type", ["pipeline_item", "service"])
-      .eq("payload->>pipeline_type", "video")
-      .order("created_at", { ascending: false }),
-  ]);
+  const localSupabasePlaceholder = isLocalSupabasePlaceholder();
 
-  if (error) {
-    console.error("[YouTubePage] Failed to fetch video items:", error);
-  }
-  if (workError) {
-    console.error("[YouTubePage] Failed to fetch work items:", workError);
-  }
+  let videos: VideoPipelineItem[] = [];
+  let linkedWorkItems: LinkedWorkItem[] = [];
 
-  const videos: VideoPipelineItem[] = data ?? [];
-  const linkedWorkItems = (workItems ?? []).map((item) => compactWorkItemRow(item as unknown as Record<string, unknown>)).filter((item) => {
-    const payload = item.payload || {};
-    return payload.pipeline_type === "video";
-  }) as unknown as LinkedWorkItem[];
+  if (localSupabasePlaceholder) {
+    const [videoRes, workRes] = await Promise.all([
+      query<VideoPipelineItem>(
+        `select id, pipeline_type, title, slug, status, priority, owner_agent, requested_by, source_type, source_id, scheduled_for, published_at, current_url, content_path, content_format, metadata, created_at, updated_at
+           from pipeline_items
+          where pipeline_type = 'video'
+          order by created_at desc`,
+      ),
+      query<LinkedWorkItem>(
+        `select id, source_id, source_type, title, status, owner_agent, target_agent_id, created_at, scheduled_for, payload
+           from work_items
+          where source_type = any($1::text[])
+            and payload ->> 'pipeline_type' = 'video'
+          order by created_at desc`,
+        [["pipeline_item", "service"]],
+      ),
+    ]);
+
+    videos = normalizeRows(videoRes.rows as VideoPipelineItem[]);
+    linkedWorkItems = normalizeRows(workRes.rows as LinkedWorkItem[]);
+  } else {
+    const [{ data, error }, { data: workItems, error: workError }] = await Promise.all([
+      supabaseAdmin
+        .from("pipeline_items")
+        .select("id, pipeline_type, title, slug, status, priority, owner_agent, requested_by, source_type, source_id, scheduled_for, published_at, current_url, content_path, content_format, metadata, created_at, updated_at")
+        .eq("pipeline_type", "video")
+        .order("created_at", { ascending: false }),
+      supabaseAdmin
+        .from("work_items")
+        .select("id,source_id,source_type,title,status,owner_agent,target_agent_id,created_at,scheduled_for,payload")
+        .in("source_type", ["pipeline_item", "service"])
+        .eq("payload->>pipeline_type", "video")
+        .order("created_at", { ascending: false }),
+    ]);
+
+    if (error) {
+      console.error("[YouTubePage] Failed to fetch video items:", error);
+    }
+    if (workError) {
+      console.error("[YouTubePage] Failed to fetch work items:", workError);
+    }
+
+    videos = (data ?? []) as VideoPipelineItem[];
+    linkedWorkItems = (workItems ?? []) as unknown as LinkedWorkItem[];
+  }
 
   return <YouTubeDecisionBoard initialItems={videos} initialWorkItems={linkedWorkItems} />;
+}
+
+function isLocalSupabasePlaceholder() {
+  return isLocalAuthDisabled();
 }

@@ -1,3 +1,6 @@
+import { isLocalAuthDisabled } from "@/lib/auth/local";
+import { normalizeRows } from "@/lib/db/mission-control";
+import { query } from "@/lib/db/postgres";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { CommunityClient } from "@/components/community/CommunityClient";
 import { COMPACT_LINKED_WORK_ITEM_SELECT, compactWorkItemRow } from "@/lib/work-items/compact-payload";
@@ -39,29 +42,26 @@ export interface LinkedWorkItem {
 }
 
 export default async function CommunityPage() {
-  const [{ data, error }, { data: workItems, error: workError }] = await Promise.all([
-    supabaseAdmin
-      .from("pipeline_items")
-      .select(COMPACT_COMMUNITY_PIPELINE_SELECT)
-      .eq("pipeline_type", "community_post")
-      .order("created_at", { ascending: false }),
-    supabaseAdmin
-      .from("work_items")
-      .select(COMPACT_LINKED_WORK_ITEM_SELECT)
-      .in("source_type", ["pipeline_item", "service"])
-      .eq("payload->>pipeline_type", "community_post")
-      .order("created_at", { ascending: false }),
-  ]);
+  const useLocalMode = isLocalAuthDisabled();
 
-  if (error) {
-    console.error("[CommunityPage] Failed to fetch community items:", error);
-  }
-  if (workError) {
-    console.error("[CommunityPage] Failed to fetch work items:", workError);
-  }
+  const [pipelineRows, workRows] = useLocalMode
+    ? await Promise.all([
+        query<Record<string, unknown>>(`select * from pipeline_items where pipeline_type = 'community_post' order by created_at desc`),
+        query<Record<string, unknown>>(`select * from work_items where source_type = any($1::text[]) and payload ->> 'pipeline_type' = 'community_post' order by created_at desc`, [["pipeline_item", "service"]]),
+      ])
+    : await Promise.all([
+        supabaseAdmin
+          .from("pipeline_items")
+          .select(COMPACT_COMMUNITY_PIPELINE_SELECT),
+        supabaseAdmin
+          .from("work_items")
+          .select(COMPACT_LINKED_WORK_ITEM_SELECT)
+          .in("source_type", ["pipeline_item", "service"])
+          .eq("payload->>pipeline_type", "community_post"),
+      ]);
 
-  const communityItems = (data ?? []).map((item) => compactCommunityPipelineItem(item as unknown as Record<string, unknown>)) as unknown as CommunityItem[];
-  const linkedWorkItems = (workItems ?? []).map((item) => compactWorkItemRow(item as unknown as Record<string, unknown>)).filter((item) => {
+  const communityItems = normalizeRows(((pipelineRows as { rows?: Record<string, unknown>[]; data?: Record<string, unknown>[] }).rows ?? (pipelineRows as { data?: Record<string, unknown>[] }).data ?? [])).map((item) => compactCommunityPipelineItem(item as unknown as Record<string, unknown>)) as unknown as CommunityItem[];
+  const linkedWorkItems = normalizeRows(((workRows as { rows?: Record<string, unknown>[]; data?: Record<string, unknown>[] }).rows ?? (workRows as { data?: Record<string, unknown>[] }).data ?? [])).map((item) => compactWorkItemRow(item as unknown as Record<string, unknown>)).filter((item) => {
     const payload = item.payload || {};
     return payload.pipeline_type === "community_post";
   }) as unknown as LinkedWorkItem[];

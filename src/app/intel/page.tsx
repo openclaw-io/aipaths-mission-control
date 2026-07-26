@@ -1,3 +1,4 @@
+import { getLocalMissionControlUser, isLocalAuthDisabled } from "@/lib/auth/local";
 import { createClient } from "@/lib/supabase/server";
 import { ContentInboxClient } from "@/components/content/ContentInboxClient";
 import { getIntelInboxDetail, getIntelInboxHealth, listIntelInbox } from "@/lib/intel-inbox";
@@ -21,10 +22,10 @@ export default async function IntelInboxPage({
 }: {
   searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }) {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const useLocalMode = isLocalAuthDisabled();
+  const user = useLocalMode
+    ? getLocalMissionControlUser()
+    : (await (await createClient()).auth.getUser()).data.user;
 
   if (!user) {
     return null;

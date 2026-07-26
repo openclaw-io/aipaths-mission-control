@@ -1,8 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { createClient } from "@/lib/supabase/client";
-import { COMPACT_WORK_ITEM_SELECT, compactWorkItemRow } from "@/lib/work-items/compact-payload";
 
 export interface SuggestionItem {
   id: string;
@@ -56,7 +54,8 @@ function sortByRiskThenCreated(a: SuggestionItem, b: SuggestionItem) {
   return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
 }
 
-const FALLBACK_REFRESH_MS = 90_000;
+const FALLBACK_REFRESH_MS = 300_000;
+const MIN_AUTO_REFRESH_GAP_MS = 60_000;
 
 export function SuggestionsClient({ initialItems }: { initialItems: SuggestionItem[] }) {
   const [items, setItems] = useState(initialItems);
@@ -67,70 +66,45 @@ export function SuggestionsClient({ initialItems }: { initialItems: SuggestionIt
   const [lastRefreshAt, setLastRefreshAt] = useState<Date | null>(null);
   const [error, setError] = useState<string | null>(null);
   const refreshInFlightRef = useRef(false);
-  const supabase = useMemo(() => createClient(), []);
+  const lastRefreshAtRef = useRef<number>(0);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (options: { force?: boolean; source?: "focus" | "timer" } = {}) => {
     if (refreshInFlightRef.current) return;
+    const nowTs = Date.now();
+    if (!options.force && options.source === "focus" && lastRefreshAtRef.current && nowTs - lastRefreshAtRef.current < MIN_AUTO_REFRESH_GAP_MS) return;
     refreshInFlightRef.current = true;
     setRefreshing(true);
     try {
-      const { data, error: refreshError } = await supabase
-        .from("work_items")
-        .select(COMPACT_WORK_ITEM_SELECT)
-        .in("status", ["blocked", "draft"])
-        .eq("payload->>requires_human_approval", "true")
-        .order("created_at", { ascending: false })
-        .limit(200);
-      if (refreshError) return;
-      setItems((data || []).map((item) => compactWorkItemRow(item as unknown as Record<string, unknown>)) as unknown as SuggestionItem[]);
-      setLastRefreshAt(new Date());
+      const body = await fetch("/api/work-items/suggestions", { cache: "no-store" })
+        .then((res) => res.ok ? res.json() : null)
+        .catch(() => null);
+      if (!body?.items) return;
+      setItems(body.items as SuggestionItem[]);
+      lastRefreshAtRef.current = Date.now();
+      setLastRefreshAt(new Date(lastRefreshAtRef.current));
     } finally {
       refreshInFlightRef.current = false;
       setRefreshing(false);
     }
-  }, [supabase]);
+  }, []);
 
   useEffect(() => {
-    const upsertOrRemove = (item: SuggestionItem) => {
-      setItems((current) => {
-        if (!isPendingSuggestion(item)) return current.filter((candidate) => candidate.id !== item.id);
-        const index = current.findIndex((candidate) => candidate.id === item.id);
-        if (index === -1) return [item, ...current].slice(0, 200);
-        const next = [...current];
-        next[index] = { ...next[index], ...item };
-        return next;
-      });
-    };
-
-    const channel = supabase
-      .channel("suggestions-work-items")
-      .on("postgres_changes", { event: "*", schema: "public", table: "work_items" }, (payload) => {
-        if (payload.eventType === "DELETE") {
-          const item = payload.old as { id?: string };
-          if (item.id) setItems((current) => current.filter((candidate) => candidate.id !== item.id));
-          return;
-        }
-        upsertOrRemove(payload.new as SuggestionItem);
-      })
-      .subscribe();
-
     const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") void refresh();
+      if (document.visibilityState === "visible") void refresh({ source: "timer" });
     }, FALLBACK_REFRESH_MS);
 
     const handleVisibleRefresh = () => {
-      if (document.visibilityState === "visible") void refresh();
+      if (document.visibilityState === "visible") void refresh({ source: "focus" });
     };
     window.addEventListener("focus", handleVisibleRefresh);
     document.addEventListener("visibilitychange", handleVisibleRefresh);
 
     return () => {
-      supabase.removeChannel(channel);
       window.clearInterval(timer);
       window.removeEventListener("focus", handleVisibleRefresh);
       document.removeEventListener("visibilitychange", handleVisibleRefresh);
     };
-  }, [refresh, supabase]);
+  }, [refresh]);
 
   const agents = useMemo(() => Array.from(new Set(items.map(agentFor))).sort(), [items]);
   const risks = useMemo(() => Array.from(new Set(items.map((item) => payloadString(item.payload, "risk") || "unknown"))).sort(), [items]);
@@ -176,7 +150,7 @@ export function SuggestionsClient({ initialItems }: { initialItems: SuggestionIt
         </select>
         <button
           type="button"
-          onClick={() => refresh()}
+          onClick={() => refresh({ force: true })}
           disabled={refreshing}
           className="rounded-lg border border-gray-700 bg-white/[0.03] px-3 py-1.5 text-sm font-medium text-gray-300 transition hover:border-gray-600 hover:bg-white/[0.06] hover:text-white disabled:cursor-wait disabled:opacity-60"
           title={lastRefreshAt ? `Last refreshed ${formatDate(lastRefreshAt.toISOString())}` : "Refresh suggestions"}

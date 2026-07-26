@@ -1,4 +1,8 @@
+import type { PoolClient } from "pg";
 import { NextResponse, type NextRequest } from "next/server";
+import { getLocalMissionControlUser, isLocalAuthDisabled } from "@/lib/auth/local";
+import { createPipelineWorkItemLocal, getPipelineItemLocal, updatePipelineItemLocal, withLockedPipelineItemLocal } from "@/lib/db/pipeline-local";
+import { resolvePublicationSlotLocal } from "@/lib/publication/scheduling-local";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/admin";
 import { createPipelineWorkItem } from "@/lib/work-items/pipeline-materializer";
@@ -164,6 +168,20 @@ async function resolveBlogPublishSchedule(db: ReturnType<typeof createServiceCli
   });
 }
 
+async function resolveBlogPublishScheduleLocal(item: BlogTransitionItem, client?: Pick<PoolClient, "query">) {
+  const metadata = item.metadata || {};
+  const explicitScheduledFor =
+    getNestedString(metadata, ["final_check", "scheduled_for"]) ||
+    getNestedString(metadata, ["final_package", "publish_assets", "scheduled_for"]);
+
+  return resolvePublicationSlotLocal({
+    explicitScheduledFor,
+    existingScheduledFor: item.scheduled_for || getNestedString(metadata, ["schedule", "scheduled_for"]),
+    pipelineItemId: item.id,
+    client,
+  });
+}
+
 function createPublishInstruction(item: BlogTransitionItem) {
   const metadata = item.metadata || {};
   const slug = typeof item.slug === "string" ? item.slug : null;
@@ -285,16 +303,121 @@ async function ensurePublishWorkItem(db: ReturnType<typeof createServiceClient>,
   return publishWorkItem;
 }
 
+async function ensurePublishWorkItemLocal(
+  client: Pick<PoolClient, "query">,
+  item: BlogTransitionItem,
+  requestedBy: string,
+  scheduledFor: string,
+) {
+  await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [`blog-publish:${item.id}`]);
+  const existingRows = await client.query<{ id: string; status: string; payload: Record<string, unknown> | null }>(
+    `select id, status, payload
+       from work_items
+      where source_type = any($1::text[])
+        and source_id = $2
+        and status = any($3::text[])
+        and payload ->> 'action' = 'publish_blog'
+      order by created_at desc
+      limit 1`,
+    [["pipeline_item", "service"], item.id, ["draft", "ready", "blocked", "in_progress"]],
+  );
+  const existingPublish = existingRows.rows[0];
+  const publishPayload = {
+    ...((existingPublish?.payload || {}) as Record<string, unknown>),
+    trigger: "blog_final_check_approved",
+    pipeline_type: "blog",
+    pipeline_item_id: item.id,
+    relation_type: "publish",
+    action: "publish_blog",
+    schedule_kind: "publication",
+    dedupe_key: `${item.id}:publish_blog`,
+  };
+
+  let publishWorkItem: { id: string; status: string; payload: Record<string, unknown> | null };
+  if (existingPublish?.id) {
+    const updatedRows = await client.query<{ id: string; status: string; payload: Record<string, unknown> | null }>(
+      `update work_items
+          set title = $1, instruction = $2, status = $3, scheduled_for = $4,
+              priority = $5, owner_agent = 'dev', target_agent_id = 'dev',
+              requested_by = $6, payload = $7::jsonb, updated_at = $8
+        where id = $9
+        returning id, status, payload`,
+      [
+        `Publish blog: ${item.title}`,
+        createPublishInstruction(item),
+        existingPublish.status === "in_progress" ? "in_progress" : "ready",
+        scheduledFor,
+        item.priority || "medium",
+        requestedBy,
+        JSON.stringify(publishPayload),
+        new Date().toISOString(),
+        existingPublish.id,
+      ],
+    );
+    publishWorkItem = updatedRows.rows[0];
+  } else {
+    const insertedRows = await client.query<{ id: string; status: string; payload: Record<string, unknown> | null }>(
+      `insert into work_items (
+         kind, source_type, source_id, title, instruction, status, scheduled_for,
+         priority, owner_agent, target_agent_id, requested_by, payload
+       ) values (
+         'task', 'service', $1, $2, $3, 'ready', $4,
+         $5, 'dev', 'dev', $6, $7::jsonb
+       )
+       returning id, status, payload`,
+      [item.id, `Publish blog: ${item.title}`, createPublishInstruction(item), scheduledFor, item.priority || "medium", requestedBy, JSON.stringify(publishPayload)],
+    );
+    publishWorkItem = insertedRows.rows[0];
+  }
+
+  await client.query(
+    `insert into pipeline_work_map (pipeline_item_id, work_item_id, relation_type)
+     values ($1, $2, 'publish')
+     on conflict (pipeline_item_id, work_item_id, relation_type) do nothing`,
+    [item.id, publishWorkItem.id],
+  );
+  await client.query(
+    `insert into event_log (domain, event_type, entity_type, entity_id, actor, payload)
+     select 'work', 'work_item.publication_prepared', 'work_item', $1, 'blog-final-check', $2::jsonb
+      where not exists (
+        select 1 from event_log
+         where event_type = 'work_item.publication_prepared'
+           and entity_type = 'work_item'
+           and entity_id = $1
+           and payload ->> 'dedupe_key' = $3
+      )`,
+    [
+      publishWorkItem.id,
+      JSON.stringify({
+        pipeline_type: "blog",
+        pipeline_item_id: item.id,
+        action: "publish_blog",
+        scheduled_for: scheduledFor,
+        dedupe_key: `${item.id}:publish_blog`,
+      }),
+      `${item.id}:publish_blog`,
+    ],
+  );
+  return publishWorkItem;
+}
+
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const supabase = await createClient();
-  const db = createServiceClient();
+  const useLocalMode = isLocalAuthDisabled();
+  const supabase = useLocalMode ? null : await createClient();
+  const db = useLocalMode ? null : createServiceClient();
+  const actor = useLocalMode ? getLocalMissionControlUser() : null;
 
-  const { data: { user } } = await supabase.auth.getUser();
+  let user: { email?: string | null; id?: string | null } | null = actor ? { email: actor.email, id: actor.email } : null;
+  if (!useLocalMode) {
+    const authResult = await supabase!.auth.getUser();
+    user = authResult.data.user;
+  }
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const actorIdentity = String(user.email || user.id || "local@mission-control");
 
   const { action, reviewNotes, current_url } = await request.json();
   const targetStatus = ACTION_TARGET[action];
@@ -302,15 +425,21 @@ export async function POST(
     return NextResponse.json({ error: "Invalid action" }, { status: 400 });
   }
 
-  const { data: item, error: fetchError } = await db
-    .from("pipeline_items")
-    .select("*")
-    .eq("id", id)
-    .eq("pipeline_type", "blog")
-    .single();
+  const item = useLocalMode
+    ? await getPipelineItemLocal(id, "blog")
+    : await (async () => {
+        const { data, error } = await db!
+          .from("pipeline_items")
+          .select("*")
+          .eq("id", id)
+          .eq("pipeline_type", "blog")
+          .single();
+        if (error) throw new Error(error.message);
+        return data;
+      })().catch(() => null);
 
-  if (fetchError || !item) {
-    return NextResponse.json({ error: fetchError?.message || "Blog item not found" }, { status: 404 });
+  if (!item) {
+    return NextResponse.json({ error: "Blog item not found" }, { status: 404 });
   }
 
   const allowedTargets = ALLOWED[item.status] || [];
@@ -322,47 +451,130 @@ export async function POST(
     return NextResponse.json({ error: "reviewNotes is required" }, { status: 400 });
   }
 
-  const metadata = {
-    ...(item.metadata || {}),
+  const buildMetadata = (transitionItem: BlogTransitionItem) => ({
+    ...(transitionItem.metadata || {}),
     ...(action === "request_changes"
       ? {
           review: {
             notes: String(reviewNotes).trim(),
             last_requested_at: new Date().toISOString(),
-            last_requested_by: user.email || user.id,
+            last_requested_by: actorIdentity,
           },
         }
       : {}),
     ...(action === "request_final_changes"
       ? {
           final_check: {
-            ...(((item.metadata || {}) as Record<string, unknown>).final_check as Record<string, unknown> | undefined || {}),
+            ...(((transitionItem.metadata || {}) as Record<string, unknown>).final_check as Record<string, unknown> | undefined || {}),
             status: "changes_requested",
             notes: String(reviewNotes).trim(),
             last_requested_at: new Date().toISOString(),
-            last_requested_by: user.email || user.id,
+            last_requested_by: actorIdentity,
           },
         }
       : {}),
     ...(action === "approve_final"
       ? {
           final_check: {
-            ...(((item.metadata || {}) as Record<string, unknown>).final_check as Record<string, unknown> | undefined || {}),
+            ...(((transitionItem.metadata || {}) as Record<string, unknown>).final_check as Record<string, unknown> | undefined || {}),
             status: "approved",
             approved_at: new Date().toISOString(),
-            approved_by: user.email || user.id,
+            approved_by: actorIdentity,
           },
         }
       : {}),
-  };
+  });
+  const metadata = buildMetadata(item);
 
-  const publishSchedule = action === "approve_final" ? await resolveBlogPublishSchedule(db, item) : null;
+  if (useLocalMode) {
+    try {
+      const localResult = await withLockedPipelineItemLocal(id, ["blog"], async ({ client, item: lockedRow }) => {
+        const lockedItem = lockedRow as unknown as BlogTransitionItem & { status: string; owner_agent?: string | null; updated_at?: string | null };
+        if (String(lockedItem.updated_at || "") !== String(item.updated_at || "")) {
+          throw new Error("Concurrent blog transition detected");
+        }
+        if (!(ALLOWED[lockedItem.status] || []).includes(targetStatus)) {
+          throw new Error(`Action ${action} not allowed from ${lockedItem.status}`);
+        }
+
+        const localMetadata = buildMetadata(lockedItem);
+        const localSchedule = action === "approve_final"
+          ? await resolveBlogPublishScheduleLocal(lockedItem, client)
+          : null;
+        const localScheduledFor = localSchedule?.scheduledFor || null;
+        const publishWorkItem = action === "approve_final" && localScheduledFor
+          ? await ensurePublishWorkItemLocal(client, lockedItem, actorIdentity, localScheduledFor)
+          : null;
+        const localUpdatePayload: Record<string, unknown> = {
+          status: targetStatus,
+          owner_agent: action === "approve" ? "content" : lockedItem.owner_agent || "content",
+          metadata: action === "approve_final" && localScheduledFor
+            ? {
+                ...localMetadata,
+                schedule: {
+                  ...((((localMetadata as unknown as Record<string, unknown>).schedule as Record<string, unknown> | undefined) || {})),
+                  scheduled_for: localScheduledFor,
+                  scheduled_at: new Date().toISOString(),
+                  scheduled_by: actorIdentity,
+                  source: localSchedule?.source || "auto_allocated",
+                  publish_work_item_id: publishWorkItem?.id || null,
+                },
+                final_check: {
+                  ...((localMetadata.final_check || {}) as Record<string, unknown>),
+                  publish_work_item_id: publishWorkItem?.id || null,
+                },
+              }
+            : localMetadata,
+          updated_at: new Date().toISOString(),
+        };
+        if (action === "approve_final" && localScheduledFor) localUpdatePayload.scheduled_for = localScheduledFor;
+        if (action === "mark_live") {
+          localUpdatePayload.published_at = new Date().toISOString();
+          localUpdatePayload.current_url = current_url || null;
+        }
+
+        const updatedItem = await updatePipelineItemLocal(id, localUpdatePayload, client);
+        let notify: { id: string; agent: string; title: string } | null = null;
+        if (["promote", "request_changes", "approve", "request_final_changes"].includes(action)) {
+          const relationType = action === "promote" ? "investigate" : "followup";
+          const actionName = action === "approve" || action === "request_final_changes"
+            ? "localize_blog_to_en"
+            : action === "promote" ? "develop_blog_draft" : "revise_blog_draft";
+          const { workItem } = await createPipelineWorkItemLocal({
+            pipelineItemId: lockedItem.id,
+            pipelineType: "blog",
+            title: createWorkItemTitle(action, lockedItem.title),
+            instruction: createWorkItemInstruction(action, lockedItem, reviewNotes),
+            priority: lockedItem.priority || "medium",
+            ownerAgent: "content",
+            requestedBy: actorIdentity,
+            relationType,
+            action: actionName,
+            trigger: "manual_transition",
+            reviewNotes: action === "request_changes" || action === "request_final_changes" ? String(reviewNotes).trim() : undefined,
+          }, client);
+          if (workItem?.id) notify = { id: workItem.id, agent: "content", title: lockedItem.title };
+        }
+        return { updatedItem, notify };
+      });
+      if (!localResult?.updatedItem) return NextResponse.json({ error: "Failed to update blog item" }, { status: 500 });
+      if (localResult.notify) void notifyWorkItem(localResult.notify.id, localResult.notify.agent, localResult.notify.title);
+      return NextResponse.json(localResult.updatedItem);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed local blog transition";
+      return NextResponse.json({ error: message }, { status: message.startsWith("Concurrent") ? 409 : 500 });
+    }
+  }
+
+  const publishSchedule = action === "approve_final"
+    ? await resolveBlogPublishSchedule(db!, item)
+    : null;
   const publishScheduledFor = publishSchedule?.scheduledFor || null;
   let publishWorkItemId: string | null = null;
 
   if (action === "approve_final" && publishScheduledFor) {
     try {
-      const publishWorkItem = await ensurePublishWorkItem(db, item, user.email || user.id, publishScheduledFor);
+      const publishWorkItem = await ensurePublishWorkItem(db!, item, actorIdentity, publishScheduledFor);
       publishWorkItemId = publishWorkItem?.id || null;
     } catch (err) {
       return NextResponse.json({ error: err instanceof Error ? err.message : "Failed to create publish work item" }, { status: 500 });
@@ -376,10 +588,10 @@ export async function POST(
       ? {
           ...metadata,
           schedule: {
-            ...(((metadata.schedule || {}) as Record<string, unknown>)),
+            ...((((metadata as unknown as Record<string, unknown>).schedule as Record<string, unknown> | undefined) || {})),
             scheduled_for: publishScheduledFor,
             scheduled_at: new Date().toISOString(),
-            scheduled_by: user.email || user.id,
+            scheduled_by: actorIdentity,
             source: publishSchedule?.source || "auto_allocated",
             publish_work_item_id: publishWorkItemId,
           },
@@ -401,15 +613,19 @@ export async function POST(
     updatePayload.current_url = current_url || null;
   }
 
-  const { data: updated, error: updateError } = await db
-    .from("pipeline_items")
-    .update(updatePayload)
-    .eq("id", id)
-    .select("id, pipeline_type, title, slug, status, priority, owner_agent, requested_by, source_type, source_id, published_at, current_url, metadata, created_at, updated_at")
-    .single();
+  const updated = await (async () => {
+        const { data, error } = await db!
+          .from("pipeline_items")
+          .update(updatePayload)
+          .eq("id", id)
+          .select("id, pipeline_type, title, slug, status, priority, owner_agent, requested_by, source_type, source_id, published_at, current_url, metadata, created_at, updated_at")
+          .single();
+        if (error) throw new Error(error.message);
+        return data;
+      })().catch(() => null);
 
-  if (updateError) {
-    return NextResponse.json({ error: updateError.message }, { status: 500 });
+  if (!updated) {
+    return NextResponse.json({ error: "Failed to update blog item" }, { status: 500 });
   }
 
   if (["promote", "request_changes", "approve", "request_final_changes"].includes(action)) {
@@ -417,19 +633,20 @@ export async function POST(
     const relationType = action === "promote" ? "investigate" : "followup";
     const actionName = action === "approve" || action === "request_final_changes" ? "localize_blog_to_en" : action === "promote" ? "develop_blog_draft" : "revise_blog_draft";
 
-    const { workItem } = await createPipelineWorkItem(db, {
+    const workInput = {
       pipelineItemId: item.id,
       pipelineType: "blog",
       title: createWorkItemTitle(action, item.title),
       instruction: createWorkItemInstruction(action, item, reviewNotes),
       priority: item.priority || "medium",
       ownerAgent: owner_agent,
-      requestedBy: user.email || user.id,
+      requestedBy: actorIdentity,
       relationType,
       action: actionName,
       trigger: "manual_transition",
       reviewNotes: action === "request_changes" || action === "request_final_changes" ? String(reviewNotes).trim() : undefined,
-    });
+    };
+    const { workItem } = await createPipelineWorkItem(db!, workInput);
 
     if (workItem?.id) {
       void notifyWorkItem(workItem.id, owner_agent, item.title);

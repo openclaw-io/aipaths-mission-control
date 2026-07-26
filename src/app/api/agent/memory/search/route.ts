@@ -1,6 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { createServiceClient } from "@/lib/supabase/admin";
-import { generateEmbedding } from "@/lib/embeddings";
+import { searchMemories } from "@/lib/db/mission-control";
 
 export const dynamic = "force-dynamic";
 
@@ -24,7 +23,6 @@ export async function POST(req: NextRequest) {
     query,
     agent,
     type,
-    threshold = 0.7,
     limit = 10,
   } = body;
 
@@ -32,41 +30,15 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "query required" }, { status: 400 });
   }
 
-  const supabase = createServiceClient();
-
-  // Try semantic search first
-  const embedding = await generateEmbedding(query);
-
-  if (embedding) {
-    const { data, error } = await supabase.rpc("match_memories", {
-      query_embedding: embedding,
-      match_threshold: threshold,
-      match_count: limit,
-      filter_agent: agent || null,
-      filter_type: type || null,
+  try {
+    const results = await searchMemories({
+      text: String(query),
+      agent: typeof agent === "string" ? agent : null,
+      type: typeof type === "string" ? type : null,
+      limit: Math.min(Number(limit) || 10, 50),
     });
-
-    if (error)
-      return NextResponse.json({ error: error.message }, { status: 500 });
-    return NextResponse.json({ results: data });
+    return NextResponse.json({ results });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "local_postgres_query_failed" }, { status: 500 });
   }
-
-  // Fallback: text search with ILIKE
-  let textQuery = supabase
-    .from("memories")
-    .select("id, agent, type, title, content, tags, date, created_at")
-    .ilike("content", `%${query}%`)
-    .order("date", { ascending: false })
-    .limit(limit);
-
-  if (agent) textQuery = textQuery.eq("agent", agent);
-  if (type) textQuery = textQuery.eq("type", type);
-
-  const { data, error } = await textQuery;
-
-  if (error)
-    return NextResponse.json({ error: error.message }, { status: 500 });
-
-  const results = (data ?? []).map((m) => ({ ...m, similarity: null }));
-  return NextResponse.json({ results });
 }

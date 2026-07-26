@@ -1,15 +1,36 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { supabaseAdmin } from "@/lib/supabase/admin";
-import { createDedupedSuggestion, type WorkItemSuggestionInput } from "@/lib/work-items/suggestions";
+import { getLocalMissionControlUser } from "@/lib/auth/local";
+import { createDedupedSuggestionLocal, getSuggestions, type JsonRecord } from "@/lib/db/mission-control";
 
 export const dynamic = "force-dynamic";
+
+type SuggestionRisk = "low" | "medium" | "high";
+
+interface WorkItemSuggestionInput {
+  title: string;
+  instruction: string;
+  dedupeKey: string;
+  ownerAgent?: string;
+  targetAgentId?: string;
+  requestedBy?: string;
+  priority?: string;
+  risk?: SuggestionRisk;
+  proposedAction?: string;
+  approvalPrompt?: string;
+  sourceType?: string;
+  sourceId?: string;
+  kind?: string;
+  status?: "draft" | "blocked";
+  scheduledFor?: string | null;
+  payload?: JsonRecord;
+}
 
 function checkAuth(req: NextRequest): boolean {
   const token = req.headers.get("authorization")?.replace("Bearer ", "");
   return !!token && token === process.env.AGENT_API_KEY;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+function isRecord(value: unknown): value is JsonRecord {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
@@ -44,6 +65,20 @@ function normalizeSuggestion(value: unknown): WorkItemSuggestionInput | null {
   };
 }
 
+export async function GET() {
+  const user = getLocalMissionControlUser();
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  try {
+    return NextResponse.json({ items: await getSuggestions() });
+  } catch (error) {
+    console.error("[api/work-items/suggestions] local Postgres query failed:", error);
+    return NextResponse.json({ error: error instanceof Error ? error.message : "local_postgres_query_failed" }, { status: 500 });
+  }
+}
+
 export async function POST(req: NextRequest) {
   if (!checkAuth(req)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
@@ -58,7 +93,7 @@ export async function POST(req: NextRequest) {
   try {
     const results = [];
     for (const suggestion of suggestions as WorkItemSuggestionInput[]) {
-      results.push(await createDedupedSuggestion(supabaseAdmin, suggestion));
+      results.push(await createDedupedSuggestionLocal(suggestion));
     }
     return NextResponse.json({ ok: true, results });
   } catch (error) {

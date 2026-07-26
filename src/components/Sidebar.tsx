@@ -1,17 +1,15 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { createClient } from "@/lib/supabase/client";
 
 const NAV_ITEMS = [
   { href: "/", label: "Overview", emoji: "📊" },
   { href: "/office", label: "Office", emoji: "🏢" },
   { href: "/agents", label: "Agents", emoji: "🤖" },
   { href: "/work-items", label: "Work Queue", emoji: "⚙️" },
+  { href: "/loops", label: "Loops", emoji: "🔁" },
   { href: "/suggestions", label: "Suggestions", emoji: "💡" },
-  { href: "/projects", label: "Projects", emoji: "📐" },
   { href: "/email-campaigns", label: "Email Campaigns", emoji: "📧" },
   { href: "/blogs", label: "Blogs", emoji: "✍️" },
   { href: "/youtube", label: "YouTube", emoji: "🎬" },
@@ -21,23 +19,19 @@ const NAV_ITEMS = [
   { href: "/intel", label: "Intel Inbox", emoji: "🧠" },
   { href: "/execution-window", label: "Execution Window", emoji: "🕒" },
   { href: "/costs", label: "Costs", emoji: "💰" },
+  { href: "/runtime", label: "Runtime", emoji: "🧭" },
   { href: "/crons", label: "Crons", emoji: "🕐" },
   { href: "/memory", label: "Memory", emoji: "🧠" },
 ];
 
-export default function Sidebar() {
+export default function Sidebar({ authEnabled }: { authEnabled: boolean }) {
   const pathname = usePathname();
   const router = useRouter();
-  const supabase = createClient();
-  const [userEmail, setUserEmail] = useState<string | null>(null);
-
-  useEffect(() => {
-    supabase.auth.getUser().then(({ data: { user } }) => {
-      setUserEmail(user?.email ?? null);
-    });
-  }, [supabase.auth]);
 
   async function handleSignOut() {
+    if (!authEnabled) return;
+    const { createClient } = await import("@/lib/supabase/client");
+    const supabase = createClient();
     await supabase.auth.signOut();
     router.push("/login");
     router.refresh();
@@ -73,18 +67,16 @@ export default function Sidebar() {
         })}
       </nav>
 
-      {/* Footer — User + Sign Out */}
-      <div className="border-t border-white/10 px-4 py-4">
-        {userEmail && (
-          <p className="mb-2 truncate text-xs text-gray-500">{userEmail}</p>
-        )}
-        <button
-          onClick={handleSignOut}
-          className="w-full rounded-lg px-3 py-2 text-sm text-gray-400 transition hover:bg-white/5 hover:text-white"
-        >
-          Sign Out
-        </button>
-      </div>
+      {authEnabled && (
+        <div className="border-t border-white/10 px-4 py-4">
+          <button
+            onClick={handleSignOut}
+            className="w-full rounded-lg px-3 py-2 text-sm text-gray-400 transition hover:bg-white/5 hover:text-white"
+          >
+            Sign Out
+          </button>
+        </div>
+      )}
     </aside>
   );
 }

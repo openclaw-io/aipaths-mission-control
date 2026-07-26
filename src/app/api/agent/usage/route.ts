@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { createServiceClient } from "@/lib/supabase/admin";
+import { insertUsageLog } from "@/lib/db/mission-control";
 import { calculateCost } from "@/lib/model-pricing";
 
 export const dynamic = "force-dynamic";
@@ -27,22 +27,19 @@ export async function POST(req: NextRequest) {
   }
 
   const cost = calculateCost(model, input_tokens || 0, output_tokens || 0);
+  const costUsd = Number(cost.toFixed(4));
 
-  const supabase = createServiceClient();
-  const { data, error } = await supabase
-    .from("usage_logs")
-    .insert({
+  try {
+    const data = await insertUsageLog({
       agent,
-      date: new Date().toISOString().split("T")[0],
       model,
-      input_tokens: input_tokens || 0,
-      output_tokens: output_tokens || 0,
-      cost_usd: Number(cost.toFixed(4)),
-      task_id: task_id || null,
-    })
-    .select()
-    .single();
-
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json({ ok: true, cost_usd: Number(cost.toFixed(4)), id: data.id });
+      inputTokens: Number(input_tokens || 0),
+      outputTokens: Number(output_tokens || 0),
+      costUsd,
+      taskId: task_id || null,
+    });
+    return NextResponse.json({ ok: true, cost_usd: costUsd, id: data.id });
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "local_postgres_write_failed" }, { status: 500 });
+  }
 }

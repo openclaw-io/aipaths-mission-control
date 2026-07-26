@@ -1,7 +1,10 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/admin";
-import { getExecutionWindowConfig, isExecutionWindowOpenNow } from "@/lib/execution-window";
+import { getLocalMissionControlUser, isLocalAuthDisabled } from "@/lib/auth/local";
+import { normalizeRow } from "@/lib/db/mission-control";
+import { query } from "@/lib/db/postgres";
+import { getExecutionWindowConfig, isExecutionWindowOpenNow, type ExecutionWindowConfig } from "@/lib/execution-window";
 
 export const dynamic = "force-dynamic";
 
@@ -21,19 +24,23 @@ export async function GET() {
 }
 
 export async function PATCH(request: NextRequest) {
-  const authClient = await createClient();
-  const {
-    data: { user },
-  } = await authClient.auth.getUser();
+  const useLocalMode = isLocalAuthDisabled();
+  const localUser = useLocalMode ? getLocalMissionControlUser() : null;
+  const authClient = useLocalMode ? null : await createClient();
+  let user: { email?: string | null; id?: string | null } | null = localUser
+    ? { email: localUser.email, id: localUser.email }
+    : null;
+  if (!useLocalMode) user = (await authClient!.auth.getUser()).data.user;
 
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
   const body = await request.json().catch(() => ({}));
+  const updatedBy = user.email || user.id;
   const updates: Record<string, unknown> = {
     updated_at: new Date().toISOString(),
-    updated_by: user.email || user.id,
+    updated_by: updatedBy,
   };
 
   if (typeof body.timezone === "string") {
@@ -54,6 +61,24 @@ export async function PATCH(request: NextRequest) {
 
   if (body.override_reason === null || typeof body.override_reason === "string") {
     updates.override_reason = body.override_reason;
+  }
+
+  if (useLocalMode) {
+    const entries = Object.entries(updates);
+    const values = entries.map(([key, value]) => key === "base_schedule" ? JSON.stringify(value) : value);
+    const setters = entries.map(([key], index) => `${key} = $${index + 1}${key === "base_schedule" ? "::jsonb" : ""}`);
+    const { rows } = await query(
+      `update public.execution_window_config
+          set ${setters.join(", ")}
+        where id = 'global'
+        returning id, timezone, base_schedule, override_mode, override_until, override_reason, updated_by, updated_at`,
+      values,
+    );
+    if (!rows[0]) {
+      return NextResponse.json({ error: "execution_window_config_missing" }, { status: 404 });
+    }
+    const data = normalizeRow(rows[0]) as ExecutionWindowConfig;
+    return NextResponse.json({ config: data, state: isExecutionWindowOpenNow(data, new Date()) });
   }
 
   const supabase = createServiceClient();

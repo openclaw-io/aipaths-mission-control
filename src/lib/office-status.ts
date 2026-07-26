@@ -15,7 +15,7 @@ interface TaskRow {
 interface MemoryRow {
   agent: string;
   date: string;
-  content: string;
+  content?: string | null;
 }
 
 interface AgentState {
@@ -65,7 +65,7 @@ export function resolveAgentStatus(
 }
 
 function withMemoryBubble(state: AgentState, memory?: MemoryRow): AgentState {
-  if (!memory || state.currentTask) return state;
+  if (!memory?.content || state.currentTask) return state;
   const content = memory.content.length > 40
     ? memory.content.slice(0, 39) + "\u2026"
     : memory.content;

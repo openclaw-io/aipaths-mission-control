@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { query, withTransaction } from "@/lib/db/postgres";
 
 export type RecurringWorkRule = {
   id: string;
@@ -49,8 +50,6 @@ const STRATEGIST_REPORTING_TABLES = [
   "ops_youtube_short_daily",
   "ops_community_daily",
   "ops_youtube_comments",
-  "intel_items_raw",
-  "intel_trend_daily",
 ];
 
 function parseDateKey(value: string) {
@@ -169,7 +168,10 @@ function strategistReportOccurrence(rule: RecurringWorkRule, day: Date, schedule
   const title = `${typeLabel} review — ${titleDate}`;
   const instruction = [
     `Prepare the ${typeLabel.toLowerCase()} strategist report for ${titleDate}.`,
-    "Use Mission Control canonical reporting tables only; do not read Academy legacy daily_digest or legacy recurrence tables.",
+    "Use the diagnostic-first reporting contract. Lead with Diagnostico IA funnel learning, not generic platform monitoring.",
+    "Read Mission Control canonical reporting tables first, especially ops_daily_snapshots.academy_json.diagnostic. Fall back to Academy diagnostic/event tables only when the canonical diagnostic block is missing.",
+    "Do not include routine trends, Intel Inbox, broad rankings, or mandatory director-task fan-out unless they materially change a funnel decision.",
+    "Do not read Academy legacy daily_digest or legacy recurrence tables.",
     "Keep com.aipaths.daily-scrape as the data ingestion source, then post the finished report through the normal strategist reporting path and close this work item.",
   ].join("\n\n");
   const payload: Record<string, unknown> = {
@@ -226,7 +228,148 @@ export function plannedOccurrenceDryRun(rule: RecurringWorkRule, now = new Date(
     title: occurrence.title,
     scheduledFor: occurrence.scheduledFor,
     reportType: typeof occurrence.payload.report_type === "string" ? occurrence.payload.report_type : null,
+    instruction: occurrence.instruction,
+    source_tables: Array.isArray(occurrence.payload.source_tables) ? occurrence.payload.source_tables : null,
   }));
+}
+
+export async function listEnabledRecurringWorkRulesLocal() {
+  const { rows } = await query(`
+    SELECT
+      id::text,
+      title,
+      instruction,
+      owner_agent,
+      target_agent_id,
+      requested_by,
+      priority,
+      cadence_unit,
+      cadence_interval,
+      time_of_day,
+      timezone,
+      start_date::text,
+      end_date::text,
+      horizon_days,
+      enabled,
+      metadata,
+      last_materialized_at::text,
+      created_at::text,
+      updated_at::text
+    FROM public.recurring_work_rules
+    WHERE enabled = true
+    ORDER BY created_at ASC
+  `);
+
+  return rows as RecurringWorkRule[];
+}
+
+export async function materializeRecurringWorkLocal(requestedBy = "recurring-work-materializer") {
+  const rules = await listEnabledRecurringWorkRulesLocal();
+  const details: MaterializeDetail[] = [];
+  let created = 0;
+  let existing = 0;
+
+  for (const rule of rules) {
+    const occurrences = plannedOccurrences(rule);
+
+    for (const occurrence of occurrences) {
+      const result = await withTransaction(async (client) => {
+        const existingOccurrence = await client.query<{ id: string; work_item_id: string | null }>(`
+          SELECT id, work_item_id
+          FROM public.recurring_work_occurrences
+          WHERE rule_id = $1
+            AND occurrence_key = $2
+          LIMIT 1
+        `, [rule.id, occurrence.occurrenceKey]);
+
+        if (existingOccurrence.rows[0]?.work_item_id) {
+          return {
+            action: "exists" as const,
+            workItemId: existingOccurrence.rows[0].work_item_id,
+          };
+        }
+
+        const payload = {
+          ...(rule.metadata || {}),
+          ...occurrence.payload,
+          trigger: "recurring_work_rule",
+          recurring_rule_id: rule.id,
+          occurrence_key: occurrence.occurrenceKey,
+          cadence_unit: rule.cadence_unit,
+          cadence_interval: rule.cadence_interval,
+          timezone: rule.timezone,
+        };
+
+        const workItem = await client.query<{ id: string }>(`
+          INSERT INTO public.work_items (
+            kind, source_type, source_id, title, instruction, status, priority,
+            owner_agent, target_agent_id, requested_by, scheduled_for, payload
+          ) VALUES ($1, 'service', $2, $3, $4, 'ready', $5, $6, $7, $8, $9::timestamptz, $10::jsonb)
+          RETURNING id
+        `, [
+          occurrence.kind,
+          rule.id,
+          occurrence.title,
+          occurrence.instruction,
+          rule.priority || "medium",
+          rule.owner_agent,
+          rule.target_agent_id || rule.owner_agent,
+          rule.requested_by || requestedBy,
+          occurrence.scheduledFor,
+          JSON.stringify(payload),
+        ]);
+
+        const workItemId = workItem.rows[0]?.id;
+        if (!workItemId) throw new Error("work_item_insert_failed");
+
+        await client.query(`
+          INSERT INTO public.recurring_work_occurrences (rule_id, occurrence_key, scheduled_for, work_item_id)
+          VALUES ($1, $2, $3::timestamptz, $4)
+        `, [rule.id, occurrence.occurrenceKey, occurrence.scheduledFor, workItemId]);
+
+        await client.query(`
+          INSERT INTO public.event_log (domain, event_type, entity_type, entity_id, actor, payload)
+          VALUES ('work', 'recurring_work.materialized', 'work_item', $1, $2, $3::jsonb)
+        `, [
+          workItemId,
+          requestedBy,
+          JSON.stringify({
+            recurring_rule_id: rule.id,
+            occurrence_key: occurrence.occurrenceKey,
+            scheduled_for: occurrence.scheduledFor,
+            title: occurrence.title,
+            owner_agent: rule.owner_agent,
+          }),
+        ]);
+
+        return { action: "created" as const, workItemId };
+      });
+
+      if (result.action === "exists") {
+        existing++;
+      } else {
+        created++;
+      }
+
+      details.push({
+        ruleId: rule.id,
+        title: occurrence.title,
+        occurrenceKey: occurrence.occurrenceKey,
+        scheduledFor: occurrence.scheduledFor,
+        action: result.action,
+        workItemId: result.workItemId,
+      });
+    }
+
+    await query(`
+      UPDATE public.recurring_work_rules
+      SET last_materialized_at = now(),
+          updated_at = now()
+      WHERE id = $1
+    `, [rule.id]);
+  }
+
+  return { created, existing, rules: rules.length, details };
 }
 
 export async function materializeRecurringWork(db: SupabaseClient, requestedBy = "recurring-work-materializer") {

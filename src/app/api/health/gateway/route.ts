@@ -1,24 +1,83 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { NextResponse } from "next/server";
 
+const execFileAsync = promisify(execFile);
+
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+
+const DEFAULT_HERMES_GATEWAY_LABELS = [
+  "ai.hermes.gateway-systems",
+  "ai.hermes.gateway-strategist",
+  "ai.hermes.gateway-youtube",
+  "ai.hermes.gateway-content",
+  "ai.hermes.gateway-marketing",
+  "ai.hermes.gateway-dev",
+  "ai.hermes.gateway-community",
+  "ai.hermes.gateway-editor",
+  "ai.hermes.gateway-legal",
+];
+
+function configuredLabels() {
+  return (process.env.HERMES_GATEWAY_LABELS || "")
+    .split(",")
+    .map((label) => label.trim())
+    .filter(Boolean)
+    .concat(process.env.HERMES_GATEWAY_LABELS ? [] : DEFAULT_HERMES_GATEWAY_LABELS);
+}
+
+type LaunchctlRow = {
+  pid: string;
+  status: string;
+  label: string;
+};
+
+function parseLaunchctlList(output: string) {
+  const rows = new Map<string, LaunchctlRow>();
+  for (const line of output.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("PID")) continue;
+    const match = trimmed.match(/^(\S+)\s+(\S+)\s+(.+)$/);
+    if (!match) continue;
+    const [, pid, status, label] = match;
+    rows.set(label, { pid, status, label });
+  }
+  return rows;
+}
 
 export async function GET() {
-  const gatewayUrl = process.env.OPENCLAW_GATEWAY_URL || "http://localhost:18789";
+  const labels = configuredLabels();
 
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000);
-    const res = await fetch(gatewayUrl, { signal: controller.signal });
-    clearTimeout(timeout);
-
-    // Gateway returns 503 when UI assets are missing but is still functional
-    // Accept any non-error response (200, 503 with body) as "gateway is running"
-    return NextResponse.json({
-      gateway: res.status < 500 || res.status === 503 ? "healthy" : "down",
+    const { stdout } = await execFileAsync("/bin/launchctl", ["list"], { timeout: 5000 });
+    const rows = parseLaunchctlList(stdout);
+    const services = labels.map((label) => {
+      const row = rows.get(label);
+      return {
+        label,
+        pid: row?.pid || null,
+        running: !!row && row.pid !== "-",
+        lastExitStatus: row?.status ?? null,
+      };
     });
-  } catch {
+    const down = services.filter((service) => !service.running).map((service) => service.label);
+
+    return NextResponse.json({
+      gateway: down.length === 0 ? "healthy" : "down",
+      runtime: "hermes",
+      healthy: down.length === 0,
+      total: services.length,
+      running: services.length - down.length,
+      down,
+      services,
+    });
+  } catch (err) {
     return NextResponse.json({
       gateway: "down",
+      runtime: "hermes",
+      healthy: false,
+      error: err instanceof Error ? err.message : String(err),
     });
   }
 }
