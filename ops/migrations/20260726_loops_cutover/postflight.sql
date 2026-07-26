@@ -30,21 +30,20 @@ BEGIN
     WHERE table_schema='public' AND table_name IN ('work_items','loop_events','loop_work_items','pipeline_items','recurrence_rules') AND column_name='project_id';
   IF violations>0 THEN RAISE EXCEPTION 'Postflight failed; global scan found % active project_id columns in relevant tables',violations; END IF;
   SELECT count(*) INTO violations FROM pg_constraint c JOIN pg_class r ON r.oid=c.conrelid JOIN pg_namespace n ON n.oid=r.relnamespace
-    WHERE n.nspname='public' AND r.relname IN ('loops','loop_events','loop_work_items','work_items','pipeline_items','recurrence_rules') AND c.conname ILIKE '%project%';
+    WHERE n.nspname='public'
+      AND (r.relname IN ('loops','loop_events','loop_work_items','work_items')
+        OR (r.relname IN ('pipeline_items','recurrence_rules') AND EXISTS
+          (SELECT 1 FROM information_schema.columns ic
+           WHERE ic.table_schema='public' AND ic.table_name=r.relname AND ic.column_name='loop_id')))
+      AND c.conname ILIKE '%project%';
   IF violations>0 THEN RAISE EXCEPTION 'Postflight failed; % legacy constraint names remain',violations; END IF;
-  SELECT count(*) INTO violations FROM pg_indexes WHERE schemaname='public'
-    AND tablename IN ('loops','loop_events','loop_work_items','work_items','pipeline_items','recurrence_rules')
+  SELECT count(*) INTO violations FROM pg_indexes i WHERE schemaname='public'
+    AND (tablename IN ('loops','loop_events','loop_work_items','work_items')
+      OR (tablename IN ('pipeline_items','recurrence_rules') AND EXISTS
+        (SELECT 1 FROM information_schema.columns ic
+         WHERE ic.table_schema='public' AND ic.table_name=i.tablename AND ic.column_name='loop_id')))
     AND (indexname ILIKE '%project%' OR indexdef ~* '\mproject_id\M');
   IF violations>0 THEN RAISE EXCEPTION 'Postflight failed; % legacy index names remain',violations; END IF;
-
-  IF to_regclass('public.pipeline_items') IS NOT NULL AND NOT EXISTS
-    (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='pipeline_items' AND column_name='loop_id') THEN
-    RAISE EXCEPTION 'Postflight failed; optional pipeline_items.loop_id absent';
-  END IF;
-  IF to_regclass('public.recurrence_rules') IS NOT NULL AND NOT EXISTS
-    (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='recurrence_rules' AND column_name='loop_id') THEN
-    RAISE EXCEPTION 'Postflight failed; optional recurrence_rules.loop_id absent';
-  END IF;
 
   SELECT count(*) INTO violations FROM public.loop_events le LEFT JOIN public.loops l ON l.id=le.loop_id WHERE l.id IS NULL;
   IF violations>0 THEN RAISE EXCEPTION 'Postflight failed; % orphan loop_events.loop_id values',violations; END IF;
@@ -76,14 +75,14 @@ BEGIN
     AND c.conkey=ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid='public.loop_work_items'::regclass AND attname='work_item_id')]::smallint[]
     AND c.confkey=ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid='public.work_items'::regclass AND attname='id')]::smallint[];
   IF fk_count<>1 THEN RAISE EXCEPTION 'Postflight failed; exact loop_work_items.work_item_id -> work_items.id ON DELETE CASCADE FK count is %',fk_count; END IF;
-  IF to_regclass('public.pipeline_items') IS NOT NULL THEN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='pipeline_items' AND column_name='loop_id') THEN
     SELECT count(*) INTO fk_count FROM pg_constraint c
     WHERE c.conrelid='public.pipeline_items'::regclass AND c.confrelid='public.loops'::regclass AND c.contype='f'
       AND c.conkey=ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid='public.pipeline_items'::regclass AND attname='loop_id')]::smallint[]
       AND c.confkey=ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid='public.loops'::regclass AND attname='id')]::smallint[];
     IF fk_count<>1 THEN RAISE EXCEPTION 'Postflight failed; exact pipeline_items.loop_id -> loops.id FK count is %',fk_count; END IF;
   END IF;
-  IF to_regclass('public.recurrence_rules') IS NOT NULL THEN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='recurrence_rules' AND column_name='loop_id') THEN
     SELECT count(*) INTO fk_count FROM pg_constraint c
     WHERE c.conrelid='public.recurrence_rules'::regclass AND c.confrelid='public.loops'::regclass AND c.contype='f'
       AND c.conkey=ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid='public.recurrence_rules'::regclass AND attname='loop_id')]::smallint[]

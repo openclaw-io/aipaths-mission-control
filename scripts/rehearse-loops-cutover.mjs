@@ -46,18 +46,6 @@ CREATE TABLE public.project_work_items (
 CREATE INDEX idx_work_items_project ON public.work_items(project_id);
 CREATE INDEX idx_project_events_project ON public.project_events(project_id);
 CREATE INDEX idx_project_work_items_project ON public.project_work_items(project_id);
-CREATE TABLE public.pipeline_items (
-  id uuid PRIMARY KEY,
-  project_id uuid,
-  CONSTRAINT pipeline_items_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(id) ON DELETE SET NULL
-);
-CREATE INDEX idx_pipeline_items_project_id ON public.pipeline_items(project_id);
-CREATE TABLE public.recurrence_rules (
-  id uuid PRIMARY KEY,
-  project_id uuid,
-  CONSTRAINT recurrence_rules_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(id) ON DELETE CASCADE
-);
-CREATE INDEX idx_recurrence_rules_project_id ON public.recurrence_rules(project_id);
 
 INSERT INTO public.projects VALUES (
   '10000000-0000-0000-0000-000000000001','P-1','Local name','Cloud title',
@@ -78,8 +66,6 @@ INSERT INTO public.work_items VALUES (
   '20000000-0000-0000-0000-000000000003',NULL,NULL,
   'manual',NULL,'ready','system','{}'::jsonb
 );
-INSERT INTO public.pipeline_items VALUES ('40000000-0000-0000-0000-000000000001','10000000-0000-0000-0000-000000000001');
-INSERT INTO public.recurrence_rules VALUES ('50000000-0000-0000-0000-000000000001','10000000-0000-0000-0000-000000000001');
 INSERT INTO public.project_events VALUES (
   '30000000-0000-0000-0000-000000000001','10000000-0000-0000-0000-000000000001',
   'project.created','project-planner',
@@ -88,6 +74,33 @@ INSERT INTO public.project_events VALUES (
 INSERT INTO public.project_work_items VALUES (
   '10000000-0000-0000-0000-000000000001','20000000-0000-0000-0000-000000000001','primary_execution'
 );
+`;
+
+const cloudShapeOptionalSql = `
+CREATE TABLE public.pipeline_items (
+  id uuid PRIMARY KEY,
+  project_id uuid,
+  CONSTRAINT pipeline_items_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(id) ON DELETE SET NULL
+);
+CREATE INDEX idx_pipeline_items_project_id ON public.pipeline_items(project_id);
+CREATE TABLE public.recurrence_rules (
+  id uuid PRIMARY KEY,
+  project_id uuid,
+  CONSTRAINT recurrence_rules_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(id) ON DELETE CASCADE
+);
+CREATE INDEX idx_recurrence_rules_project_id ON public.recurrence_rules(project_id);
+INSERT INTO public.pipeline_items VALUES ('40000000-0000-0000-0000-000000000001','10000000-0000-0000-0000-000000000001');
+INSERT INTO public.recurrence_rules VALUES ('50000000-0000-0000-0000-000000000001','10000000-0000-0000-0000-000000000001');
+`;
+
+const localShapeOptionalSql = `
+CREATE TABLE public.pipeline_items (
+  id uuid PRIMARY KEY,
+  stage text NOT NULL DEFAULT 'queued',
+  CONSTRAINT pipeline_items_projectless_stage_check CHECK (stage <> '')
+);
+CREATE INDEX idx_pipeline_items_projectless_stage ON public.pipeline_items(stage);
+INSERT INTO public.pipeline_items(id,stage) VALUES ('40000000-0000-0000-0000-000000000001','ready');
 `;
 
 function quoteIdentifier(identifier) {
@@ -102,9 +115,9 @@ async function schemaFingerprint(client) {
                 from information_schema.columns
                where table_schema='public' and table_name in ('projects','project_events','project_work_items','work_items','pipeline_items','recurrence_rules')) c),
       'constraints', (select jsonb_agg(to_jsonb(c) order by c.table_name,c.conname)
-        from (select conrelid::regclass::text as table_name,conname,contype,confdeltype,pg_get_constraintdef(oid) as definition
-                from pg_constraint
-               where conrelid in ('public.projects'::regclass,'public.project_events'::regclass,'public.project_work_items'::regclass,'public.work_items'::regclass,'public.pipeline_items'::regclass,'public.recurrence_rules'::regclass)) c),
+        from (select r.relname as table_name,c.conname,c.contype,c.confdeltype,pg_get_constraintdef(c.oid) as definition
+                from pg_constraint c join pg_class r on r.oid=c.conrelid join pg_namespace n on n.oid=r.relnamespace
+               where n.nspname='public' and r.relname in ('projects','project_events','project_work_items','work_items','pipeline_items','recurrence_rules')) c),
       'indexes', (select jsonb_agg(to_jsonb(i) order by i.tablename,i.indexname)
         from (select tablename,indexname,indexdef from pg_indexes
                where schemaname='public' and tablename in ('projects','project_events','project_work_items','work_items','pipeline_items','recurrence_rules')) i)
@@ -123,12 +136,17 @@ async function dataFingerprint(client, namespace = "project") {
       '${p}', (select jsonb_agg(to_jsonb(t) order by id) from public.${p} t),
       'work_items', (select jsonb_agg(to_jsonb(t) order by id) from public.work_items t),
       '${e}', (select jsonb_agg(to_jsonb(t) order by id) from public.${e} t),
-      '${m}', (select jsonb_agg(to_jsonb(t) order by ${relationColumn},work_item_id,relation_type) from public.${m} t),
-      'pipeline_items', (select jsonb_agg(to_jsonb(t) order by id) from public.pipeline_items t),
-      'recurrence_rules', (select jsonb_agg(to_jsonb(t) order by id) from public.recurrence_rules t)
+      '${m}', (select jsonb_agg(to_jsonb(t) order by ${relationColumn},work_item_id,relation_type) from public.${m} t)
     ) as fingerprint
   `);
-  return result.rows[0].fingerprint;
+  const fingerprint = result.rows[0].fingerprint;
+  for (const relation of ["pipeline_items", "recurrence_rules"]) {
+    const exists = await client.query("select to_regclass($1) is not null as present", [`public.${relation}`]);
+    fingerprint[relation] = exists.rows[0].present
+      ? (await client.query(`select jsonb_agg(to_jsonb(t) order by id) as rows from public.${relation} t`)).rows[0].rows
+      : null;
+  }
+  return fingerprint;
 }
 
 async function assertCheckBehavior(client, accepted, rejected) {
@@ -196,8 +214,9 @@ export async function runLoopsCutoverRehearsal({ adminConnectionString = process
     ]);
 
     await scratch.query(fixtureSql);
+    await scratch.query(cloudShapeOptionalSql);
 
-    const executeCycle = async ({ sourceCheck, adversarialPostflight = false }) => {
+    const executeCycle = async ({ sourceCheck, adversarialPostflight = false, shape }) => {
       const schemaBefore = await schemaFingerprint(scratch);
       const dataBefore = await dataFingerprint(scratch,"project");
       await scratch.query(preflight);
@@ -243,14 +262,22 @@ export async function runLoopsCutoverRehearsal({ adminConnectionString = process
       if (sourceCheck) await assertCheckBehavior(scratch,"project","loop");
       const schemaAfter = await schemaFingerprint(scratch);
       const dataAfter = await dataFingerprint(scratch,"project");
-      if (JSON.stringify(schemaAfter) !== JSON.stringify(schemaBefore)) throw new Error(`rollback schema fingerprint differs (${sourceCheck ? "existing CHECK" : "no CHECK"})`);
-      if (JSON.stringify(dataAfter) !== JSON.stringify(dataBefore)) throw new Error(`rollback data fingerprint differs (${sourceCheck ? "existing CHECK" : "no CHECK"})`);
+      if (JSON.stringify(schemaAfter) !== JSON.stringify(schemaBefore)) throw new Error(`rollback schema fingerprint differs (${shape}, ${sourceCheck ? "existing CHECK" : "no CHECK"})`);
+      if (JSON.stringify(dataAfter) !== JSON.stringify(dataBefore)) throw new Error(`rollback data fingerprint differs (${shape}, ${sourceCheck ? "existing CHECK" : "no CHECK"})`);
     };
 
-    await executeCycle({ sourceCheck: true, adversarialPostflight: true });
+    await executeCycle({ sourceCheck: true, adversarialPostflight: true, shape: "cloud-shape" });
     await scratch.query("ALTER TABLE public.work_items DROP CONSTRAINT work_items_source_type_check");
     await scratch.query("CREATE UNIQUE INDEX uq_project_work_items_primary_execution ON public.project_work_items(project_id) WHERE relation_type='primary_execution'");
-    await executeCycle({ sourceCheck: false });
+    await executeCycle({ sourceCheck: false, shape: "cloud-shape" });
+
+    await scratch.query("DROP TABLE public.recurrence_rules, public.pipeline_items");
+    await scratch.query(localShapeOptionalSql);
+    await executeCycle({ sourceCheck: false, shape: "local-shape" });
+
+    await scratch.query("ALTER TABLE public.pipeline_items ADD COLUMN loop_id uuid");
+    await assertGateRejects(scratch, preflight, /destination.*pipeline_items\.loop_id|pipeline_items\.loop_id.*collision/i, "preflight optional destination-column collision");
+    await scratch.query("ALTER TABLE public.pipeline_items DROP COLUMN loop_id");
 
     await scratch.query(`insert into public.work_items
       (id,project_id,parent_id,source_type,source_id,status,requested_by,payload)
@@ -260,8 +287,9 @@ export async function runLoopsCutoverRehearsal({ adminConnectionString = process
 
     return {
       database, forward: "passed", postflight: "passed", rollback: "passed", exactSchemaAndData: true,
-      scenarios: ["existing-check+cutover-created-unique", "cutover-created-check+legacy-unique"],
+      scenarios: ["cloud-shape", "local-shape"],
       duplicateSqlState: "23505", adversarialPostflight: "rejected-column-constraint-index", orphanPreflight: "rejected-non-terminal",
+      optionalDestinationCollision: "rejected",
     };
   } finally {
     if (scratch) await scratch.end().catch(() => {});

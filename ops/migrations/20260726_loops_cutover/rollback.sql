@@ -21,22 +21,22 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='work_items' AND column_name='loop_id') THEN
     RAISE EXCEPTION 'Loops rollback source column work_items.loop_id is absent';
   END IF;
-  IF to_regclass('public.pipeline_items') IS NOT NULL AND NOT EXISTS
-    (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='pipeline_items' AND column_name='loop_id') THEN
-    RAISE EXCEPTION 'Loops rollback optional source column pipeline_items.loop_id is absent';
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='pipeline_items' AND column_name='loop_id')
+     AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='pipeline_items' AND column_name='project_id') THEN
+    RAISE EXCEPTION 'Loops rollback destination column pipeline_items.project_id already exists (collision)';
   END IF;
-  IF to_regclass('public.recurrence_rules') IS NOT NULL AND NOT EXISTS
-    (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='recurrence_rules' AND column_name='loop_id') THEN
-    RAISE EXCEPTION 'Loops rollback optional source column recurrence_rules.loop_id is absent';
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='recurrence_rules' AND column_name='loop_id')
+     AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='recurrence_rules' AND column_name='project_id') THEN
+    RAISE EXCEPTION 'Loops rollback destination column recurrence_rules.project_id already exists (collision)';
   END IF;
 END $$;
 
 LOCK TABLE public.loops, public.loop_events, public.loop_work_items, public.work_items IN ACCESS EXCLUSIVE MODE;
 DO $$ BEGIN
-  IF to_regclass('public.pipeline_items') IS NOT NULL THEN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='pipeline_items' AND column_name='loop_id') THEN
     LOCK TABLE public.pipeline_items IN ACCESS EXCLUSIVE MODE;
   END IF;
-  IF to_regclass('public.recurrence_rules') IS NOT NULL THEN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='recurrence_rules' AND column_name='loop_id') THEN
     LOCK TABLE public.recurrence_rules IN ACCESS EXCLUSIVE MODE;
   END IF;
 END $$;
@@ -67,15 +67,23 @@ BEGIN
   IF collisions>0 THEN RAISE EXCEPTION 'Loops rollback found % orphan work_items.loop_id values',collisions; END IF;
 
   FOR obj IN SELECT c.conname FROM pg_constraint c JOIN pg_class r ON r.oid=c.conrelid JOIN pg_namespace n ON n.oid=r.relnamespace
-    WHERE n.nspname='public' AND r.relname IN ('loops','loop_events','loop_work_items','work_items','pipeline_items','recurrence_rules')
+    WHERE n.nspname='public'
+      AND (r.relname IN ('loops','loop_events','loop_work_items','work_items')
+        OR (r.relname IN ('pipeline_items','recurrence_rules') AND EXISTS
+          (SELECT 1 FROM information_schema.columns ic
+           WHERE ic.table_schema='public' AND ic.table_name=r.relname AND ic.column_name='loop_id')))
       AND c.conname ILIKE '%loop%'
   LOOP
     IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname=replace(obj.conname,'loop','project')) THEN
       RAISE EXCEPTION 'Loops rollback destination constraint name already exists: %',replace(obj.conname,'loop','project');
     END IF;
   END LOOP;
-  FOR obj IN SELECT indexname FROM pg_indexes WHERE schemaname='public'
-    AND tablename IN ('loops','loop_events','loop_work_items','work_items','pipeline_items','recurrence_rules') AND indexname ILIKE '%loop%'
+  FOR obj IN SELECT schemaname,indexname FROM pg_indexes i WHERE schemaname='public'
+    AND (tablename IN ('loops','loop_events','loop_work_items','work_items')
+      OR (tablename IN ('pipeline_items','recurrence_rules') AND EXISTS
+        (SELECT 1 FROM information_schema.columns ic
+         WHERE ic.table_schema='public' AND ic.table_name=i.tablename AND ic.column_name='loop_id')))
+    AND indexname ILIKE '%loop%'
   LOOP
     IF to_regclass(format('public.%I',replace(obj.indexname,'loop','project'))) IS NOT NULL THEN
       RAISE EXCEPTION 'Loops rollback destination index name already exists: %',replace(obj.indexname,'loop','project');
@@ -191,10 +199,10 @@ ALTER TABLE public.work_items RENAME COLUMN loop_id TO project_id;
 ALTER TABLE public.project_events RENAME COLUMN loop_id TO project_id;
 ALTER TABLE public.project_work_items RENAME COLUMN loop_id TO project_id;
 DO $$ BEGIN
-  IF to_regclass('public.pipeline_items') IS NOT NULL THEN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='pipeline_items' AND column_name='loop_id') THEN
     ALTER TABLE public.pipeline_items RENAME COLUMN loop_id TO project_id;
   END IF;
-  IF to_regclass('public.recurrence_rules') IS NOT NULL THEN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='recurrence_rules' AND column_name='loop_id') THEN
     ALTER TABLE public.recurrence_rules RENAME COLUMN loop_id TO project_id;
   END IF;
 END $$;
@@ -206,14 +214,22 @@ DECLARE
 BEGIN
   FOR obj IN SELECT c.conrelid::regclass AS relation_name,c.conname FROM pg_constraint c
     JOIN pg_class r ON r.oid=c.conrelid JOIN pg_namespace n ON n.oid=r.relnamespace
-    WHERE n.nspname='public' AND r.relname IN ('projects','project_events','project_work_items','work_items','pipeline_items','recurrence_rules')
+    WHERE n.nspname='public'
+      AND (r.relname IN ('projects','project_events','project_work_items','work_items')
+        OR (r.relname IN ('pipeline_items','recurrence_rules') AND EXISTS
+          (SELECT 1 FROM information_schema.columns ic
+           WHERE ic.table_schema='public' AND ic.table_name=r.relname AND ic.column_name='project_id')))
       AND c.conname ILIKE '%loop%'
   LOOP
     next_name := replace(obj.conname,'loop','project');
     EXECUTE format('ALTER TABLE %s RENAME CONSTRAINT %I TO %I',obj.relation_name,obj.conname,next_name);
   END LOOP;
-  FOR obj IN SELECT schemaname,indexname FROM pg_indexes WHERE schemaname='public'
-    AND tablename IN ('projects','project_events','project_work_items','work_items','pipeline_items','recurrence_rules') AND indexname ILIKE '%loop%'
+  FOR obj IN SELECT schemaname,indexname FROM pg_indexes i WHERE schemaname='public'
+    AND (tablename IN ('projects','project_events','project_work_items','work_items')
+      OR (tablename IN ('pipeline_items','recurrence_rules') AND EXISTS
+        (SELECT 1 FROM information_schema.columns ic
+         WHERE ic.table_schema='public' AND ic.table_name=i.tablename AND ic.column_name='project_id')))
+    AND indexname ILIKE '%loop%'
   LOOP
     next_name := replace(obj.indexname,'loop','project');
     EXECUTE format('ALTER INDEX %I.%I RENAME TO %I',obj.schemaname,obj.indexname,next_name);

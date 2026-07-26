@@ -9,6 +9,8 @@ test("forward, postflight, CHECK/value transforms, and exact rollback execute on
       { forward: result.forward, postflight: result.postflight, rollback: result.rollback, exactSchemaAndData: result.exactSchemaAndData },
       { forward: "passed", postflight: "passed", rollback: "passed", exactSchemaAndData: true },
     );
+    assert.deepEqual(result.scenarios, ["cloud-shape", "local-shape"]);
+    assert.equal(result.optionalDestinationCollision, "rejected");
   } catch (error) {
     const unavailableCodes = new Set(["ECONNREFUSED", "ENOTFOUND", "28P01", "42501"]);
     if (unavailableCodes.has(error?.code)) {
