@@ -29,6 +29,11 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'Loops cutover recovery metadata/helper already exists; run the namespaced rollback before retrying forward';
   END IF;
+  -- PostgreSQL index names share the schema namespace. This fallback name is
+  -- reserved globally so rollback can never inherit an unrelated source index.
+  IF to_regclass('public.uq_loop_work_items_primary_execution__cutover_created') IS NOT NULL THEN
+    RAISE EXCEPTION 'Loops cutover fallback index name uq_loop_work_items_primary_execution__cutover_created is globally reserved in schema public';
+  END IF;
   IF to_regclass('public.projects') IS NULL THEN missing := array_append(missing, 'projects'); END IF;
   IF to_regclass('public.project_events') IS NULL THEN missing := array_append(missing, 'project_events'); END IF;
   IF to_regclass('public.project_work_items') IS NULL THEN missing := array_append(missing, 'project_work_items'); END IF;
@@ -421,6 +426,8 @@ BEGIN
   IF exact_indexes=0 THEN
     CREATE UNIQUE INDEX uq_loop_work_items_primary_execution__cutover_created
       ON public.loop_work_items(loop_id) WHERE relation_type='primary_execution';
+    COMMENT ON INDEX public.uq_loop_work_items_primary_execution__cutover_created
+      IS 'mission-control-loops-cutover-20260726:created-primary-execution-index';
   ELSIF exact_indexes<>1 THEN
     RAISE EXCEPTION 'Loops cutover found % primary_execution uniqueness indexes; expected at most one legacy index',exact_indexes;
   END IF;

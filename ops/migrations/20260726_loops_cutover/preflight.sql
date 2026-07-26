@@ -33,6 +33,11 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'Preflight failed; prior cutover recovery metadata/helper exists. Run rollback.sql statement-by-statement before retrying forward';
   END IF;
+  -- Index names are schema-global in PostgreSQL. Reserve the fallback name on
+  -- every public relation, not only on relations participating in the cutover.
+  IF to_regclass('public.uq_loop_work_items_primary_execution__cutover_created') IS NOT NULL THEN
+    RAISE EXCEPTION 'Preflight failed; fallback index name uq_loop_work_items_primary_execution__cutover_created is globally reserved in schema public';
+  END IF;
   IF to_regclass('public.projects') IS NULL THEN missing := array_append(missing,'projects'); END IF;
   IF to_regclass('public.project_events') IS NULL THEN missing := array_append(missing,'project_events'); END IF;
   IF to_regclass('public.project_work_items') IS NULL THEN missing := array_append(missing,'project_work_items'); END IF;

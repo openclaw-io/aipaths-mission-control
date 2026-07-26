@@ -108,6 +108,21 @@ test("versioned migration artifacts are transactional, reversible, and drift-lou
   assert.match(forward, /recurrence_rules[\s\S]*project_id[\s\S]*loop_id/i);
   assert.match(forward, /cutover_created/i, "forward lacks the specially named fallback primary_execution index");
   assert.match(rollback, /DROP INDEX[\s\S]*cutover_created/i);
+  for (const sql of [preflight, forward]) {
+    assert.match(
+      sql,
+      /to_regclass\('public\.uq_loop_work_items_primary_execution__cutover_created'\) IS NOT NULL/i,
+      "fallback index name is not reserved schema-globally",
+    );
+  }
+  assert.match(forward, /COMMENT ON INDEX public\.uq_loop_work_items_primary_execution__cutover_created/i);
+  assert.match(rollback, /obj_description[\s\S]*uq_loop_work_items_primary_execution__cutover_created/i);
+  assert.match(rollback, /indrelid=to_regclass\('public\.loop_work_items'\)/i);
+  assert.doesNotMatch(
+    rollback,
+    /DROP INDEX IF EXISTS public\.uq_loop_work_items_primary_execution__cutover_created/i,
+    "rollback must not blindly drop the schema-global fallback index name",
+  );
   assert.match(postflight, /indisunique[\s\S]*primary_execution/i, "postflight does not verify the partial unique index definition");
   assert.match(preflight, /orphan[\s\S]*source_type[\s\S]*source_id|source_type[\s\S]*source_id[\s\S]*orphan/i);
   assert.match(forward, /orphaned_source_loop_id/);

@@ -199,7 +199,19 @@ BEGIN
        OR jsonb_path_exists(metadata,'$.** ? (@ == $value)',jsonb_build_object('value','loop-execution-materializer'))
   $sql$,domain_table);
 
-  DROP INDEX IF EXISTS public.uq_loop_work_items_primary_execution__cutover_created;
+  -- The name was reserved schema-globally before forward, but SQL Editor mode
+  -- leaves an autocommit window in which an unrelated index could claim it.
+  -- Drop only the index atomically created and provenance-tagged by forward,
+  -- and only when it is still attached to the expected cutover relation.
+  IF EXISTS (
+    SELECT 1 FROM pg_index i
+    WHERE i.indexrelid=to_regclass('public.uq_loop_work_items_primary_execution__cutover_created')
+      AND i.indrelid=to_regclass('public.loop_work_items')
+      AND obj_description(i.indexrelid,'pg_class')=
+        'mission-control-loops-cutover-20260726:created-primary-execution-index'
+  ) THEN
+    DROP INDEX public.uq_loop_work_items_primary_execution__cutover_created;
+  END IF;
 
   IF is_loop_namespace THEN
     ALTER TABLE public.loops RENAME TO projects;

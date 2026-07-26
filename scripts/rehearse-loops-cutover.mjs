@@ -121,7 +121,8 @@ async function schemaFingerprint(client) {
                where n.nspname='public' and r.relname in ('projects','project_events','project_work_items','work_items','pipeline_items','recurrence_rules')) c),
       'indexes', (select jsonb_agg(to_jsonb(i) order by i.tablename,i.indexname)
         from (select tablename,indexname,indexdef from pg_indexes
-               where schemaname='public' and tablename in ('projects','project_events','project_work_items','work_items','pipeline_items','recurrence_rules')) i)
+               where schemaname='public'
+                 and tablename not like '__mc_loops_cutover_20260726%') i)
     ) as fingerprint
   `);
   return result.rows[0].fingerprint;
@@ -315,7 +316,36 @@ export async function runLoopsCutoverRehearsal({
     await assertArtifactRejectsWithoutMutation(forward, "forward-loop-index-provenance", /index names.*reserved token loop/i);
     await scratch.query("DROP INDEX public.idx_work_items_loop_marker");
 
-    // Reviewer adversary 3: reserve the fallback CHECK name so rollback can
+    // Reviewer adversary 3: the fallback index name is schema-global in
+    // PostgreSQL, not local to participating relations. Both entry gates must
+    // reject it on an unrelated table, and recovery must not delete an
+    // unprovenanced index that appears after forward has started. The global
+    // index fingerprint makes an accidental DROP observable.
+    await scratch.query("CREATE TABLE public.unrelated_cutover_name_holder(id uuid PRIMARY KEY)");
+    await scratch.query(`CREATE INDEX uq_loop_work_items_primary_execution__cutover_created
+      ON public.unrelated_cutover_name_holder(id)`);
+    await assertArtifactRejectsWithoutMutation(preflight, "preflight-global-fallback-index-name", /fallback index name.*globally reserved/i);
+    await assertArtifactRejectsWithoutMutation(forward, "forward-global-fallback-index-name", /fallback index name.*globally reserved/i);
+    await scratch.query("DROP INDEX public.uq_loop_work_items_primary_execution__cutover_created");
+
+    const metadataCheckpoint = splitTopLevelSql(forward)
+      .find((statement) => statement.includes("recoverable-mutation metadata-created"));
+    if (!metadataCheckpoint) throw new Error("forward metadata checkpoint is absent");
+    await scratch.query(metadataCheckpoint);
+    await scratch.query(`CREATE INDEX uq_loop_work_items_primary_execution__cutover_created
+      ON public.unrelated_cutover_name_holder(id)`);
+    const recoverySchemaBefore = await schemaFingerprint(scratch);
+    const recoveryDataBefore = await dataFingerprint(scratch, "project");
+    await executeArtifact(rollback, "rollback-preserves-unprovenanced-global-index");
+    await assertExactProjectFingerprint(
+      scratch,
+      recoverySchemaBefore,
+      recoveryDataBefore,
+      "rollback-preserves-unprovenanced-global-index",
+    );
+    await scratch.query("DROP TABLE public.unrelated_cutover_name_holder");
+
+    // Reviewer adversary 4: reserve the fallback CHECK name so rollback can
     // never mistake a source constraint for one created by this cutover.
     await scratch.query(`ALTER TABLE public.work_items
       ADD CONSTRAINT work_items_source_type_loop_cutover_created
