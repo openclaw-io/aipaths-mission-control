@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { createClient } from "@supabase/supabase-js";
+import pg from "pg";
+import { parseLocalDatabaseUrl, redactSecrets } from "../ops/local-postgres/sync-local-core-helpers.mjs";
+
+const { Client: PgClient } = pg;
 
 function loadEnv(path) {
   try {
@@ -12,8 +15,7 @@ function loadEnv(path) {
       const match = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
       if (!match) continue;
       const [, key, rawValue] = match;
-      if (process.env[key]) continue;
-      process.env[key] = rawValue.replace(/^['"]|['"]$/g, "");
+      if (!process.env[key]) process.env[key] = rawValue.replace(/^['"]|['"]$/g, "");
     }
   } catch {
     // .env.local is optional when the environment is already populated.
@@ -22,15 +24,19 @@ function loadEnv(path) {
 
 loadEnv(resolve(process.cwd(), ".env.local"));
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
-const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-if (!supabaseUrl || !serviceRoleKey) {
-  console.error("Missing NEXT_PUBLIC_SUPABASE_URL/SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+const databaseUrl = process.env.MISSION_CONTROL_DATABASE_URL;
+if (!databaseUrl) {
+  console.error("Missing MISSION_CONTROL_DATABASE_URL; there is no Supabase/cloud fallback");
+  process.exit(1);
+}
+try {
+  parseLocalDatabaseUrl(databaseUrl);
+} catch (error) {
+  console.error(redactSecrets(error, [databaseUrl]));
   process.exit(1);
 }
 
-const db = createClient(supabaseUrl, serviceRoleKey, { auth: { persistSession: false } });
+const db = new PgClient({ connectionString: databaseUrl });
 const OPEN_STATUSES = ["draft", "blocked", "ready", "in_progress"];
 
 const findings = [
@@ -136,77 +142,96 @@ const findings = [
 ];
 
 async function createDedupedSuggestion(finding) {
-  const { data: existing, error: existingError } = await db
-    .from("work_items")
-    .select("id,title,status")
-    .eq("payload->>dedupe_key", finding.dedupe_key)
-    .in("status", OPEN_STATUSES)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  await db.query("begin");
+  try {
+    const existingResult = await db.query(
+      `select id, title, status
+         from public.work_items
+        where payload ->> 'dedupe_key' = $1
+          and status = any($2::text[])
+        order by created_at desc
+        limit 1`,
+      [finding.dedupe_key, OPEN_STATUSES],
+    );
+    const existing = existingResult.rows[0];
+    if (existing) {
+      await db.query("commit");
+      return { ...existing, created: false, dedupe_key: finding.dedupe_key };
+    }
 
-  if (existingError) throw existingError;
-  if (existing?.id) return { ...existing, created: false, dedupe_key: finding.dedupe_key };
-
-  const payload = {
-    requires_human_approval: true,
-    dedupe_key: finding.dedupe_key,
-    risk: finding.risk,
-    proposed_action: finding.proposed_action,
-    approval_prompt: finding.approval_prompt,
-    suggestion_source: "systems_repo_hygiene_check",
-    hygiene_check_work_item_id: "a9f05742-2f16-4745-a1cd-2889275dccfe",
-    hygiene_check_date: "2026-04-29",
-  };
-
-  const { data: inserted, error: insertError } = await db
-    .from("work_items")
-    .insert({
-      kind: "task",
-      source_type: "service",
-      source_id: "a9f05742-2f16-4745-a1cd-2889275dccfe",
-      title: finding.title,
-      instruction: finding.instruction,
-      status: "draft",
-      priority: finding.risk === "high" ? "high" : "medium",
-      owner_agent: finding.target_agent_id,
-      target_agent_id: finding.target_agent_id,
-      requested_by: "systems_repo_hygiene_check",
-      scheduled_for: null,
-      payload,
-    })
-    .select("id,title,status")
-    .single();
-
-  if (insertError || !inserted) throw insertError || new Error("suggestion_insert_failed");
-
-  await db.from("event_log").insert({
-    domain: "work",
-    event_type: "work_item.suggestion_created",
-    entity_type: "work_item",
-    entity_id: inserted.id,
-    actor: "systems_repo_hygiene_check",
-    payload: {
+    const payload = {
+      requires_human_approval: true,
       dedupe_key: finding.dedupe_key,
-      title: finding.title,
-      target_agent_id: finding.target_agent_id,
-      proposed_action: finding.proposed_action,
       risk: finding.risk,
+      proposed_action: finding.proposed_action,
+      approval_prompt: finding.approval_prompt,
+      suggestion_source: "systems_repo_hygiene_check",
       hygiene_check_work_item_id: "a9f05742-2f16-4745-a1cd-2889275dccfe",
-    },
-  });
-
-  return { ...inserted, created: true, dedupe_key: finding.dedupe_key };
+      hygiene_check_date: "2026-04-29",
+    };
+    const insertResult = await db.query(
+      `insert into public.work_items (
+         kind, source_type, source_id, title, instruction, status, priority,
+         owner_agent, target_agent_id, requested_by, scheduled_for, payload
+       ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)
+       returning id, title, status`,
+      [
+        "task",
+        "service",
+        "a9f05742-2f16-4745-a1cd-2889275dccfe",
+        finding.title,
+        finding.instruction,
+        "draft",
+        finding.risk === "high" ? "high" : "medium",
+        finding.target_agent_id,
+        finding.target_agent_id,
+        "systems_repo_hygiene_check",
+        null,
+        JSON.stringify(payload),
+      ],
+    );
+    const inserted = insertResult.rows[0];
+    await db.query(
+      `insert into public.event_log (
+         domain, event_type, entity_type, entity_id, actor, payload
+       ) values ($1, $2, $3, $4, $5, $6::jsonb)`,
+      [
+        "work",
+        "work_item.suggestion_created",
+        "work_item",
+        inserted.id,
+        "systems_repo_hygiene_check",
+        JSON.stringify({
+          dedupe_key: finding.dedupe_key,
+          title: finding.title,
+          target_agent_id: finding.target_agent_id,
+          proposed_action: finding.proposed_action,
+          risk: finding.risk,
+          hygiene_check_work_item_id: "a9f05742-2f16-4745-a1cd-2889275dccfe",
+        }),
+      ],
+    );
+    await db.query("commit");
+    return { ...inserted, created: true, dedupe_key: finding.dedupe_key };
+  } catch (error) {
+    await db.query("rollback").catch(() => {});
+    throw error;
+  }
 }
 
-const results = [];
-for (const finding of findings) {
-  results.push(await createDedupedSuggestion(finding));
+try {
+  await db.connect();
+  const results = [];
+  for (const finding of findings) results.push(await createDedupedSuggestion(finding));
+  console.table(results.map((result) => ({
+    created: result.created,
+    status: result.status,
+    title: result.title,
+    id: result.id,
+  })));
+} catch (error) {
+  console.error(redactSecrets(error, [databaseUrl]));
+  process.exitCode = 1;
+} finally {
+  await db.end().catch(() => {});
 }
-
-console.table(results.map((result) => ({
-  created: result.created,
-  status: result.status,
-  title: result.title,
-  id: result.id,
-})));

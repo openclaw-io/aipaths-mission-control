@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { getWorkItem, patchAgentWorkItem, type JsonRecord } from "@/lib/db/mission-control";
+import { getWorkItem, type JsonRecord } from "@/lib/db/mission-control";
+import { patchAgentWorkItemWithCompletion } from "@/lib/work-items/agent-completion-local";
 
 export const dynamic = "force-dynamic";
 
@@ -42,7 +43,7 @@ export async function PATCH(
   }
 
   try {
-    const data = await patchAgentWorkItem(id, body);
+    const data = await patchAgentWorkItemWithCompletion(id, body);
     if (!data) return NextResponse.json({ error: "Work item not found" }, { status: 404 });
     return NextResponse.json(data);
   } catch (error) {

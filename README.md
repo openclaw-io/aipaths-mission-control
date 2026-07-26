@@ -1,60 +1,80 @@
 # 🛰️ AIPaths Mission Control
 
-A dark-themed dashboard for managing AI agents, tasks, cron jobs, memory logs, and the Intel Inbox. Built with Next.js 15, TypeScript, Tailwind CSS, and Supabase.
+A dark-themed dashboard for managing AI agents, tasks, cron jobs, memory logs, and the Intel Inbox. Built with Next.js, TypeScript, Tailwind CSS, local Postgres, and Supabase auth/bootstrap integrations.
 
-## Setup
+## Local setup
 
-### 1. Clone & Install
+### 1. Clone the canonical checkout and install
 
 ```bash
-git clone https://github.com/openclaw-io/aipaths-mission-control.git
-cd aipaths-mission-control
+git clone https://github.com/openclaw-io/aipaths-mission-control.git /Users/joaco/openclaw/repos/aipaths-mission-control-live
+cd /Users/joaco/openclaw/repos/aipaths-mission-control-live
 npm install
 ```
 
-### 2. Create a Supabase Project
+All checked-in macOS service files use this canonical checkout path. Do not point a LaunchAgent at the retired `aipaths-mission-control` checkout.
 
-Go to [supabase.com](https://supabase.com) and create a new project.
+### 2. Create and initialize local Postgres
 
-### 3. Run the SQL Migrations
+The supported local target is exact: loopback host `127.0.0.1` or `::1`, database `aipaths_mission_control_local`. The safety-sensitive scripts reject other hosts, database-name prefixes/suffixes, URL overrides, and cloud fallbacks.
 
-Open the Supabase SQL Editor and run the migrations in `supabase/migrations/` in order.
-
-High-signal milestones in the current repo:
-
-```text
-supabase/migrations/001_create_tables.sql
-supabase/migrations/009_memories_vector.sql
-supabase/migrations/016_create_strategist_internal_analytics.sql
-supabase/migrations/017_retire_agent_memory.sql
-supabase/migrations/018_create_ops_youtube_comments.sql
+```bash
+/opt/homebrew/opt/postgresql@16/bin/createdb \
+  --host=127.0.0.1 --username=joaco aipaths_mission_control_local
+/opt/homebrew/opt/postgresql@16/bin/psql \
+  'postgres://joaco@127.0.0.1:5432/aipaths_mission_control_local' \
+  --set=ON_ERROR_STOP=1 \
+  --file=ops/local-postgres/schema.sql
 ```
 
-`001_create_tables.sql` sets up the base tables. `009_memories_vector.sql` creates the active `memories` table used by the app for journal, strategic, and report entries. `017_retire_agent_memory.sql` records the retirement of the legacy `agent_memory` table, and `018_create_ops_youtube_comments.sql` adds the canonical YouTube comments table used by strategist analytics.
+`schema.sql` creates the local-only baseline and leaves imported data tables empty. It only seeds local runtime configuration.
 
-### 4. Configure Environment
-
-Copy the example env file and fill in your credentials:
+### 3. Configure `.env.local`
 
 ```bash
 cp .env.example .env.local
 ```
 
-Required variables:
+Required for the local runtime and local write scripts:
+
+```dotenv
+MISSION_CONTROL_DATABASE_URL=postgres://joaco@127.0.0.1:5432/aipaths_mission_control_local
+```
+
+Supabase variables remain necessary for auth and for the one-time cloud-to-local bootstrap, but `SUPABASE_SERVICE_ROLE_KEY` is never a runtime database fallback:
+
 - `NEXT_PUBLIC_SUPABASE_URL`
 - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
-- `SUPABASE_SERVICE_ROLE_KEY`
-- `AGENT_API_KEY`
-- `OPENCLAW_GATEWAY_TOKEN`
+- `SUPABASE_SERVICE_ROLE_KEY` (bootstrap/admin scripts only)
 
-Optional:
-- `DISCORD_TASK_ROUTER_WEBHOOK`
+Other runtime integrations may require `AGENT_API_KEY`, `OPENCLAW_GATEWAY_TOKEN`, `WEBSITE_SUPABASE_URL`, or `WEBSITE_SUPABASE_SERVICE_ROLE_KEY`. `DISCORD_TASK_ROUTER_WEBHOOK` is optional.
 
-### 5. Create a User
+### 4. Bootstrap local data from cloud
 
-In the Supabase dashboard, go to **Authentication → Users** and create a user with email and password. This will be your login for Mission Control.
+On a fresh local database, run:
 
-### 6. Run the Dev Server
+```bash
+node scripts/sync-local-core-from-cloud.mjs
+```
+
+Default behavior is bootstrap-only: the script checks local emptiness before cloud reads and performs no `TRUNCATE`. It fetches and preflights the complete imported dependency set, including `pipeline_runs`, `loops`, relation tables, and every `work_items.parent_id`. Missing parents, schema drift that would drop cloud fields, missing tables, or unknown dependent local tables abort before mutation.
+
+If the local database contains data, the script exits without touching it. Intentional replacement requires the exact database-specific confirmation:
+
+```bash
+node scripts/sync-local-core-from-cloud.mjs \
+  --replace-local-data=aipaths_mission_control_local
+```
+
+Replacement mode first locks the closed import set against concurrent writes, then creates and verifies a full custom-format `pg_dump` under:
+
+```text
+~/Library/Application Support/AIPaths Mission Control/backups/
+```
+
+Only after backup and all preflight checks succeed does it replace the closed dependency set in one transaction. It does not use `TRUNCATE ... CASCADE`. Override the backup directory only together with replacement via `--backup-dir=/absolute/path`. Restore a backup with `pg_restore` into a separately created database and inspect it before any cutover.
+
+### 5. Run locally
 
 ```bash
 npm run dev
@@ -64,60 +84,85 @@ Open [http://127.0.0.1:3001](http://127.0.0.1:3001) and log in.
 
 ## Local-only hosting contract
 
-- Mission Control listens on `127.0.0.1:3001` in both dev and production mode.
+- Mission Control listens on `127.0.0.1:3001` in development and production mode.
 - Do not bind it to `0.0.0.0` for normal operation.
-- Remote access should happen through a private network layer such as Tailscale, not direct LAN or public exposure.
+- Remote access should use a private network layer such as Tailscale, not direct LAN or public exposure.
+- Application and maintenance writes use `MISSION_CONTROL_DATABASE_URL`; they do not silently fall back to Supabase Cloud.
 
 ## launchd service (macOS)
 
-A ready-to-install LaunchAgent lives at:
+Both checked-in plist variants are intentionally aligned to the canonical checkout and explicit local database environment:
 
 ```text
 ops/macos/com.aipaths.mission-control.plist
+ops/macos/com.aipaths.mission-control.local.plist
 ```
 
-Typical first-time load flow:
+Build before loading the production service:
 
 ```bash
+npm run build
 cp ops/macos/com.aipaths.mission-control.plist ~/Library/LaunchAgents/
-launchctl unload ~/Library/LaunchAgents/com.aipaths.mission-control.plist 2>/dev/null || true
-launchctl load ~/Library/LaunchAgents/com.aipaths.mission-control.plist
-launchctl start com.aipaths.mission-control
-```
-
-For day-to-day development after code changes, the key command is usually just:
-
-```bash
+launchctl bootout gui/$(id -u)/com.aipaths.mission-control 2>/dev/null || true
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.aipaths.mission-control.plist
 launchctl kickstart -k gui/$(id -u)/com.aipaths.mission-control
 ```
 
-That restarts the LaunchAgent already serving Mission Control on `127.0.0.1:3001`.
+After code changes, rebuild and restart:
+
+```bash
+npm run build
+launchctl kickstart -k gui/$(id -u)/com.aipaths.mission-control
+```
 
 Useful checks:
 
 ```bash
 lsof -nP -iTCP:3001 -sTCP:LISTEN
-launchctl print gui/$(id -u)/com.aipaths.mission-control | sed -n '1,120p'
+launchctl print gui/$(id -u)/com.aipaths.mission-control
+
 tail -n 100 ~/Library/Logs/com.aipaths.mission-control.out.log
 tail -n 100 ~/Library/Logs/com.aipaths.mission-control.err.log
 ```
 
 Current production-like local service facts on the Mac Mini:
+
 - LaunchAgent label: `com.aipaths.mission-control`
 - Working directory: `/Users/joaco/openclaw/repos/aipaths-mission-control-live`
+- Database: `aipaths_mission_control_local` on `127.0.0.1`
 - Start command: `next start -H 127.0.0.1 -p 3001`
-- Tunnel target should therefore reflect the app served from port `3001`
+- Tunnel target: the service on loopback port `3001`
+
+## Maintenance scripts
+
+Seed the historical repo-hygiene suggestions into local Postgres with:
+
+```bash
+npm run suggestions:seed-hygiene
+```
+
+The command requires `MISSION_CONTROL_DATABASE_URL`, validates the exact local target, writes `work_items` and `event_log` transactionally, and has no Supabase/cloud fallback.
+
+Run sync helper tests and the project checks with:
+
+```bash
+node --test ops/local-postgres/sync-local-core-helpers.test.mjs
+npm run test:youtube-statistics
+npm run lint
+plutil -lint ops/macos/*.plist
+```
 
 ## Tech Stack
 
-- **Next.js 15** (App Router, TypeScript)
+- **Next.js 16** (App Router, TypeScript)
 - **Tailwind CSS** (dark theme)
-- **Supabase** (Auth + Postgres)
-- **@supabase/ssr** (cookie-based auth)
+- **Local Postgres** (Mission Control operational data)
+- **Supabase + @supabase/ssr** (auth and explicit bootstrap/integration paths)
 
 ## Intel Inbox
 
-Mission Control now exposes the strategist review surface at:
+Mission Control exposes the strategist review surface at:
+
 - UI: `/intel`
 - API: `/api/intel/inbox`
 

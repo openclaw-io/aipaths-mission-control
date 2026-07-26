@@ -1,7 +1,12 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getLocalMissionControlUser, isLocalAuthDisabled } from "@/lib/auth/local";
-import { createPipelineWorkItemLocal, getPipelineItemLocal, updatePipelineItemLocal } from "@/lib/db/pipeline-local";
-import { query } from "@/lib/db/postgres";
+import {
+  createPipelineWorkItemLocal,
+  getPipelineItemLocal,
+  insertPipelineTransitionEventLocal,
+  updatePipelineItemLocal,
+  withLockedPipelineItemLocal,
+} from "@/lib/db/pipeline-local";
 import { resolveCommunityPublicationSlotLocal } from "@/lib/publication/scheduling-local";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/admin";
@@ -194,10 +199,10 @@ export async function POST(
     return NextResponse.json({ error: "Community post already has a publication record" }, { status: 409 });
   }
 
-  const metadata = {
-    ...(item.metadata || {}),
+  const buildMetadata = (transitionItem: { metadata?: Record<string, unknown> | null }): Record<string, unknown> => ({
+    ...(transitionItem.metadata || {}),
     review: {
-      ...((item.metadata || {}).review || {}),
+      ...(((transitionItem.metadata || {}).review as Record<string, unknown> | undefined) || {}),
       ...(action === "request_changes"
         ? {
             notes: String(reviewNotes).trim(),
@@ -212,7 +217,134 @@ export async function POST(
           }
         : {}),
     },
-  };
+  });
+  const metadata = buildMetadata(item);
+
+  if (useLocalMode) {
+    try {
+      const localResult = await withLockedPipelineItemLocal(id, ["community_post"], async ({ client, item: lockedRow }) => {
+        const lockedItem = lockedRow as unknown as typeof item;
+        if (String(lockedItem.updated_at || "") !== String(item.updated_at || "")) {
+          throw new Error("Concurrent community transition detected");
+        }
+        if (!(ALLOWED[lockedItem.status] || []).includes(targetStatus)) {
+          throw new Error(`Action ${action} not allowed from ${lockedItem.status}`);
+        }
+        if (action === "approve" && (!getCommunityCopy(lockedItem) || hasPublicationRecord(lockedItem))) {
+          throw new Error("Community post is no longer approvable");
+        }
+
+        const localMetadata = buildMetadata(lockedItem);
+        let localRevisionWorkItemId: string | null = null;
+        let localPublishWorkItemId: string | null = null;
+        let localScheduledFor: string | null = null;
+        let localScheduleSource: string | null = null;
+
+        if (action === "request_changes") {
+          const { workItem } = await createPipelineWorkItemLocal({
+            pipelineItemId: lockedItem.id,
+            pipelineType: "community_post",
+            title: `Revise community announcement: ${lockedItem.title}`,
+            instruction: createRevisionInstruction(lockedItem, String(reviewNotes).trim()),
+            priority: lockedItem.priority || "medium",
+            ownerAgent: "community",
+            requestedBy: actorIdentity,
+            relationType: "distribute_community",
+            action: "revise_community_announcement",
+            trigger: "community_review_changes_requested",
+            reviewNotes: String(reviewNotes).trim(),
+          }, client);
+          localRevisionWorkItemId = workItem?.id || null;
+        }
+
+        if (action === "approve") {
+          const scheduleMetadata = ((lockedItem.metadata || {}).schedule || {}) as Record<string, unknown>;
+          const explicitLaunchSchedule = [scheduleMetadata.target_publish_at, scheduleMetadata.scheduled_for]
+            .find((value) => typeof value === "string" && value.trim()) as string | undefined;
+          const slot = await resolveCommunityPublicationSlotLocal({
+            metadata: lockedItem.metadata || {},
+            explicitScheduledFor: explicitLaunchSchedule,
+            pipelineItemId: lockedItem.id,
+            client,
+          });
+          localScheduledFor = slot?.scheduledFor || null;
+          localScheduleSource = slot?.source || (slot === null ? "immediate_content_launch" : null);
+          const target = communityPublishTarget(lockedItem.metadata || {});
+          const source = ((lockedItem.metadata || {}).source || {}) as Record<string, unknown>;
+          const sourceUrl = [source.url, source.video_url, source.playlist_url]
+            .find((value) => typeof value === "string" && value.trim()) as string | undefined;
+          const allowsYouTubePreview = source.type === "video" && !!sourceUrl && /(?:youtube\.com|youtu\.be)/i.test(sourceUrl);
+          const { workItem } = await createPipelineWorkItemLocal({
+            pipelineItemId: lockedItem.id,
+            pipelineType: "community_post",
+            title: `Publish community post: ${lockedItem.title}`,
+            instruction: createPublishInstruction(lockedItem, localScheduledFor),
+            priority: lockedItem.priority || "medium",
+            ownerAgent: "community",
+            requestedBy: actorIdentity,
+            relationType: "publish",
+            action: "publish_community_post",
+            trigger: localScheduledFor ? "community_review_approved_scheduled" : "community_review_approved_immediate",
+            scheduledFor: localScheduledFor,
+            payloadExtra: {
+              schedule_kind: "publication",
+              community_segment: getCommunityPublicationSegment(lockedItem.metadata || {}),
+              target_channel_id: target.channelId,
+              target_channel_name: target.channelName,
+              log_channel_id: "1473660854800224316",
+              suppress_link_previews: !allowsYouTubePreview,
+            },
+          }, client);
+          localPublishWorkItemId = workItem?.id || null;
+        }
+
+        const nextStatus = action === "approve" && localPublishWorkItemId ? "scheduled" : targetStatus;
+        const localUpdatePayload: Record<string, unknown> = {
+          status: nextStatus,
+          metadata: action === "approve"
+            ? {
+                ...localMetadata,
+                schedule: {
+                  ...((localMetadata.schedule as Record<string, unknown> | undefined) || {}),
+                  source: localScheduleSource,
+                  scheduled_at: new Date().toISOString(),
+                  scheduled_by: actorIdentity,
+                  scheduled_for: localScheduledFor,
+                  publish_work_item_id: localPublishWorkItemId,
+                },
+              }
+            : localMetadata,
+          updated_at: new Date().toISOString(),
+        };
+        if (current_url) localUpdatePayload.current_url = current_url;
+        if (action === "mark_published") localUpdatePayload.published_at = new Date().toISOString();
+        const updatedItem = await updatePipelineItemLocal(id, localUpdatePayload, client);
+        await insertPipelineTransitionEventLocal(client, {
+          domain: "community",
+          eventType: `community_post.${action}`,
+          pipelineItemId: id,
+          actor: actorIdentity,
+          dedupeKey: `${action}:${String(item.updated_at || "")}`,
+          payload: {
+            status: nextStatus,
+            review_notes: action === "request_changes" ? String(reviewNotes).trim() : null,
+            revision_work_item_id: localRevisionWorkItemId,
+            publish_work_item_id: localPublishWorkItemId,
+            scheduled_for: localScheduledFor,
+            schedule_source: localScheduleSource,
+          },
+        });
+        return { updatedItem, localRevisionWorkItemId, localPublishWorkItemId, localScheduledFor };
+      });
+      if (!localResult?.updatedItem) return NextResponse.json({ error: "Failed to update community item" }, { status: 500 });
+      if (localResult.localRevisionWorkItemId) void notifyWorkItem(localResult.localRevisionWorkItemId, "community");
+      if (localResult.localPublishWorkItemId && !localResult.localScheduledFor) void notifyWorkItem(localResult.localPublishWorkItemId, "community");
+      return NextResponse.json(localResult.updatedItem);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed local community transition";
+      return NextResponse.json({ error: message }, { status: message.startsWith("Concurrent") ? 409 : 500 });
+    }
+  }
 
   let revisionWorkItemId: string | null = null;
   let publishWorkItemId: string | null = null;
@@ -234,9 +366,7 @@ export async function POST(
         trigger: "community_review_changes_requested",
         reviewNotes: String(reviewNotes).trim(),
       };
-      const { workItem } = useLocalMode
-        ? await createPipelineWorkItemLocal(workInput)
-        : await createPipelineWorkItem(db!, workInput);
+      const { workItem } = await createPipelineWorkItem(db!, workInput);
       revisionWorkItemId = workItem?.id || null;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -251,17 +381,11 @@ export async function POST(
       const scheduleMetadata = (metadataForSchedule.schedule || {}) as Record<string, unknown>;
       const explicitLaunchSchedule = [scheduleMetadata.target_publish_at, scheduleMetadata.scheduled_for]
         .find((value) => typeof value === "string" && value.trim()) as string | undefined;
-      const slot = useLocalMode
-        ? await resolveCommunityPublicationSlotLocal({
-            metadata: metadataForSchedule,
-            explicitScheduledFor: explicitLaunchSchedule,
-            pipelineItemId: item.id,
-          })
-        : await resolveCommunityPublicationSlot(db!, {
-            metadata: metadataForSchedule,
-            explicitScheduledFor: explicitLaunchSchedule,
-            pipelineItemId: item.id,
-          });
+      const slot = await resolveCommunityPublicationSlot(db!, {
+        metadata: metadataForSchedule,
+        explicitScheduledFor: explicitLaunchSchedule,
+        pipelineItemId: item.id,
+      });
       approvedScheduledFor = slot?.scheduledFor || null;
       approvedScheduleSource = slot?.source || (slot === null ? "immediate_content_launch" : null);
       const target = communityPublishTarget(metadataForSchedule);
@@ -290,9 +414,7 @@ export async function POST(
           suppress_link_previews: !allowsYouTubePreview,
         },
       };
-      const { workItem } = useLocalMode
-        ? await createPipelineWorkItemLocal(workInput)
-        : await createPipelineWorkItem(db!, workInput);
+      const { workItem } = await createPipelineWorkItem(db!, workInput);
       publishWorkItemId = workItem?.id || null;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -308,7 +430,7 @@ export async function POST(
       ? {
           ...metadata,
           schedule: {
-            ...((metadata.schedule || {}) as Record<string, unknown>),
+            ...((metadata.schedule as Record<string, unknown> | undefined) || {}),
             source: approvedScheduleSource,
             scheduled_at: new Date().toISOString(),
             scheduled_by: actorIdentity,
@@ -323,18 +445,16 @@ export async function POST(
   if (current_url) updatePayload.current_url = current_url;
   if (action === "mark_published") updatePayload.published_at = new Date().toISOString();
 
-  const updated = useLocalMode
-    ? await updatePipelineItemLocal(id, updatePayload)
-    : await (async () => {
-        const { data, error } = await db!
-          .from("pipeline_items")
-          .update(updatePayload)
-          .eq("id", id)
-          .select("id, pipeline_type, title, slug, status, priority, owner_agent, requested_by, source_type, source_id, published_at, current_url, content_path, content_format, metadata, created_at, updated_at")
-          .single();
-        if (error) throw new Error(error.message);
-        return data;
-      })().catch(() => null);
+  const updated = await (async () => {
+    const { data, error } = await db!
+      .from("pipeline_items")
+      .update(updatePayload)
+      .eq("id", id)
+      .select("id, pipeline_type, title, slug, status, priority, owner_agent, requested_by, source_type, source_id, published_at, current_url, content_path, content_format, metadata, created_at, updated_at")
+      .single();
+    if (error) throw new Error(error.message);
+    return data;
+  })().catch(() => null);
 
   if (!updated) {
     return NextResponse.json({ error: "Failed to update community item" }, { status: 500 });
@@ -343,41 +463,22 @@ export async function POST(
   if (revisionWorkItemId) void notifyWorkItem(revisionWorkItemId, "community");
   if (publishWorkItemId && !approvedScheduledFor) void notifyWorkItem(publishWorkItemId, "community");
 
-  if (useLocalMode) {
-    await query(
-      `insert into event_log (domain, event_type, entity_type, entity_id, actor, payload)
-       values ('community', $1, 'pipeline_item', $2, $3, $4::jsonb)`,
-      [
-        `community_post.${action}`,
-        id,
-        actorIdentity,
-        JSON.stringify({
-          status: nextStatus,
-          review_notes: action === "request_changes" ? String(reviewNotes).trim() : null,
-          revision_work_item_id: revisionWorkItemId,
-          publish_work_item_id: publishWorkItemId,
-          scheduled_for: approvedScheduledFor,
-          schedule_source: approvedScheduleSource,
-        }),
-      ],
-    );
-  } else {
-    await db!.from("event_log").insert({
-      domain: "community",
-      event_type: `community_post.${action}`,
-      entity_type: "pipeline_item",
-      entity_id: id,
-      actor: actorIdentity,
-      payload: {
-        status: nextStatus,
-        review_notes: action === "request_changes" ? String(reviewNotes).trim() : null,
-        revision_work_item_id: revisionWorkItemId,
-        publish_work_item_id: publishWorkItemId,
-        scheduled_for: approvedScheduledFor,
-        schedule_source: approvedScheduleSource,
-      },
-    });
-  }
+  const { error: eventError } = await db!.from("event_log").insert({
+    domain: "community",
+    event_type: `community_post.${action}`,
+    entity_type: "pipeline_item",
+    entity_id: id,
+    actor: actorIdentity,
+    payload: {
+      status: nextStatus,
+      review_notes: action === "request_changes" ? String(reviewNotes).trim() : null,
+      revision_work_item_id: revisionWorkItemId,
+      publish_work_item_id: publishWorkItemId,
+      scheduled_for: approvedScheduledFor,
+      schedule_source: approvedScheduleSource,
+    },
+  });
+  if (eventError) return NextResponse.json({ error: eventError.message }, { status: 500 });
 
   return NextResponse.json(updated);
 }

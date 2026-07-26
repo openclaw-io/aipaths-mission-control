@@ -1,9 +1,8 @@
-import { readFile } from "node:fs/promises";
-import path from "node:path";
 import { NextResponse, type NextRequest } from "next/server";
 import { createServiceClient } from "@/lib/supabase/admin";
 import { isLocalAuthDisabled } from "@/lib/auth/local";
 import { getPipelineItemLocal } from "@/lib/db/pipeline-local";
+import { LocalImageError, readLocalImageFile } from "./local-image";
 
 export const dynamic = "force-dynamic";
 
@@ -29,22 +28,6 @@ function getString(record: JsonRecord | null, keys: string[]) {
   return null;
 }
 
-function contentTypeFor(filePath: string) {
-  const ext = path.extname(filePath).toLowerCase();
-  if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
-  if (ext === ".webp") return "image/webp";
-  if (ext === ".gif") return "image/gif";
-  return "image/png";
-}
-
-function isAllowedPath(filePath: string) {
-  const resolved = path.resolve(filePath);
-  return ALLOWED_IMAGE_ROOTS.some((root) => {
-    const resolvedRoot = path.resolve(root);
-    return resolved === resolvedRoot || resolved.startsWith(`${resolvedRoot}${path.sep}`);
-  });
-}
-
 export async function GET(_request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   let item: { metadata?: unknown } | null = null;
@@ -63,17 +46,20 @@ export async function GET(_request: NextRequest, { params }: { params: Promise<{
   const imagePath = getString(hero, ["media_path", "local_path", "path"]);
 
   if (!imagePath) return NextResponse.json({ error: "Hero image path not found" }, { status: 404 });
-  if (!isAllowedPath(imagePath)) return NextResponse.json({ error: "Hero image path is not allowed" }, { status: 403 });
 
   try {
-    const file = await readFile(imagePath);
-    return new NextResponse(file, {
+    const image = await readLocalImageFile(imagePath, ALLOWED_IMAGE_ROOTS);
+    return new NextResponse(image.data, {
       headers: {
-        "Content-Type": contentTypeFor(imagePath),
+        "Content-Type": image.contentType,
+        "Content-Length": String(image.size),
         "Cache-Control": "private, max-age=300",
       },
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof LocalImageError) {
+      return NextResponse.json({ error: error.message }, { status: error.status });
+    }
     return NextResponse.json({ error: "Hero image file not found" }, { status: 404 });
   }
 }

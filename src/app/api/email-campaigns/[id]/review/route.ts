@@ -1,7 +1,11 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getLocalMissionControlUser, isLocalAuthDisabled } from "@/lib/auth/local";
-import { createPipelineWorkItemLocal, getPipelineItemLocal, updatePipelineItemLocal } from "@/lib/db/pipeline-local";
-import { query } from "@/lib/db/postgres";
+import { getPipelineItemLocal, updatePipelineItemLocal } from "@/lib/db/pipeline-local";
+import {
+  EmailCampaignLocalError,
+  requestEmailChangesLocalAtomic,
+  scheduleEmailCampaignLocalAtomic,
+} from "@/lib/email-campaigns/local";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/admin";
 import { createPipelineWorkItem } from "@/lib/work-items/pipeline-materializer";
@@ -85,6 +89,40 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const feedback = readString(body.feedback);
   const scheduledForInput = readString(body.scheduled_for) || readString(body.scheduledFor);
 
+  if (useLocalMode && action === "request_changes") {
+    if (!feedback) return NextResponse.json({ error: "feedback is required" }, { status: 400 });
+    try {
+      return NextResponse.json(await requestEmailChangesLocalAtomic({
+        campaignId: id,
+        feedback,
+        actorIdentity,
+      }));
+    } catch (error) {
+      if (error instanceof EmailCampaignLocalError) {
+        return NextResponse.json({ error: error.message }, { status: error.status });
+      }
+      throw error;
+    }
+  }
+
+  if (useLocalMode && action === "schedule") {
+    if (!scheduledForInput) return NextResponse.json({ error: "scheduled_for is required" }, { status: 400 });
+    const scheduledTimestamp = Date.parse(scheduledForInput);
+    if (Number.isNaN(scheduledTimestamp)) return NextResponse.json({ error: "scheduled_for must be a valid date" }, { status: 400 });
+    try {
+      return NextResponse.json(await scheduleEmailCampaignLocalAtomic({
+        campaignId: id,
+        scheduledFor: new Date(scheduledTimestamp).toISOString(),
+        actorIdentity,
+      }));
+    } catch (error) {
+      if (error instanceof EmailCampaignLocalError) {
+        return NextResponse.json({ error: error.message }, { status: error.status });
+      }
+      throw error;
+    }
+  }
+
   const item = useLocalMode
     ? await getPipelineItemLocal(id, "email_campaign")
     : await (async () => {
@@ -136,9 +174,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         email_campaign_kind: readString(metadata.kind),
       },
     };
-    const result = useLocalMode
-      ? await createPipelineWorkItemLocal(workInput)
-      : await createPipelineWorkItem(db!, workInput);
+    const result = await createPipelineWorkItem(db!, workInput);
 
     const nextMetadata = {
       ...metadata,
@@ -169,18 +205,16 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       },
     };
 
-    const updated = useLocalMode
-      ? await updatePipelineItemLocal(item.id, { status: "drafting", metadata: nextMetadata, updated_at: now })
-      : await (async () => {
-          const { data, error } = await db!
-            .from("pipeline_items")
-            .update({ status: "drafting", metadata: nextMetadata, updated_at: now })
-            .eq("id", item.id)
-            .select("id,title,status,metadata,updated_at")
-            .single();
-          if (error) throw new Error(error.message);
-          return data;
-        })().catch(() => null);
+    const updated = await (async () => {
+      const { data, error } = await db!
+        .from("pipeline_items")
+        .update({ status: "drafting", metadata: nextMetadata, updated_at: now })
+        .eq("id", item.id)
+        .select("id,title,status,metadata,updated_at")
+        .single();
+      if (error) throw new Error(error.message);
+      return data;
+    })().catch(() => null);
 
     if (!updated) return NextResponse.json({ error: "Failed to update email campaign" }, { status: 500 });
 
@@ -249,47 +283,25 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         schedule_kind: "email_send",
       },
     };
-    const result = useLocalMode
-      ? await createPipelineWorkItemLocal(workInput)
-      : await createPipelineWorkItem(db!, workInput);
+    const result = await createPipelineWorkItem(db!, workInput);
 
     // If an open send work item already existed, createPipelineWorkItem dedupes it;
     // keep its schedule/instructions aligned with the latest selected date.
-    if (useLocalMode) {
-      await query(
-        `update work_items
-            set title = $1,
-                instruction = $2,
-                scheduled_for = $3,
-                status = $4,
-                updated_at = $5
-          where id = $6`,
-        [
-          `Send email campaign: ${item.title}`,
-          buildSendInstruction({ title: item.title, kind: readString(metadata.kind), scheduledFor, draft }),
+    await db!
+      .from("work_items")
+      .update({
+        title: `Send email campaign: ${item.title}`,
+        instruction: buildSendInstruction({
+          title: item.title,
+          kind: readString(metadata.kind),
           scheduledFor,
-          result.workItem.status === "in_progress" ? "in_progress" : "ready",
-          now,
-          result.workItem.id,
-        ],
-      );
-    } else {
-      await db!
-        .from("work_items")
-        .update({
-          title: `Send email campaign: ${item.title}`,
-          instruction: buildSendInstruction({
-            title: item.title,
-            kind: readString(metadata.kind),
-            scheduledFor,
-            draft,
-          }),
-          scheduled_for: scheduledFor,
-          status: result.workItem.status === "in_progress" ? "in_progress" : "ready",
-          updated_at: now,
-        })
-        .eq("id", result.workItem.id);
-    }
+          draft,
+        }),
+        scheduled_for: scheduledFor,
+        status: result.workItem.status === "in_progress" ? "in_progress" : "ready",
+        updated_at: now,
+      })
+      .eq("id", result.workItem.id);
 
     const nextMetadata = {
       ...metadata,
@@ -308,18 +320,16 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       },
     };
 
-    const updated = useLocalMode
-      ? await updatePipelineItemLocal(item.id, { status: "scheduled", scheduled_for: scheduledFor, metadata: nextMetadata, updated_at: now })
-      : await (async () => {
-          const { data, error } = await db!
-            .from("pipeline_items")
-            .update({ status: "scheduled", scheduled_for: scheduledFor, metadata: nextMetadata, updated_at: now })
-            .eq("id", item.id)
-            .select("id,title,status,scheduled_for,metadata,updated_at")
-            .single();
-          if (error) throw new Error(error.message);
-          return data;
-        })().catch(() => null);
+    const updated = await (async () => {
+      const { data, error } = await db!
+        .from("pipeline_items")
+        .update({ status: "scheduled", scheduled_for: scheduledFor, metadata: nextMetadata, updated_at: now })
+        .eq("id", item.id)
+        .select("id,title,status,scheduled_for,metadata,updated_at")
+        .single();
+      if (error) throw new Error(error.message);
+      return data;
+    })().catch(() => null);
 
     if (!updated) return NextResponse.json({ error: "Failed to schedule email campaign" }, { status: 500 });
 

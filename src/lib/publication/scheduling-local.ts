@@ -1,3 +1,4 @@
+import type { PoolClient } from "pg";
 import { query } from "@/lib/db/postgres";
 import { getCommunityPublicationSegment, isPublicationWorkItem, type CommunityPublicationSegment, type PublicationSlotResult } from "@/lib/publication/scheduling";
 
@@ -12,6 +13,7 @@ type OccupiedPublicationRow = {
 const DEFAULT_PUBLISH_HOURS_UTC = [12, 19];
 const OPEN_PUBLICATION_STATUSES = ["draft", "ready", "blocked", "in_progress"];
 const LONDON_TZ = "Europe/London";
+type QueryClient = Pick<PoolClient, "query">;
 
 function isWeekend(date: Date) {
   const day = date.getUTCDay();
@@ -133,16 +135,17 @@ function weekKey(date: Date) {
   return `${mondayParts.year}-${String(mondayParts.month).padStart(2, "0")}-${String(mondayParts.day).padStart(2, "0")}`;
 }
 
-async function getOccupiedPublicationSlotsLocal(now: Date, horizon: Date) {
-  const { rows } = await query<OccupiedPublicationRow>(
-    `select id, source_id, scheduled_for, payload, status
+async function getOccupiedPublicationSlotsLocal(now: Date, horizon: Date, client?: QueryClient) {
+  const sql = `select id, source_id, scheduled_for, payload, status
        from work_items
       where status = any($1::text[])
         and scheduled_for is not null
         and scheduled_for >= $2
-        and scheduled_for <= $3`,
-    [OPEN_PUBLICATION_STATUSES, now.toISOString(), horizon.toISOString()],
-  );
+        and scheduled_for <= $3`;
+  const params = [OPEN_PUBLICATION_STATUSES, now.toISOString(), horizon.toISOString()];
+  const { rows } = client
+    ? await client.query<OccupiedPublicationRow>(sql, params)
+    : await query<OccupiedPublicationRow>(sql, params);
   return rows;
 }
 
@@ -151,6 +154,7 @@ export async function resolvePublicationSlotLocal(input: {
   existingScheduledFor?: string | null;
   pipelineItemId?: string | null;
   now?: Date;
+  client?: QueryClient;
 } = {}): Promise<PublicationSlotResult> {
   if (input.explicitScheduledFor) return { scheduledFor: input.explicitScheduledFor, source: "explicit" };
   if (input.existingScheduledFor) return { scheduledFor: input.existingScheduledFor, source: "existing" };
@@ -160,7 +164,7 @@ export async function resolvePublicationSlotLocal(input: {
   horizon.setUTCDate(horizon.getUTCDate() + 30);
   horizon.setUTCHours(23, 59, 59, 999);
 
-  const data = await getOccupiedPublicationSlotsLocal(now, horizon);
+  const data = await getOccupiedPublicationSlotsLocal(now, horizon, input.client);
   const occupied = new Set<string>();
 
   for (const item of data) {
@@ -184,6 +188,7 @@ export async function resolveCommunityPublicationSlotLocal(input: {
   existingScheduledFor?: string | null;
   pipelineItemId?: string | null;
   now?: Date;
+  client?: QueryClient;
 } = {}): Promise<PublicationSlotResult | null> {
   const segment = getCommunityPublicationSegment(input.metadata);
   if (segment === "content_launch") return null;
@@ -195,7 +200,7 @@ export async function resolveCommunityPublicationSlotLocal(input: {
   horizon.setUTCDate(horizon.getUTCDate() + 60);
   horizon.setUTCHours(23, 59, 59, 999);
 
-  const occupiedItems = await getOccupiedPublicationSlotsLocal(now, horizon);
+  const occupiedItems = await getOccupiedPublicationSlotsLocal(now, horizon, input.client);
   const occupied = new Set<string>();
   const weeklyCounts = new Map<string, number>();
 
