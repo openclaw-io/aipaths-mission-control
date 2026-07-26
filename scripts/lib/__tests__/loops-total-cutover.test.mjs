@@ -40,9 +40,10 @@ test("fresh-install schema exposes only canonical Loop relations", () => {
   }
 });
 
-test("local Loop review records last_completed_at with cloud parity", () => {
+test("local Loop review preserves the migrated local shape without assuming last_completed_at", () => {
   const reviewRoute = readFileSync(resolve(root, "src/app/api/loops/[id]/review/route.ts"), "utf8");
-  assert.match(reviewRoute, /last_completed_at\s*=\s*case when \$1 = 'completed'/i);
+  const localBranch = reviewRoute.slice(reviewRoute.indexOf("if (useLocalMode)"), reviewRoute.indexOf("const supabase = createServiceClient"));
+  assert.doesNotMatch(localBranch, /last_completed_at/i);
 });
 
 test("cloud/local sync is bounded, FK-safe, and verifies the local target", () => {
@@ -56,6 +57,13 @@ test("cloud/local sync is bounded, FK-safe, and verifies the local target", () =
   assert.match(sync, /new URL\s*\(/);
   assert.match(sync, /current_database\s*\(\)|verifyLocalDatabaseTarget/i);
   assert.match(sync, /restoreWorkItemParents|parent_id.*null/is, "work_items.parent_id is not imported in two FK-safe phases");
+});
+
+test("cutover migrates each store independently and treats sync drift as an abort", () => {
+  const runbook = readFileSync(resolve(root, "ops/migrations/20260726_loops_cutover/README.md"), "utf8");
+  assert.match(runbook, /independently in each store/i);
+  assert.match(runbook, /sync is not a cutover step/i);
+  assert.match(runbook, /sync is expected to abort.*drift/is);
 });
 
 test("active runtime passes the zero-legacy-domain guard", () => {
@@ -96,6 +104,22 @@ test("versioned migration artifacts are transactional, reversible, and drift-lou
   assert.match(rollback, /quick_loop_box/);
   assert.match(postflight, /quick_project_box/);
   assert.match(postflight, /project-planner/);
+  assert.match(forward, /pipeline_items[\s\S]*project_id[\s\S]*loop_id/i);
+  assert.match(forward, /recurrence_rules[\s\S]*project_id[\s\S]*loop_id/i);
+  assert.match(forward, /cutover_created/i, "forward lacks the specially named fallback primary_execution index");
+  assert.match(rollback, /DROP INDEX[\s\S]*cutover_created/i);
+  assert.match(postflight, /indisunique[\s\S]*primary_execution/i, "postflight does not verify the partial unique index definition");
+  assert.match(preflight, /orphan[\s\S]*source_type[\s\S]*source_id|source_type[\s\S]*source_id[\s\S]*orphan/i);
+  assert.match(forward, /orphaned_source_loop_id/);
+  assert.match(postflight, /orphaned_source_loop_id/);
+  assert.match(rollback, /orphaned_source_loop_id/);
+  assert.match(forward, /source_type_loop_cutover_created/i, "forward lacks a permissive no-project CHECK fallback");
+  assert.match(rollback, /source_type_loop_cutover_created/i);
+
+  for (const optionalRelation of ["pipeline_items", "recurrence_rules"]) {
+    assert.match(forward, new RegExp(`LOCK TABLE[^;]*${optionalRelation}|LOCK TABLE public\\.${optionalRelation}`, "is"));
+    assert.match(rollback, new RegExp(`LOCK TABLE[^;]*${optionalRelation}|LOCK TABLE public\\.${optionalRelation}`, "is"));
+  }
 
   // Migration 030 is a reversible namespace/value cutover, not a schema normalizer.
   for (const destructiveShapeChange of [

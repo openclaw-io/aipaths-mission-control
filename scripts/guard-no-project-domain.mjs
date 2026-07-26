@@ -35,10 +35,27 @@ const DOMAIN_PATTERNS = [
   ["legacy controlled payload key", /\b(?:source_project_id|source_project_title|materialized_from_project|project_status_at_materialization|superseded_for_project_id)\b/],
 ];
 
+const schema = readFileSync("ops/local-postgres/schema.sql", "utf8");
+const forward = readFileSync("supabase/migrations/030_projects_to_loops_total_cutover.sql", "utf8");
+const rollback = readFileSync("ops/migrations/20260726_loops_cutover/rollback.sql", "utf8");
+const postflight = readFileSync("ops/migrations/20260726_loops_cutover/postflight.sql", "utf8");
+const reviewRoute = readFileSync("src/app/api/loops/[id]/review/route.ts", "utf8");
+const localReviewBranch = reviewRoute.slice(reviewRoute.indexOf("if (useLocalMode)"), reviewRoute.indexOf("const supabase = createServiceClient"));
+const contractViolations = [];
+if (!/CREATE TABLE IF NOT EXISTS public\.pipeline_items[\s\S]*\bloop_id uuid/i.test(schema)) contractViolations.push("fresh schema: pipeline_items.loop_id missing");
+if (/public\.recurrence_rules\b/i.test(schema)) contractViolations.push("fresh schema: legacy recurrence_rules was introduced");
+if (/\bproject_id\b/i.test(schema)) contractViolations.push("fresh schema: project_id remains");
+for (const relation of ["pipeline_items", "recurrence_rules"]) {
+  if (!new RegExp(`${relation}[\\s\\S]*project_id[\\s\\S]*loop_id`, "i").test(forward)) contractViolations.push(`forward: optional ${relation} rename missing`);
+}
+if (!/cutover_created/i.test(forward) || !/DROP INDEX[\s\S]*cutover_created/i.test(rollback)) contractViolations.push("migration: reversible cutover-created primary index contract missing");
+if (!/orphaned_source_loop_id/.test(forward + postflight + rollback)) contractViolations.push("migration: orphan Loop source marker contract missing");
+if (/last_completed_at/i.test(localReviewBranch)) contractViolations.push("local runtime: review assumes last_completed_at");
+
 const files = execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], { encoding: "utf8" })
   .split("\0")
   .filter(Boolean);
-const violations = [];
+const violations = [...contractViolations];
 
 for (const file of files) {
   if (!existsSync(file) || ALLOWLIST.has(file) || !TEXT_EXTENSIONS.has(extname(file))) continue;

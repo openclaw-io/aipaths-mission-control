@@ -21,9 +21,28 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='work_items' AND column_name='loop_id') THEN
     RAISE EXCEPTION 'Loops rollback source column work_items.loop_id is absent';
   END IF;
+  IF to_regclass('public.pipeline_items') IS NOT NULL AND NOT EXISTS
+    (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='pipeline_items' AND column_name='loop_id') THEN
+    RAISE EXCEPTION 'Loops rollback optional source column pipeline_items.loop_id is absent';
+  END IF;
+  IF to_regclass('public.recurrence_rules') IS NOT NULL AND NOT EXISTS
+    (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='recurrence_rules' AND column_name='loop_id') THEN
+    RAISE EXCEPTION 'Loops rollback optional source column recurrence_rules.loop_id is absent';
+  END IF;
 END $$;
 
 LOCK TABLE public.loops, public.loop_events, public.loop_work_items, public.work_items IN ACCESS EXCLUSIVE MODE;
+DO $$ BEGIN
+  IF to_regclass('public.pipeline_items') IS NOT NULL THEN
+    LOCK TABLE public.pipeline_items IN ACCESS EXCLUSIVE MODE;
+  END IF;
+  IF to_regclass('public.recurrence_rules') IS NOT NULL THEN
+    LOCK TABLE public.recurrence_rules IN ACCESS EXCLUSIVE MODE;
+  END IF;
+END $$;
+
+DROP INDEX IF EXISTS public.uq_loop_work_items_primary_execution__cutover_created;
+ALTER TABLE public.work_items DROP CONSTRAINT IF EXISTS work_items_source_type_loop_cutover_created;
 
 DO $$
 DECLARE
@@ -47,16 +66,16 @@ BEGIN
     WHERE wi.loop_id IS NOT NULL AND l.id IS NULL;
   IF collisions>0 THEN RAISE EXCEPTION 'Loops rollback found % orphan work_items.loop_id values',collisions; END IF;
 
-  FOR obj IN SELECT conname FROM pg_constraint
-    WHERE conrelid IN ('public.loops'::regclass,'public.loop_events'::regclass,'public.loop_work_items'::regclass,'public.work_items'::regclass)
-      AND conname ILIKE '%loop%'
+  FOR obj IN SELECT c.conname FROM pg_constraint c JOIN pg_class r ON r.oid=c.conrelid JOIN pg_namespace n ON n.oid=r.relnamespace
+    WHERE n.nspname='public' AND r.relname IN ('loops','loop_events','loop_work_items','work_items','pipeline_items','recurrence_rules')
+      AND c.conname ILIKE '%loop%'
   LOOP
     IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname=replace(obj.conname,'loop','project')) THEN
       RAISE EXCEPTION 'Loops rollback destination constraint name already exists: %',replace(obj.conname,'loop','project');
     END IF;
   END LOOP;
   FOR obj IN SELECT indexname FROM pg_indexes WHERE schemaname='public'
-    AND tablename IN ('loops','loop_events','loop_work_items','work_items') AND indexname ILIKE '%loop%'
+    AND tablename IN ('loops','loop_events','loop_work_items','work_items','pipeline_items','recurrence_rules') AND indexname ILIKE '%loop%'
   LOOP
     IF to_regclass(format('public.%I',replace(obj.indexname,'loop','project'))) IS NOT NULL THEN
       RAISE EXCEPTION 'Loops rollback destination index name already exists: %',replace(obj.indexname,'loop','project');
@@ -113,14 +132,14 @@ BEGIN
 END $$;
 
 UPDATE public.work_items SET payload=pg_temp.rewrite_loop_controlled_values(
-  (payload - 'source_loop_id' - 'source_loop_title' - 'materialized_from_loop' - 'loop_status_at_materialization' - 'superseded_for_loop_id')
+  (payload - 'source_loop_id' - 'source_loop_title' - 'materialized_from_loop' - 'loop_status_at_materialization' - 'superseded_for_loop_id' - 'orphaned_source_loop_id')
   || CASE WHEN payload ? 'source_loop_id' THEN jsonb_build_object('source_project_id',payload->'source_loop_id') ELSE '{}'::jsonb END
   || CASE WHEN payload ? 'source_loop_title' THEN jsonb_build_object('source_project_title',payload->'source_loop_title') ELSE '{}'::jsonb END
   || CASE WHEN payload ? 'materialized_from_loop' THEN jsonb_build_object('materialized_from_project',payload->'materialized_from_loop') ELSE '{}'::jsonb END
   || CASE WHEN payload ? 'loop_status_at_materialization' THEN jsonb_build_object('project_status_at_materialization',payload->'loop_status_at_materialization') ELSE '{}'::jsonb END
   || CASE WHEN payload ? 'superseded_for_loop_id' THEN jsonb_build_object('superseded_for_project_id',payload->'superseded_for_loop_id') ELSE '{}'::jsonb END
 )
-WHERE payload ?| ARRAY['source_loop_id','source_loop_title','materialized_from_loop','loop_status_at_materialization','superseded_for_loop_id']
+WHERE payload ?| ARRAY['source_loop_id','source_loop_title','materialized_from_loop','loop_status_at_materialization','superseded_for_loop_id','orphaned_source_loop_id']
    OR jsonb_path_exists(payload,'$.** ? (@ == $value)',jsonb_build_object('value','quick_loop_box'))
    OR jsonb_path_exists(payload,'$.** ? (@ == $value)',jsonb_build_object('value','loop-planner'))
    OR jsonb_path_exists(payload,'$.** ? (@ == $value)',jsonb_build_object('value','loop-execution-materializer'));
@@ -171,6 +190,14 @@ ALTER TABLE public.loop_work_items RENAME TO project_work_items;
 ALTER TABLE public.work_items RENAME COLUMN loop_id TO project_id;
 ALTER TABLE public.project_events RENAME COLUMN loop_id TO project_id;
 ALTER TABLE public.project_work_items RENAME COLUMN loop_id TO project_id;
+DO $$ BEGIN
+  IF to_regclass('public.pipeline_items') IS NOT NULL THEN
+    ALTER TABLE public.pipeline_items RENAME COLUMN loop_id TO project_id;
+  END IF;
+  IF to_regclass('public.recurrence_rules') IS NOT NULL THEN
+    ALTER TABLE public.recurrence_rules RENAME COLUMN loop_id TO project_id;
+  END IF;
+END $$;
 
 DO $$
 DECLARE
@@ -178,14 +205,15 @@ DECLARE
   next_name text;
 BEGIN
   FOR obj IN SELECT c.conrelid::regclass AS relation_name,c.conname FROM pg_constraint c
-    WHERE c.conrelid IN ('public.projects'::regclass,'public.project_events'::regclass,'public.project_work_items'::regclass,'public.work_items'::regclass)
+    JOIN pg_class r ON r.oid=c.conrelid JOIN pg_namespace n ON n.oid=r.relnamespace
+    WHERE n.nspname='public' AND r.relname IN ('projects','project_events','project_work_items','work_items','pipeline_items','recurrence_rules')
       AND c.conname ILIKE '%loop%'
   LOOP
     next_name := replace(obj.conname,'loop','project');
     EXECUTE format('ALTER TABLE %s RENAME CONSTRAINT %I TO %I',obj.relation_name,obj.conname,next_name);
   END LOOP;
   FOR obj IN SELECT schemaname,indexname FROM pg_indexes WHERE schemaname='public'
-    AND tablename IN ('projects','project_events','project_work_items','work_items') AND indexname ILIKE '%loop%'
+    AND tablename IN ('projects','project_events','project_work_items','work_items','pipeline_items','recurrence_rules') AND indexname ILIKE '%loop%'
   LOOP
     next_name := replace(obj.indexname,'loop','project');
     EXECUTE format('ALTER INDEX %I.%I RENAME TO %I',obj.schemaname,obj.indexname,next_name);

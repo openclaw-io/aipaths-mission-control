@@ -33,9 +33,33 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='project_work_items' AND column_name='project_id') THEN
     RAISE EXCEPTION 'Loops cutover source column project_work_items.project_id is absent';
   END IF;
+  IF to_regclass('public.pipeline_items') IS NOT NULL THEN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='pipeline_items' AND column_name='project_id') THEN
+      RAISE EXCEPTION 'Loops cutover optional source table pipeline_items exists without project_id';
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='pipeline_items' AND column_name='loop_id') THEN
+      RAISE EXCEPTION 'Loops cutover optional source table pipeline_items already has loop_id';
+    END IF;
+  END IF;
+  IF to_regclass('public.recurrence_rules') IS NOT NULL THEN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='recurrence_rules' AND column_name='project_id') THEN
+      RAISE EXCEPTION 'Loops cutover optional source table recurrence_rules exists without project_id';
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='recurrence_rules' AND column_name='loop_id') THEN
+      RAISE EXCEPTION 'Loops cutover optional source table recurrence_rules already has loop_id';
+    END IF;
+  END IF;
 END $$;
 
 LOCK TABLE public.projects, public.project_events, public.project_work_items, public.work_items IN ACCESS EXCLUSIVE MODE;
+DO $$ BEGIN
+  IF to_regclass('public.pipeline_items') IS NOT NULL THEN
+    LOCK TABLE public.pipeline_items IN ACCESS EXCLUSIVE MODE;
+  END IF;
+  IF to_regclass('public.recurrence_rules') IS NOT NULL THEN
+    LOCK TABLE public.recurrence_rules IN ACCESS EXCLUSIVE MODE;
+  END IF;
+END $$;
 
 DO $$
 DECLARE
@@ -46,7 +70,7 @@ BEGIN
   -- Destination controlled keys/values must not predate the cutover. Otherwise a
   -- global inverse rewrite cannot distinguish old rows from cutover rows.
   SELECT count(*) INTO violations FROM public.work_items
-  WHERE payload ?| ARRAY['source_loop_id','source_loop_title','materialized_from_loop','loop_status_at_materialization','superseded_for_loop_id']
+  WHERE payload ?| ARRAY['source_loop_id','source_loop_title','materialized_from_loop','loop_status_at_materialization','superseded_for_loop_id','orphaned_source_loop_id']
      OR source_type='loop'
      OR requested_by IN ('loop-planner','loop-execution-materializer')
      OR jsonb_path_exists(payload, '$.** ? (@ == $value)', jsonb_build_object('value','quick_loop_box'))
@@ -79,6 +103,12 @@ BEGIN
     WHERE wi.project_id IS NOT NULL AND p.id IS NULL;
   IF violations > 0 THEN RAISE EXCEPTION 'Loops cutover found % orphan work_items.project_id values', violations; END IF;
 
+  SELECT count(*) INTO violations
+  FROM public.work_items wi LEFT JOIN public.projects p ON p.id::text=wi.source_id
+  WHERE wi.source_type='project' AND p.id IS NULL
+    AND wi.status NOT IN ('done','failed','canceled','cancelled');
+  IF violations > 0 THEN RAISE EXCEPTION 'Loops cutover found % non-terminal source_type=project rows with orphan source_id', violations; END IF;
+
   -- Require each exact source FK (source column, target table/id, and delete action).
   SELECT count(*) INTO fk_count FROM pg_constraint c
   WHERE c.conrelid='public.work_items'::regclass AND c.confrelid='public.projects'::regclass AND c.contype='f' AND c.confdeltype='n'
@@ -101,20 +131,36 @@ BEGIN
     AND c.confkey=ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid='public.work_items'::regclass AND attname='id')]::smallint[];
   IF fk_count <> 1 THEN RAISE EXCEPTION 'Loops cutover requires exact project_work_items.work_item_id -> work_items.id ON DELETE CASCADE FK; found %', fk_count; END IF;
 
+  IF to_regclass('public.pipeline_items') IS NOT NULL THEN
+    SELECT count(*) INTO fk_count FROM pg_constraint c
+    WHERE c.conrelid='public.pipeline_items'::regclass AND c.confrelid='public.projects'::regclass AND c.contype='f'
+      AND c.conkey=ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid='public.pipeline_items'::regclass AND attname='project_id')]::smallint[]
+      AND c.confkey=ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid='public.projects'::regclass AND attname='id')]::smallint[];
+    IF fk_count <> 1 THEN RAISE EXCEPTION 'Loops cutover requires exact pipeline_items.project_id -> projects.id FK; found %',fk_count; END IF;
+  END IF;
+  IF to_regclass('public.recurrence_rules') IS NOT NULL THEN
+    SELECT count(*) INTO fk_count FROM pg_constraint c
+    WHERE c.conrelid='public.recurrence_rules'::regclass AND c.confrelid='public.projects'::regclass AND c.contype='f'
+      AND c.conkey=ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid='public.recurrence_rules'::regclass AND attname='project_id')]::smallint[]
+      AND c.confkey=ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid='public.projects'::regclass AND attname='id')]::smallint[];
+    IF fk_count <> 1 THEN RAISE EXCEPTION 'Loops cutover requires exact recurrence_rules.project_id -> projects.id FK; found %',fk_count; END IF;
+  END IF;
+
   SELECT count(*) INTO violations FROM (SELECT project_id FROM public.project_work_items WHERE relation_type='primary_execution' GROUP BY project_id HAVING count(*) > 1) d;
   IF violations > 0 THEN RAISE EXCEPTION 'Loops cutover found % projects with duplicate primary executions', violations; END IF;
 
   -- Fail before ALTER ... RENAME if a generated destination object name is occupied.
-  FOR obj IN SELECT conname FROM pg_constraint
-    WHERE conrelid IN ('public.projects'::regclass,'public.project_events'::regclass,'public.project_work_items'::regclass,'public.work_items'::regclass)
-      AND conname ILIKE '%project%'
+  FOR obj IN SELECT c.conname FROM pg_constraint c
+    JOIN pg_class r ON r.oid=c.conrelid JOIN pg_namespace n ON n.oid=r.relnamespace
+    WHERE n.nspname='public' AND r.relname IN ('projects','project_events','project_work_items','work_items','pipeline_items','recurrence_rules')
+      AND c.conname ILIKE '%project%'
   LOOP
     IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname=replace(obj.conname,'project','loop')) THEN
       RAISE EXCEPTION 'Loops cutover destination constraint name already exists: %', replace(obj.conname,'project','loop');
     END IF;
   END LOOP;
   FOR obj IN SELECT indexname FROM pg_indexes WHERE schemaname='public'
-    AND tablename IN ('projects','project_events','project_work_items','work_items') AND indexname ILIKE '%project%'
+    AND tablename IN ('projects','project_events','project_work_items','work_items','pipeline_items','recurrence_rules') AND indexname ILIKE '%project%'
   LOOP
     IF to_regclass(format('public.%I',replace(obj.indexname,'project','loop'))) IS NOT NULL THEN
       RAISE EXCEPTION 'Loops cutover destination index name already exists: %', replace(obj.indexname,'project','loop');
@@ -206,6 +252,11 @@ WHERE jsonb_path_exists(metadata, '$.** ? (@ == $value)', jsonb_build_object('va
    OR jsonb_path_exists(metadata, '$.** ? (@ == $value)', jsonb_build_object('value','project-planner'))
    OR jsonb_path_exists(metadata, '$.** ? (@ == $value)', jsonb_build_object('value','project-execution-materializer'));
 
+UPDATE public.work_items wi
+SET payload=payload || jsonb_build_object('orphaned_source_loop_id',wi.source_id)
+WHERE wi.source_type='project' AND wi.status IN ('done','failed','canceled','cancelled')
+  AND NOT EXISTS (SELECT 1 FROM public.projects p WHERE p.id::text=wi.source_id);
+
 UPDATE public.work_items SET
   source_type=CASE WHEN source_type='project' THEN 'loop' ELSE source_type END,
   requested_by=CASE requested_by WHEN 'project-planner' THEN 'loop-planner' WHEN 'project-execution-materializer' THEN 'loop-execution-materializer' ELSE requested_by END
@@ -221,6 +272,10 @@ BEGIN
     EXECUTE format('ALTER TABLE public.work_items DROP CONSTRAINT %I',obj.conname);
     EXECUTE format('ALTER TABLE public.work_items ADD CONSTRAINT %I %s',obj.conname,replacement);
   END LOOP;
+  IF NOT EXISTS (SELECT 1 FROM loops_cutover_source_type_checks) THEN
+    ALTER TABLE public.work_items ADD CONSTRAINT work_items_source_type_loop_cutover_created
+      CHECK (source_type IS DISTINCT FROM 'project');
+  END IF;
 END $$;
 
 UPDATE public.project_events SET
@@ -234,6 +289,14 @@ ALTER TABLE public.project_work_items RENAME TO loop_work_items;
 ALTER TABLE public.work_items RENAME COLUMN project_id TO loop_id;
 ALTER TABLE public.loop_events RENAME COLUMN project_id TO loop_id;
 ALTER TABLE public.loop_work_items RENAME COLUMN project_id TO loop_id;
+DO $$ BEGIN
+  IF to_regclass('public.pipeline_items') IS NOT NULL THEN
+    ALTER TABLE public.pipeline_items RENAME COLUMN project_id TO loop_id;
+  END IF;
+  IF to_regclass('public.recurrence_rules') IS NOT NULL THEN
+    ALTER TABLE public.recurrence_rules RENAME COLUMN project_id TO loop_id;
+  END IF;
+END $$;
 
 DO $$
 DECLARE
@@ -241,18 +304,36 @@ DECLARE
   next_name text;
 BEGIN
   FOR obj IN SELECT c.conrelid::regclass AS relation_name,c.conname FROM pg_constraint c
-    WHERE c.conrelid IN ('public.loops'::regclass,'public.loop_events'::regclass,'public.loop_work_items'::regclass,'public.work_items'::regclass)
+    JOIN pg_class r ON r.oid=c.conrelid JOIN pg_namespace n ON n.oid=r.relnamespace
+    WHERE n.nspname='public' AND r.relname IN ('loops','loop_events','loop_work_items','work_items','pipeline_items','recurrence_rules')
       AND c.conname ILIKE '%project%'
   LOOP
     next_name := replace(obj.conname,'project','loop');
     EXECUTE format('ALTER TABLE %s RENAME CONSTRAINT %I TO %I',obj.relation_name,obj.conname,next_name);
   END LOOP;
   FOR obj IN SELECT schemaname,indexname FROM pg_indexes WHERE schemaname='public'
-    AND tablename IN ('loops','loop_events','loop_work_items','work_items') AND indexname ILIKE '%project%'
+    AND tablename IN ('loops','loop_events','loop_work_items','work_items','pipeline_items','recurrence_rules') AND indexname ILIKE '%project%'
   LOOP
     next_name := replace(obj.indexname,'project','loop');
     EXECUTE format('ALTER INDEX %I.%I RENAME TO %I',obj.schemaname,obj.indexname,next_name);
   END LOOP;
+END $$;
+
+DO $$
+DECLARE exact_indexes bigint;
+BEGIN
+  SELECT count(*) INTO exact_indexes
+  FROM pg_index i
+  WHERE i.indrelid='public.loop_work_items'::regclass AND i.indisunique AND i.indpred IS NOT NULL
+    AND i.indnkeyatts=1
+    AND i.indkey::text=(SELECT attnum::text FROM pg_attribute WHERE attrelid=i.indrelid AND attname='loop_id')
+    AND pg_get_expr(i.indpred,i.indrelid) ~* 'relation_type.*primary_execution';
+  IF exact_indexes=0 THEN
+    CREATE UNIQUE INDEX uq_loop_work_items_primary_execution__cutover_created
+      ON public.loop_work_items(loop_id) WHERE relation_type='primary_execution';
+  ELSIF exact_indexes<>1 THEN
+    RAISE EXCEPTION 'Loops cutover found % primary_execution uniqueness indexes; expected at most one legacy index',exact_indexes;
+  END IF;
 END $$;
 
 DROP FUNCTION pg_temp.rewrite_project_controlled_values(jsonb);

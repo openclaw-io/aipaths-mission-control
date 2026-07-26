@@ -240,6 +240,7 @@ CREATE INDEX IF NOT EXISTS idx_recurring_work_occurrences_work_item ON public.re
 
 CREATE TABLE IF NOT EXISTS public.pipeline_items (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  loop_id uuid,
   pipeline_type text NOT NULL,
   title text NOT NULL,
   slug text,
@@ -263,6 +264,7 @@ CREATE TABLE IF NOT EXISTS public.pipeline_items (
 );
 
 ALTER TABLE public.pipeline_items ADD COLUMN IF NOT EXISTS target_agent_id text;
+ALTER TABLE public.pipeline_items ADD COLUMN IF NOT EXISTS loop_id uuid;
 ALTER TABLE public.pipeline_items ADD COLUMN IF NOT EXISTS scheduled_for timestamptz;
 ALTER TABLE public.pipeline_items ADD COLUMN IF NOT EXISTS published_at timestamptz;
 ALTER TABLE public.pipeline_items ADD COLUMN IF NOT EXISTS current_url text;
@@ -277,6 +279,7 @@ CREATE INDEX IF NOT EXISTS idx_pipeline_items_type_status_created ON public.pipe
 CREATE INDEX IF NOT EXISTS idx_pipeline_items_owner_status ON public.pipeline_items(owner_agent, status);
 CREATE INDEX IF NOT EXISTS idx_pipeline_items_scheduled ON public.pipeline_items(scheduled_for);
 CREATE INDEX IF NOT EXISTS idx_pipeline_items_source ON public.pipeline_items(source_type, source_id);
+CREATE INDEX IF NOT EXISTS idx_pipeline_items_loop ON public.pipeline_items(loop_id);
 CREATE INDEX IF NOT EXISTS idx_pipeline_items_metadata_gin ON public.pipeline_items USING gin(metadata);
 CREATE INDEX IF NOT EXISTS idx_pipeline_items_intel_enriched ON public.pipeline_items((metadata -> 'intel' ->> 'enriched_item_id'));
 CREATE UNIQUE INDEX IF NOT EXISTS idx_pipeline_items_intel_inbox_destination_unique
@@ -365,6 +368,9 @@ DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'work_items_loop_id_fkey' AND conrelid = 'public.work_items'::regclass) THEN
     ALTER TABLE public.work_items ADD CONSTRAINT work_items_loop_id_fkey FOREIGN KEY (loop_id) REFERENCES public.loops(id) ON DELETE SET NULL;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'pipeline_items_loop_id_fkey' AND conrelid = 'public.pipeline_items'::regclass) THEN
+    ALTER TABLE public.pipeline_items ADD CONSTRAINT pipeline_items_loop_id_fkey FOREIGN KEY (loop_id) REFERENCES public.loops(id) ON DELETE SET NULL;
   END IF;
 END $$;
 
