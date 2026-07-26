@@ -14,7 +14,9 @@
     "sync:youtube-statistics:batch": "node scripts/sync-youtube-statistics-batch.mjs",
     "refresh:youtube-metadata": "node scripts/refresh-youtube-owned-video-metadata.mjs",
     "test": "node --test scripts/lib/__tests__/*.test.mjs",
-    "test:loops": "node --test scripts/lib/__tests__/work-item-loop-contract.test.mjs scripts/lib/__tests__/loops-total-cutover.test.mjs",
+    "test:loops": "node --test scripts/lib/__tests__/work-item-loop-contract.test.mjs scripts/lib/__tests__/loops-total-cutover.test.mjs scripts/lib/__tests__/loops-cutover-postgres.test.mjs",
+    "rehearse:loops": "node scripts/rehearse-loops-cutover.mjs",
+    "guard:loops": "node scripts/guard-no-project-domain.mjs",
     "test:youtube-statistics": "node --test scripts/lib/__tests__/*.test.mjs"
   },
   "dependencies": {

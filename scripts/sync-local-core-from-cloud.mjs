@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
+import { isIP } from "node:net";
 import { resolve } from "node:path";
 import { createClient } from "@supabase/supabase-js";
 import pg from "pg";
 
 const { Client: PgClient } = pg;
 const DEFAULT_LOCAL_DB = "postgres://joaco@127.0.0.1:5432/aipaths_mission_control_local";
+const EXPECTED_LOCAL_DB = "aipaths_mission_control_local";
 const PAGE_SIZE = 1000;
 const INSERT_CHUNK_SIZE = 200;
 const PRESERVE_IDENTITY_TABLES = new Set([
@@ -19,8 +21,11 @@ const PRESERVE_IDENTITY_TABLES = new Set([
 ]);
 
 const TABLES = [
-  { name: "recurring_work_rules", orderBy: "created_at" },
+  { name: "loops", orderBy: "created_at" },
   { name: "work_items", orderBy: "created_at" },
+  { name: "loop_events", orderBy: "created_at" },
+  { name: "loop_work_items", orderBy: "created_at" },
+  { name: "recurring_work_rules", orderBy: "created_at" },
   { name: "activity_log", orderBy: "created_at" },
   { name: "memories", orderBy: "created_at" },
   { name: "usage_logs", orderBy: "created_at" },
@@ -67,8 +72,26 @@ if (!cloudUrl || !cloudServiceRoleKey) {
   process.exit(1);
 }
 
-if (!/^postgres:\/\//.test(localDbUrl) || !localDbUrl.includes("127.0.0.1") || !localDbUrl.includes("aipaths_mission_control_local")) {
+function parseLocalDatabaseUrl(value) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`Malformed local database URL: ${value}`);
+  }
+  const database = decodeURIComponent(parsed.pathname.replace(/^\//, ""));
+  const localHosts = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+  if (!["postgres:", "postgresql:"].includes(parsed.protocol) || !localHosts.has(parsed.hostname) || database !== EXPECTED_LOCAL_DB) {
+    throw new Error(`Expected a loopback PostgreSQL URL for database ${EXPECTED_LOCAL_DB}`);
+  }
+  return parsed;
+}
+
+try {
+  parseLocalDatabaseUrl(localDbUrl);
+} catch (error) {
   console.error(`Refusing to run against non-local database URL: ${localDbUrl}`);
+  if (error instanceof Error) console.error(error.message);
   process.exit(1);
 }
 
@@ -95,6 +118,9 @@ async function getLocalColumns(client, tableName) {
 }
 
 function valueForColumn(tableName, row, column) {
+  // Self-referencing parents are restored only after every work_items row exists.
+  if (tableName === "work_items" && column.column_name === "parent_id") return null;
+
   if (Object.prototype.hasOwnProperty.call(row, column.column_name)) {
     const rawValue = row[column.column_name];
     if (Array.isArray(rawValue)) {
@@ -213,6 +239,56 @@ function sanitizeCrossTableRows(rowsByTable) {
   }
 }
 
+function assertWorkItemParentsResolvable(rows) {
+  const ids = new Set(rows.map((row) => row.id));
+  const missing = rows.filter((row) => row.parent_id != null && !ids.has(row.parent_id));
+  if (missing.length) {
+    throw new Error(`work_items: ${missing.length} parent_id references are absent from the cloud import set`);
+  }
+}
+
+async function restoreWorkItemParents(client, rows) {
+  for (const row of rows) {
+    if (row.parent_id == null) continue;
+    await client.query(`update "work_items" set parent_id = $1 where id = $2`, [row.parent_id, row.id]);
+  }
+}
+
+async function verifyLocalDatabaseTarget(client) {
+  const result = await client.query(
+    `select current_database() as database_name, inet_server_addr()::text as server_address`,
+  );
+  const target = result.rows[0] || {};
+  const address = target.server_address;
+  const loopback = address === "::1" || (isIP(address) === 4 && address.startsWith("127."));
+  if (target.database_name !== EXPECTED_LOCAL_DB || !loopback) {
+    throw new Error(`Connected target verification failed (database=${target.database_name}, server=${address})`);
+  }
+}
+
+async function assertNoExternalReferencingForeignKeys(client) {
+  const tableNames = TABLES.map((table) => table.name);
+  const result = await client.query(
+    `select c.conname,
+            child_ns.nspname || '.' || child.relname as child_table,
+            parent_ns.nspname || '.' || parent.relname as parent_table
+       from pg_constraint c
+       join pg_class child on child.oid = c.conrelid
+       join pg_namespace child_ns on child_ns.oid = child.relnamespace
+       join pg_class parent on parent.oid = c.confrelid
+       join pg_namespace parent_ns on parent_ns.oid = parent.relnamespace
+      where c.contype = 'f'
+        and parent_ns.nspname = 'public' and parent.relname = any($1::text[])
+        and not (child_ns.nspname = 'public' and child.relname = any($1::text[]))
+      order by child_table, c.conname`,
+    [tableNames],
+  );
+  if (result.rows.length) {
+    const detail = result.rows.map((row) => `${row.conname}: ${row.child_table} -> ${row.parent_table}`).join(", ");
+    throw new Error(`Sync aborted: external foreign key(s) reference the replacement set; no out-of-set rows will be changed: ${detail}`);
+  }
+}
+
 async function insertRows(client, tableName, columns, rows) {
   if (!rows.length) return;
 
@@ -248,8 +324,34 @@ async function insertRows(client, tableName, columns, rows) {
   }
 }
 
+function assertNoUnmappedCloudColumns(tableName, columns, rows) {
+  const localColumns = new Set(columns.map((column) => column.column_name));
+  const unmapped = new Set();
+  for (const row of rows) {
+    for (const key of Object.keys(row)) {
+      if (!localColumns.has(key)) unmapped.add(key);
+    }
+  }
+  if (unmapped.size) {
+    throw new Error(`${tableName}: unmapped cloud columns: ${[...unmapped].sort().join(", ")}`);
+  }
+}
+
+async function assertImportedCounts(client, expectedCounts) {
+  for (const table of TABLES) {
+    const expected = expectedCounts.get(table.name) || 0;
+    const result = await client.query(`select count(*)::integer as count from "${table.name}"`);
+    const actual = Number(result.rows[0]?.count || 0);
+    if (actual !== expected) {
+      throw new Error(`${table.name}: count assertion failed (cloud=${expected}, local=${actual})`);
+    }
+    console.log(`Count assertion passed for ${table.name}: ${actual}`);
+  }
+}
+
 try {
   await local.connect();
+  await verifyLocalDatabaseTarget(local);
 
   const rowsByTable = new Map();
   for (const table of TABLES) {
@@ -259,16 +361,28 @@ try {
   }
 
   sanitizeCrossTableRows(rowsByTable);
+  assertWorkItemParentsResolvable(rowsByTable.get("work_items") || []);
 
   await local.query("begin");
-  await local.query(`truncate ${TABLES.map((table) => `"${table.name}"`).join(", ")} restart identity cascade`);
+  await assertNoExternalReferencingForeignKeys(local);
+  for (const table of [...TABLES].reverse()) {
+    await local.query(`delete from "${table.name}"`);
+  }
 
   for (const table of TABLES) {
     const columns = await getLocalColumns(local, table.name);
     const rows = rowsByTable.get(table.name) || [];
+    if (!columns.length) throw new Error(`${table.name}: local table is absent`);
+    assertNoUnmappedCloudColumns(table.name, columns, rows);
     await insertRows(local, table.name, columns, rows);
+    if (table.name === "work_items") await restoreWorkItemParents(local, rows);
     console.log(`Inserted ${rows.length} rows into local ${table.name}`);
   }
+
+  await assertImportedCounts(
+    local,
+    new Map(TABLES.map((table) => [table.name, (rowsByTable.get(table.name) || []).length])),
+  );
 
   await local.query("commit");
   console.log("Local Mission Control core sync complete.");

@@ -92,7 +92,12 @@ export async function POST(
     };
 
     await query(
-      `update loops set status = $1, metadata = $2::jsonb, updated_at = $3 where id = $4`,
+      `update loops
+          set status = $1,
+              metadata = $2::jsonb,
+              updated_at = $3,
+              last_completed_at = case when $1 = 'completed' then $3::timestamptz else last_completed_at end
+        where id = $4`,
       [transition.nextStatus, JSON.stringify(metadata), now, id],
     );
     await query(

@@ -116,7 +116,7 @@ CREATE INDEX IF NOT EXISTS idx_cron_logs_status_started ON public.cron_logs(stat
 
 CREATE TABLE IF NOT EXISTS public.work_items (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  project_id uuid,
+  loop_id uuid,
   parent_id uuid,
   kind text NOT NULL DEFAULT 'task',
   source_type text,
@@ -136,7 +136,7 @@ CREATE TABLE IF NOT EXISTS public.work_items (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
-ALTER TABLE public.work_items ADD COLUMN IF NOT EXISTS project_id uuid;
+ALTER TABLE public.work_items ADD COLUMN IF NOT EXISTS loop_id uuid;
 ALTER TABLE public.work_items ADD COLUMN IF NOT EXISTS parent_id uuid;
 ALTER TABLE public.work_items ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'task';
 ALTER TABLE public.work_items ADD COLUMN IF NOT EXISTS source_type text;
@@ -163,7 +163,7 @@ CREATE INDEX IF NOT EXISTS idx_work_items_status_scheduled ON public.work_items(
 CREATE INDEX IF NOT EXISTS idx_work_items_owner_status ON public.work_items(owner_agent, status);
 CREATE INDEX IF NOT EXISTS idx_work_items_target_status ON public.work_items(target_agent_id, status);
 CREATE INDEX IF NOT EXISTS idx_work_items_source ON public.work_items(source_type, source_id);
-CREATE INDEX IF NOT EXISTS idx_work_items_project ON public.work_items(project_id);
+CREATE INDEX IF NOT EXISTS idx_work_items_loop ON public.work_items(loop_id);
 CREATE INDEX IF NOT EXISTS idx_work_items_payload_gin ON public.work_items USING gin(payload);
 CREATE INDEX IF NOT EXISTS idx_work_items_payload_pipeline_type ON public.work_items((payload ->> 'pipeline_type'));
 CREATE INDEX IF NOT EXISTS idx_work_items_payload_relation_type ON public.work_items((payload ->> 'relation_type'));
@@ -315,14 +315,13 @@ CREATE INDEX IF NOT EXISTS idx_pipeline_work_map_work ON public.pipeline_work_ma
 CREATE INDEX IF NOT EXISTS idx_pipeline_work_map_relation ON public.pipeline_work_map(relation_type);
 
 -- -----------------------------------------------------------------------------
--- Projects
+-- Loops
 -- -----------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS public.projects (
+CREATE TABLE IF NOT EXISTS public.loops (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   key text UNIQUE,
-  name text,
-  title text,
+  name text NOT NULL,
   description text,
   summary text,
   type text NOT NULL DEFAULT 'ops',
@@ -337,43 +336,46 @@ CREATE TABLE IF NOT EXISTS public.projects (
   notes text,
   metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
   deferred_until timestamptz,
+  archived_at timestamptz,
   last_approved_at timestamptz,
   last_started_at timestamptz,
+  last_completed_at timestamptz,
   created_by text,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
-ALTER TABLE public.projects ADD COLUMN IF NOT EXISTS title text;
-ALTER TABLE public.projects ADD COLUMN IF NOT EXISTS type text NOT NULL DEFAULT 'ops';
-ALTER TABLE public.projects ADD COLUMN IF NOT EXISTS target_outcome text;
-ALTER TABLE public.projects ADD COLUMN IF NOT EXISTS acceptance_criteria text[] NOT NULL DEFAULT '{}'::text[];
-ALTER TABLE public.projects ADD COLUMN IF NOT EXISTS plan jsonb NOT NULL DEFAULT '[]'::jsonb;
-ALTER TABLE public.projects ADD COLUMN IF NOT EXISTS clarification_questions jsonb NOT NULL DEFAULT '[]'::jsonb;
-ALTER TABLE public.projects ADD COLUMN IF NOT EXISTS approval_scope jsonb NOT NULL DEFAULT '{}'::jsonb;
-ALTER TABLE public.projects ADD COLUMN IF NOT EXISTS notes text;
-ALTER TABLE public.projects ADD COLUMN IF NOT EXISTS metadata jsonb NOT NULL DEFAULT '{}'::jsonb;
-ALTER TABLE public.projects ADD COLUMN IF NOT EXISTS deferred_until timestamptz;
-ALTER TABLE public.projects ADD COLUMN IF NOT EXISTS last_approved_at timestamptz;
-ALTER TABLE public.projects ADD COLUMN IF NOT EXISTS last_started_at timestamptz;
-ALTER TABLE public.projects ADD COLUMN IF NOT EXISTS created_by text;
-ALTER TABLE public.projects ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
+ALTER TABLE public.loops ADD COLUMN IF NOT EXISTS type text NOT NULL DEFAULT 'ops';
+ALTER TABLE public.loops ADD COLUMN IF NOT EXISTS target_outcome text;
+ALTER TABLE public.loops ADD COLUMN IF NOT EXISTS acceptance_criteria text[] NOT NULL DEFAULT '{}'::text[];
+ALTER TABLE public.loops ADD COLUMN IF NOT EXISTS plan jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE public.loops ADD COLUMN IF NOT EXISTS clarification_questions jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE public.loops ADD COLUMN IF NOT EXISTS approval_scope jsonb NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE public.loops ADD COLUMN IF NOT EXISTS notes text;
+ALTER TABLE public.loops ADD COLUMN IF NOT EXISTS metadata jsonb NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE public.loops ADD COLUMN IF NOT EXISTS deferred_until timestamptz;
+ALTER TABLE public.loops ADD COLUMN IF NOT EXISTS archived_at timestamptz;
+ALTER TABLE public.loops ADD COLUMN IF NOT EXISTS last_approved_at timestamptz;
+ALTER TABLE public.loops ADD COLUMN IF NOT EXISTS last_started_at timestamptz;
+ALTER TABLE public.loops ADD COLUMN IF NOT EXISTS last_completed_at timestamptz;
+ALTER TABLE public.loops ADD COLUMN IF NOT EXISTS created_by text;
+ALTER TABLE public.loops ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
 
 DO $$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'work_items_project_id_fkey' AND conrelid = 'public.work_items'::regclass) THEN
-    ALTER TABLE public.work_items ADD CONSTRAINT work_items_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(id) ON DELETE SET NULL;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'work_items_loop_id_fkey' AND conrelid = 'public.work_items'::regclass) THEN
+    ALTER TABLE public.work_items ADD CONSTRAINT work_items_loop_id_fkey FOREIGN KEY (loop_id) REFERENCES public.loops(id) ON DELETE SET NULL;
   END IF;
 END $$;
 
-CREATE INDEX IF NOT EXISTS idx_projects_status_updated ON public.projects(status, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_projects_owner_status ON public.projects(owner_agent, status);
-CREATE INDEX IF NOT EXISTS idx_projects_deferred_until ON public.projects(deferred_until);
-CREATE INDEX IF NOT EXISTS idx_projects_metadata_gin ON public.projects USING gin(metadata);
+CREATE INDEX IF NOT EXISTS idx_loops_status_updated ON public.loops(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_loops_owner_status ON public.loops(owner_agent, status);
+CREATE INDEX IF NOT EXISTS idx_loops_deferred_until ON public.loops(deferred_until);
+CREATE INDEX IF NOT EXISTS idx_loops_metadata_gin ON public.loops USING gin(metadata);
 
-CREATE TABLE IF NOT EXISTS public.project_events (
+CREATE TABLE IF NOT EXISTS public.loop_events (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  project_id uuid NOT NULL REFERENCES public.projects(id) ON DELETE CASCADE,
+  loop_id uuid NOT NULL REFERENCES public.loops(id) ON DELETE CASCADE,
   event_type text NOT NULL,
   from_status text,
   to_status text,
@@ -381,21 +383,24 @@ CREATE TABLE IF NOT EXISTS public.project_events (
   payload jsonb NOT NULL DEFAULT '{}'::jsonb,
   created_at timestamptz NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS idx_project_events_project_created ON public.project_events(project_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_project_events_type_created ON public.project_events(event_type, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_loop_events_loop_created ON public.loop_events(loop_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_loop_events_type_created ON public.loop_events(event_type, created_at DESC);
 
-CREATE TABLE IF NOT EXISTS public.project_work_items (
+CREATE TABLE IF NOT EXISTS public.loop_work_items (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  project_id uuid NOT NULL REFERENCES public.projects(id) ON DELETE CASCADE,
+  loop_id uuid NOT NULL REFERENCES public.loops(id) ON DELETE CASCADE,
   work_item_id uuid NOT NULL REFERENCES public.work_items(id) ON DELETE CASCADE,
   relation_type text NOT NULL DEFAULT 'related',
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (project_id, work_item_id, relation_type)
+  UNIQUE (loop_id, work_item_id, relation_type)
 );
-CREATE INDEX IF NOT EXISTS idx_project_work_items_project ON public.project_work_items(project_id);
-CREATE INDEX IF NOT EXISTS idx_project_work_items_work ON public.project_work_items(work_item_id);
-CREATE INDEX IF NOT EXISTS idx_project_work_items_relation ON public.project_work_items(relation_type);
+CREATE INDEX IF NOT EXISTS idx_loop_work_items_loop ON public.loop_work_items(loop_id);
+CREATE INDEX IF NOT EXISTS idx_loop_work_items_work ON public.loop_work_items(work_item_id);
+CREATE INDEX IF NOT EXISTS idx_loop_work_items_relation ON public.loop_work_items(relation_type);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_loop_work_items_primary_execution
+  ON public.loop_work_items(loop_id)
+  WHERE relation_type = 'primary_execution';
 
 -- -----------------------------------------------------------------------------
 -- Memories / activity / usage
@@ -874,7 +879,7 @@ BEGIN
     'system_cursors','scheduler_config','execution_window_config','services',
     'cron_health','cron_logs','work_items','work_item_dependencies','event_log',
     'recurring_work_rules','recurring_work_occurrences','pipeline_items','pipeline_events','pipeline_work_map',
-    'projects','project_events','project_work_items','memories','usage_logs','activity_log',
+    'loops','loop_events','loop_work_items','memories','usage_logs','activity_log',
     'pipeline_runs','intel_runs','intel_sources','intel_items_raw','intel_items_enriched','intel_inbox_reviews','intel_trend_daily',
     'competitor_channels','competitor_video_snapshots','competitor_transcripts',
     'ops_owned_videos','ops_youtube_video_daily','ops_youtube_short_daily','ops_youtube_channel_daily','ops_community_daily',
