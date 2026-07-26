@@ -1,6 +1,11 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getLocalMissionControlUser, isLocalAuthDisabled } from "@/lib/auth/local";
-import { createPipelineWorkItemLocal, getPipelineItemLocal, updatePipelineItemLocal } from "@/lib/db/pipeline-local";
+import {
+  createPipelineWorkItemLocal,
+  insertPipelineTransitionEventLocal,
+  updatePipelineItemLocal,
+  withLockedPipelineItemLocal,
+} from "@/lib/db/pipeline-local";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/admin";
 import { createPipelineWorkItem } from "@/lib/work-items/pipeline-materializer";
@@ -136,22 +141,91 @@ export async function POST(
     return NextResponse.json({ error: "Invalid action" }, { status: 400 });
   }
 
-  const item = useLocalMode
-    ? await (async () => {
-        const localItem = await getPipelineItemLocal(id);
-        if (!localItem) return null;
-        return ["doc", "guide"].includes(String(localItem.pipeline_type)) ? localItem : null;
-      })()
-    : await (async () => {
-        const { data, error } = await db!
-          .from("pipeline_items")
-          .select("*")
-          .eq("id", id)
-          .in("pipeline_type", ["doc", "guide"])
-          .single();
-        if (error) throw new Error(error.message);
-        return data;
-      })().catch(() => null);
+  if (action === "request_changes" && (!reviewNotes || !String(reviewNotes).trim())) {
+    return NextResponse.json({ error: "reviewNotes is required" }, { status: 400 });
+  }
+
+  if (useLocalMode) {
+    const result = await withLockedPipelineItemLocal(id, ["doc", "guide"], async ({ client, item }) => {
+      const allowedTargets = ALLOWED[item.status] || [];
+      if (item.status === targetStatus) return { kind: "replay" as const, updated: item, workItem: null };
+      if (!allowedTargets.includes(targetStatus)) {
+        return { kind: "invalid" as const, status: item.status };
+      }
+
+      const now = new Date().toISOString();
+      const metadata = {
+        ...((item.metadata || {}) as Record<string, unknown>),
+        ...(action === "request_changes" ? {
+          review: {
+            notes: String(reviewNotes).trim(),
+            last_requested_at: now,
+            last_requested_by: actorIdentity,
+          },
+        } : {}),
+      };
+      const updatePayload: Record<string, unknown> = {
+        status: targetStatus,
+        owner_agent: action === "approve" ? "content" : item.owner_agent || "content",
+        metadata,
+        updated_at: now,
+      };
+      if (action === "mark_live") {
+        updatePayload.published_at = now;
+        updatePayload.current_url = current_url || null;
+      }
+
+      let workItem: { id?: string } | null = null;
+      if (["promote", "request_changes", "approve"].includes(action)) {
+        const relationType = action === "promote" ? "investigate" : "followup";
+        const actionName = action === "approve" ? "localize_guide_to_en" : action === "promote" ? "develop_guide_draft" : "revise_guide_draft";
+        const work = await createPipelineWorkItemLocal({
+          pipelineItemId: item.id,
+          pipelineType: item.pipeline_type || "doc",
+          title: createWorkItemTitle(action, String(item.title || "Guide")),
+          instruction: createWorkItemInstruction(action, { title: String(item.title || "Guide") }, reviewNotes),
+          priority: String(item.priority || "medium"),
+          ownerAgent: "content",
+          requestedBy: actorIdentity,
+          relationType,
+          action: actionName,
+          trigger: "manual_transition",
+          reviewNotes: action === "request_changes" ? String(reviewNotes).trim() : undefined,
+        }, client);
+        workItem = work.workItem || null;
+      }
+
+      const updated = await updatePipelineItemLocal(id, updatePayload, client);
+      if (!updated) throw new Error("Failed to update guide item");
+      await insertPipelineTransitionEventLocal(client, {
+        domain: "guide",
+        eventType: `guide.${action}`,
+        pipelineItemId: id,
+        actor: actorIdentity,
+        dedupeKey: `${item.status}:${action}:${targetStatus}`,
+        payload: { from_status: item.status, to_status: targetStatus, work_item_id: workItem?.id || null },
+      });
+      return { kind: "success" as const, updated, workItem };
+    });
+
+    if (!result) return NextResponse.json({ error: "Guide item not found" }, { status: 404 });
+    if (result.kind === "invalid") {
+      return NextResponse.json({ error: `Action ${action} not allowed from ${result.status}` }, { status: 400 });
+    }
+    if (result.workItem?.id) void notifyWorkItem(result.workItem.id, "content", String(result.updated.title || "Guide"));
+    return NextResponse.json(result.updated);
+  }
+
+  const item = await (async () => {
+    const { data, error } = await db!
+      .from("pipeline_items")
+      .select("*")
+      .eq("id", id)
+      .in("pipeline_type", ["doc", "guide"])
+      .single();
+    if (error) throw new Error(error.message);
+    return data;
+  })().catch(() => null);
 
   if (!item) {
     return NextResponse.json({ error: "Guide item not found" }, { status: 404 });
@@ -160,10 +234,6 @@ export async function POST(
   const allowedTargets = ALLOWED[item.status] || [];
   if (!allowedTargets.includes(targetStatus)) {
     return NextResponse.json({ error: `Action ${action} not allowed from ${item.status}` }, { status: 400 });
-  }
-
-  if (action === "request_changes" && (!reviewNotes || !String(reviewNotes).trim())) {
-    return NextResponse.json({ error: "reviewNotes is required" }, { status: 400 });
   }
 
   const metadata = {
@@ -191,18 +261,16 @@ export async function POST(
     updatePayload.current_url = current_url || null;
   }
 
-  const updated = useLocalMode
-    ? await updatePipelineItemLocal(id, updatePayload)
-    : await (async () => {
-        const { data, error } = await db!
-          .from("pipeline_items")
-          .update(updatePayload)
-          .eq("id", id)
-          .select("id, pipeline_type, title, slug, status, priority, owner_agent, requested_by, source_type, source_id, published_at, current_url, metadata, created_at, updated_at")
-          .single();
-        if (error) throw new Error(error.message);
-        return data;
-      })().catch(() => null);
+  const updated = await (async () => {
+    const { data, error } = await db!
+      .from("pipeline_items")
+      .update(updatePayload)
+      .eq("id", id)
+      .select("id, pipeline_type, title, slug, status, priority, owner_agent, requested_by, source_type, source_id, published_at, current_url, metadata, created_at, updated_at")
+      .single();
+    if (error) throw new Error(error.message);
+    return data;
+  })().catch(() => null);
 
   if (!updated) {
     return NextResponse.json({ error: "Failed to update guide item" }, { status: 500 });
@@ -226,9 +294,7 @@ export async function POST(
       trigger: "manual_transition",
       reviewNotes: action === "request_changes" ? String(reviewNotes).trim() : undefined,
     };
-    const { workItem } = useLocalMode
-      ? await createPipelineWorkItemLocal(workInput)
-      : await createPipelineWorkItem(db!, workInput);
+    const { workItem } = await createPipelineWorkItem(db!, workInput);
 
     if (workItem?.id) {
       void notifyWorkItem(workItem.id, owner_agent, item.title);

@@ -19,7 +19,7 @@ export type CompletionQueryClient = {
   ): Promise<{ rows: T[]; rowCount?: number | null }>;
 };
 
-type WorkItemRow = JsonRecord & {
+export type WorkItemRow = JsonRecord & {
   id: string;
   status?: string | null;
   title?: string | null;
@@ -31,19 +31,28 @@ type WorkItemRow = JsonRecord & {
   payload?: JsonRecord | null;
 };
 
-type VerifyPublishedContent = (input: {
+export type PublicationVerificationRequest = {
   type: "blog" | "guide";
   url: string;
   expectedTitle: string;
   expectedSlug?: string | null;
   expectedDescription?: string | null;
-}) => Promise<JsonRecord & { ok: boolean; finalUrl?: string | null }>;
+};
+
+export type PreparedPublicationVerification = {
+  request: PublicationVerificationRequest;
+  result: JsonRecord & { ok: boolean; finalUrl?: string | null };
+  workItemId: string;
+  workItemUpdatedAt: string | null;
+  pipelineItemId: string;
+  pipelineItemUpdatedAt: string | null;
+};
 
 export type CompletionOrchestrationInput = {
   existing: WorkItemRow;
   updated: WorkItemRow;
   body: JsonRecord;
-  verifyPublishedContent: VerifyPublishedContent;
+  publicationVerification?: PreparedPublicationVerification | null;
 };
 
 function asRecord(value: unknown): JsonRecord {
@@ -60,6 +69,47 @@ function getNestedString(value: unknown, path: string[]) {
 
 function readString(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function resolvePipelineAction(workItem: WorkItemRow, pipelineItem: JsonRecord) {
+  const payload = asRecord(workItem.payload);
+  let pipelineType = readString(payload.pipeline_type) || readString(pipelineItem.pipeline_type) || "";
+  let action = readString(payload.action) || "";
+  const title = String(workItem.title || "").toLowerCase();
+  const relationType = readString(payload.relation_type) || "";
+  if (!action && pipelineType === "community_post") {
+    if (relationType === "publish" || title.includes("publish")) action = "publish_community_post";
+    else if (relationType === "schedule" || title.includes("schedule")) action = "schedule_community_post";
+    else action = title.includes("revise") ? "revise_community_announcement" : "draft_guide_announcement";
+  } else if (!action && ["blog", "doc", "guide"].includes(pipelineType)) {
+    if (title.includes("publish")) action = pipelineType === "blog" ? "publish_blog" : "publish_guide";
+    if (title.includes("localize")) action = pipelineType === "blog" ? "localize_blog_to_en" : "localize_guide_to_en";
+  }
+  pipelineType = pipelineType === "doc" ? "guide" : pipelineType;
+  return { pipelineType, action, relationType };
+}
+
+/** Pure description of the network verification needed for this completion. */
+export function buildPublicationVerificationRequest(
+  workItem: WorkItemRow,
+  pipelineItem: JsonRecord,
+  body: JsonRecord,
+): PublicationVerificationRequest | null {
+  if (body.status !== "done") return null;
+  const { pipelineType, action } = resolvePipelineAction(workItem, pipelineItem);
+  const isBlog = pipelineType === "blog";
+  const isGuide = pipelineType === "guide";
+  if ((!isBlog && !isGuide) || (action !== "publish_blog" && action !== "publish_guide")) return null;
+  const metadata = asRecord(pipelineItem.metadata);
+  return {
+    type: isGuide ? "guide" : "blog",
+    url: extractCurrentUrl(body) || "",
+    expectedTitle: typeof pipelineItem.title === "string" ? pipelineItem.title : "",
+    expectedSlug: readString(pipelineItem.slug),
+    expectedDescription: getNestedString(metadata, ["seo", "meta_description"])
+      || getNestedString(metadata, ["draft_summary"])
+      || getNestedString(metadata, ["summary"]),
+  };
 }
 
 function extractCurrentUrl(body: JsonRecord) {
@@ -363,7 +413,7 @@ export async function orchestrateWorkItemCompletion(
   client: CompletionQueryClient,
   input: CompletionOrchestrationInput,
 ) {
-  const { existing, updated, body, verifyPublishedContent } = input;
+  const { existing, updated, body, publicationVerification } = input;
   if (body.status !== "done" || existing.status === "done") return { applied: false, reason: "not_a_new_completion" };
 
   const payload = asRecord(updated.payload);
@@ -380,19 +430,7 @@ export async function orchestrateWorkItemCompletion(
   const pipelineItem = pipelineResult.rows[0];
   if (!pipelineItem) return { applied: false, reason: "pipeline_item_not_found" };
 
-  let pipelineType = readString(payload.pipeline_type) || readString(pipelineItem.pipeline_type) || "";
-  let action = readString(payload.action) || "";
-  const title = String(updated.title || "").toLowerCase();
-  const relationType = readString(payload.relation_type) || "";
-  if (!action && pipelineType === "community_post") {
-    if (relationType === "publish" || title.includes("publish")) action = "publish_community_post";
-    else if (relationType === "schedule" || title.includes("schedule")) action = "schedule_community_post";
-    else action = title.includes("revise") ? "revise_community_announcement" : "draft_guide_announcement";
-  } else if (!action && ["blog", "doc", "guide"].includes(pipelineType)) {
-    if (title.includes("publish")) action = pipelineType === "blog" ? "publish_blog" : "publish_guide";
-    if (title.includes("localize")) action = pipelineType === "blog" ? "localize_blog_to_en" : "localize_guide_to_en";
-  }
-  pipelineType = pipelineType === "doc" ? "guide" : pipelineType;
+  const { pipelineType, action, relationType } = resolvePipelineAction(updated, pipelineItem);
 
   const now = new Date().toISOString();
   const metadata = asRecord(pipelineItem.metadata);
@@ -611,16 +649,21 @@ export async function orchestrateWorkItemCompletion(
   const publishAction = action === "publish_blog" || action === "publish_guide";
   if ((isBlog || isGuide) && publishAction) {
     const publishUrl = extractCurrentUrl(body);
-    const expectedDescription = getNestedString(metadata, ["seo", "meta_description"])
-      || getNestedString(metadata, ["draft_summary"])
-      || getNestedString(metadata, ["summary"]);
-    const verification = await verifyPublishedContent({
-      type: isGuide ? "guide" : "blog",
-      url: publishUrl || "",
-      expectedTitle: typeof pipelineItem.title === "string" ? pipelineItem.title : "",
-      expectedSlug: readString(pipelineItem.slug),
-      expectedDescription,
-    });
+    const verificationRequest = buildPublicationVerificationRequest(updated, pipelineItem, body);
+    if (!verificationRequest || !publicationVerification) {
+      throw new Error("Publication verification must be completed before opening the completion transaction");
+    }
+    const verificationSnapshotMatches = publicationVerification.workItemId === String(existing.id)
+      && publicationVerification.workItemUpdatedAt === (existing.updated_at ? String(existing.updated_at) : null)
+      && publicationVerification.pipelineItemId === String(pipelineItem.id)
+      && publicationVerification.pipelineItemUpdatedAt === (pipelineItem.updated_at ? String(pipelineItem.updated_at) : null);
+    if (!verificationSnapshotMatches) {
+      throw new Error("Publication verification snapshot changed; retry completion against the current rows");
+    }
+    if (JSON.stringify(verificationRequest) !== JSON.stringify(publicationVerification.request)) {
+      throw new Error("Publication verification became stale; retry completion against the current pipeline item");
+    }
+    const verification = publicationVerification.result;
     const verificationMetadata = {
       ...asRecord(metadata.publication_verification),
       checked_at: now,

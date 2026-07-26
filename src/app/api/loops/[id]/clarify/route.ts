@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getLocalMissionControlUser, isLocalAuthDisabled } from "@/lib/auth/local";
-import { query } from "@/lib/db/postgres";
+import { withTransaction } from "@/lib/db/postgres";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/admin";
 import type { ClarificationQuestion } from "@/lib/loops/read-model";
@@ -36,33 +36,34 @@ export async function POST(
   const now = new Date().toISOString();
 
   if (useLocalMode) {
-    const loopRows = await query<{ id: string; status: string; clarification_questions: ClarificationQuestion[] | null; metadata: Record<string, unknown> | null }>(
-      `select id, status, clarification_questions, metadata from loops where id = $1 limit 1`,
-      [id],
-    );
-    const loop = loopRows.rows[0];
-    if (!loop) return NextResponse.json({ error: "Loop not found" }, { status: 404 });
+    const result = await withTransaction(async (client) => {
+      const loopRows = await client.query<{ id: string; status: string; clarification_questions: ClarificationQuestion[] | null; metadata: Record<string, unknown> | null }>(
+        `select id, status, clarification_questions, metadata from loops where id = $1 limit 1 for update`, [id],
+      );
+      const loop = loopRows.rows[0];
+      if (!loop) return { kind: "missing" as const };
+      const history = Array.isArray(loop.metadata?.clarification_history) ? loop.metadata.clarification_history as Array<Record<string, unknown>> : [];
+      if (loop.status === "needs_approval" && history.at(-1)?.response === responseText) return { kind: "replay" as const };
+      if (loop.status !== "needs_clarification") return { kind: "invalid" as const, status: loop.status };
 
-    const questions = ((loop.clarification_questions || []) as ClarificationQuestion[]).map((q) =>
-      q.status === "open" ? { ...q, status: "answered" } : q
-    );
-    const metadata = {
-      ...((loop.metadata || {}) as Record<string, unknown>),
-      clarification_history: [
-        ...((((loop.metadata || {}) as Record<string, unknown>).clarification_history as unknown[]) || []),
-        { responded_at: now, responded_by: actorIdentity, response: responseText },
-      ],
-    };
-
-    await query(
-      `update loops set status = 'needs_approval', clarification_questions = $1::jsonb, metadata = $2::jsonb, updated_at = $3 where id = $4`,
-      [JSON.stringify(questions), JSON.stringify(metadata), now, id],
-    );
-    await query(
-      `insert into loop_events (loop_id, event_type, from_status, to_status, actor, payload, created_at)
-       values ($1, 'loop.ready_for_approval', $2, 'needs_approval', $3, $4::jsonb, $5)`,
-      [id, loop.status, actorIdentity, JSON.stringify({ source: 'clarification_answered', response: responseText }), now],
-    );
+      const questions = (loop.clarification_questions || []).map((q) => q.status === "open" ? { ...q, status: "answered" } : q);
+      const metadata = {
+        ...(loop.metadata || {}),
+        clarification_history: [...history, { responded_at: now, responded_by: actorIdentity, response: responseText }],
+      };
+      await client.query(
+        `update loops set status = 'needs_approval', clarification_questions = $1::jsonb, metadata = $2::jsonb, updated_at = $3 where id = $4`,
+        [JSON.stringify(questions), JSON.stringify(metadata), now, id],
+      );
+      await client.query(
+        `insert into loop_events (loop_id, event_type, from_status, to_status, actor, payload, created_at)
+         values ($1, 'loop.ready_for_approval', $2, 'needs_approval', $3, $4::jsonb, $5)`,
+        [id, loop.status, actorIdentity, JSON.stringify({ source: 'clarification_answered', response: responseText, dedupe_key: `${loop.status}:clarify:needs_approval` }), now],
+      );
+      return { kind: "success" as const };
+    });
+    if (result.kind === "missing") return NextResponse.json({ error: "Loop not found" }, { status: 404 });
+    if (result.kind === "invalid") return NextResponse.json({ error: `Clarification not allowed from ${result.status}` }, { status: 400 });
     return NextResponse.json({ ok: true, id, status: 'needs_approval' });
   }
 

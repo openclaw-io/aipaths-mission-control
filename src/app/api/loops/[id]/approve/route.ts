@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getLocalMissionControlUser, isLocalAuthDisabled } from "@/lib/auth/local";
-import { query } from "@/lib/db/postgres";
+import { withTransaction } from "@/lib/db/postgres";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/admin";
 
@@ -33,26 +33,34 @@ export async function POST(
   const nextStatus = action === "rework" ? "planning" : queue ? "queued" : "approved";
 
   if (useLocalMode) {
-    const loopRows = await query<{ id: string; status: string; approval_scope: Record<string, unknown> | null }>(
-      `select id, status, approval_scope from loops where id = $1 limit 1`,
-      [id],
-    );
-    const loop = loopRows.rows[0];
-    if (!loop) return NextResponse.json({ error: "Loop not found" }, { status: 404 });
+    const result = await withTransaction(async (client) => {
+      const loopRows = await client.query<{ id: string; status: string; approval_scope: Record<string, unknown> | null }>(
+        `select id, status, approval_scope from loops where id = $1 limit 1 for update`, [id],
+      );
+      const loop = loopRows.rows[0];
+      if (!loop) return { kind: "missing" as const };
+      if (loop.status === nextStatus) return { kind: "replay" as const };
+      const allowed = action === "rework"
+        ? ["needs_approval", "approved", "queued"].includes(loop.status)
+        : loop.status === "needs_approval";
+      if (!allowed) return { kind: "invalid" as const, status: loop.status };
 
-    const approvalScope = action === "rework"
-      ? { ...(loop.approval_scope || {}), approved: false, approved_by: null, approved_at: null }
-      : { ...(loop.approval_scope || {}), approved: true, approved_by: actorIdentity, approved_at: now, can_execute_unattended: true };
-
-    await query(
-      `update loops set status = $1, approval_scope = $2::jsonb, last_approved_at = $3, updated_at = $3 where id = $4`,
-      [nextStatus, JSON.stringify(approvalScope), now, id],
-    );
-    await query(
-      `insert into loop_events (loop_id, event_type, from_status, to_status, actor, payload, created_at)
-       values ($1, $2, $3, $4, $5, $6::jsonb, $7)`,
-      [id, action === 'rework' ? 'loop.plan_rework_requested' : queue ? 'loop.queued' : 'loop.approved', loop.status, nextStatus, actorIdentity, JSON.stringify({ mode: 'manual', queue, comment: comment || null, action }), now],
-    );
+      const approvalScope = action === "rework"
+        ? { ...(loop.approval_scope || {}), approved: false, approved_by: null, approved_at: null }
+        : { ...(loop.approval_scope || {}), approved: true, approved_by: actorIdentity, approved_at: now, can_execute_unattended: true };
+      await client.query(
+        `update loops set status = $1, approval_scope = $2::jsonb, last_approved_at = $3, updated_at = $3 where id = $4`,
+        [nextStatus, JSON.stringify(approvalScope), now, id],
+      );
+      await client.query(
+        `insert into loop_events (loop_id, event_type, from_status, to_status, actor, payload, created_at)
+         values ($1, $2, $3, $4, $5, $6::jsonb, $7)`,
+        [id, action === 'rework' ? 'loop.plan_rework_requested' : queue ? 'loop.queued' : 'loop.approved', loop.status, nextStatus, actorIdentity, JSON.stringify({ mode: 'manual', queue, comment: comment || null, action, dedupe_key: `${loop.status}:${action}:${nextStatus}` }), now],
+      );
+      return { kind: "success" as const };
+    });
+    if (result.kind === "missing") return NextResponse.json({ error: "Loop not found" }, { status: 404 });
+    if (result.kind === "invalid") return NextResponse.json({ error: `Action not allowed from ${result.status}` }, { status: 400 });
     return NextResponse.json({ ok: true, id, status: nextStatus });
   }
 

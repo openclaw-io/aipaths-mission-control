@@ -1,7 +1,12 @@
 import { verifyPublishedContent } from "@/lib/content/live-verification";
 import { normalizeRow, type JsonRecord } from "@/lib/db/mission-control";
-import { withTransaction } from "@/lib/db/postgres";
-import { orchestrateWorkItemCompletion } from "@/lib/work-items/completion-orchestration";
+import { query, withTransaction } from "@/lib/db/postgres";
+import {
+  buildPublicationVerificationRequest,
+  orchestrateWorkItemCompletion,
+  type PreparedPublicationVerification,
+  type WorkItemRow,
+} from "@/lib/work-items/completion-orchestration";
 
 const WORK_ITEM_COLUMNS = `
   id,
@@ -23,6 +28,43 @@ const WORK_ITEM_COLUMNS = `
 `;
 
 export async function patchAgentWorkItemWithCompletion(id: string, body: JsonRecord) {
+  // Resolve and fetch the publication URL before opening a transaction. Once
+  // locked, orchestration rebuilds this request and rejects stale evidence.
+  let publicationVerification: PreparedPublicationVerification | null = null;
+  if (body.status === "done") {
+    const preflightWork = (await query<WorkItemRow>(
+      "SELECT * FROM public.work_items WHERE id = $1 LIMIT 1",
+      [id],
+    )).rows[0];
+    if (preflightWork) {
+      const payload = (preflightWork.payload || {}) as JsonRecord;
+      const pipelineItemId = typeof payload.pipeline_item_id === "string" && payload.pipeline_item_id.trim()
+        ? payload.pipeline_item_id.trim()
+        : ["pipeline_item", "service"].includes(String(preflightWork.source_type || "")) && typeof preflightWork.source_id === "string"
+          ? preflightWork.source_id
+          : null;
+      if (pipelineItemId) {
+        const pipelineItem = (await query<JsonRecord>(
+          "SELECT * FROM public.pipeline_items WHERE id = $1 LIMIT 1",
+          [pipelineItemId],
+        )).rows[0];
+        if (pipelineItem) {
+          const request = buildPublicationVerificationRequest(preflightWork, pipelineItem, body);
+          if (request) {
+            publicationVerification = {
+              request,
+              result: await verifyPublishedContent(request),
+              workItemId: preflightWork.id,
+              workItemUpdatedAt: preflightWork.updated_at ? String(preflightWork.updated_at) : null,
+              pipelineItemId: String(pipelineItem.id),
+              pipelineItemUpdatedAt: pipelineItem.updated_at ? String(pipelineItem.updated_at) : null,
+            };
+          }
+        }
+      }
+    }
+  }
+
   return withTransaction(async (client) => {
     // Serialize concurrent completion retries. The work-item update, pipeline
     // completion effects, generated work items/maps, and event log commit or
@@ -89,7 +131,7 @@ export async function patchAgentWorkItemWithCompletion(id: string, body: JsonRec
       existing,
       updated: row,
       body,
-      verifyPublishedContent,
+      publicationVerification,
     });
 
     const payload = (row.payload || {}) as JsonRecord;

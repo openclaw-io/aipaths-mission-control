@@ -1,0 +1,216 @@
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { after, before, test } from "node:test";
+import { fileURLToPath } from "node:url";
+import vm from "node:vm";
+import pg from "pg";
+import ts from "typescript";
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+const databaseUrl = process.env.MISSION_CONTROL_DATABASE_URL || "postgres://joaco@127.0.0.1:5432/aipaths_mission_control_local";
+const pool = new pg.Pool({ connectionString: databaseUrl, max: 4 });
+const failure = { eventTable: null, armed: false };
+
+function transpileModule(sourcePath, requires = {}, globals = {}) {
+  const source = readFileSync(sourcePath, "utf8");
+  const output = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
+    fileName: sourcePath,
+  }).outputText;
+  const cjsModule = { exports: {} };
+  const sandbox = {
+    module: cjsModule,
+    exports: cjsModule.exports,
+    require(specifier) {
+      if (specifier in requires) return requires[specifier];
+      throw new Error(`Unexpected require from ${sourcePath}: ${specifier}`);
+    },
+    Date, Number, Set, Map, JSON, String, RegExp, Object, Array, Math, URL, Buffer,
+    structuredClone, console: { ...console, error() {} },
+    process: { env: {} },
+    fetch: async () => ({ ok: true, status: 200 }),
+    ...globals,
+  };
+  vm.runInNewContext(output, sandbox, { filename: sourcePath });
+  return cjsModule.exports;
+}
+
+const postgres = {
+  query: (text, params) => pool.query(text, params),
+  withTransaction: async (run) => {
+    const client = await pool.connect();
+    const proxy = {
+      query(text, params) {
+        const normalized = String(text).replace(/\s+/g, " ").trim().toLowerCase();
+        if (failure.armed && failure.eventTable && normalized.startsWith(`insert into ${failure.eventTable}`)) {
+          failure.armed = false;
+          throw new Error(`injected ${failure.eventTable} failure`);
+        }
+        return client.query(text, params);
+      },
+    };
+    try {
+      await client.query("begin");
+      const result = await run(proxy);
+      await client.query("commit");
+      return result;
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+  },
+};
+
+const auth = {
+  isLocalAuthDisabled: () => true,
+  getLocalMissionControlUser: () => ({ email: "atomic-handler@example.test" }),
+};
+const nextServer = { NextResponse: { json: (payload, init = {}) => ({ payload, status: init.status || 200 }) } };
+const cloudServer = { createClient: async () => { throw new Error("unexpected cloud auth"); } };
+const cloudAdmin = { createServiceClient: () => { throw new Error("unexpected cloud db"); } };
+
+const pipelineLocal = transpileModule(resolve(repoRoot, "src/lib/db/pipeline-local.ts"), {
+  "@/lib/db/mission-control": { normalizeRow: (row) => row },
+  "@/lib/db/postgres": postgres,
+  "@/lib/work-items/pipeline-materializer": {},
+});
+const youtubePipeline = transpileModule(resolve(repoRoot, "src/lib/youtube-pipeline.ts"));
+
+function loadRoute(relativePath, extra = {}) {
+  return transpileModule(resolve(repoRoot, relativePath), {
+    "next/server": nextServer,
+    "@/lib/auth/local": auth,
+    "@/lib/db/postgres": postgres,
+    "@/lib/db/pipeline-local": pipelineLocal,
+    "@/lib/supabase/server": cloudServer,
+    "@/lib/supabase/admin": cloudAdmin,
+    "@/lib/work-items/pipeline-materializer": { createPipelineWorkItem: async () => { throw new Error("unexpected cloud materializer"); } },
+    "@/lib/youtube-pipeline": youtubePipeline,
+    "@/lib/loops/read-model": {},
+    ...extra,
+  });
+}
+
+const guideRoute = loadRoute("src/app/api/guides/[id]/transition/route.ts");
+const youtubeRoute = loadRoute("src/app/api/youtube/[id]/transition/route.ts");
+const createLoopRoute = loadRoute("src/app/api/loops/create/route.ts");
+const submitLoopRoute = loadRoute("src/app/api/loops/[id]/submit-for-approval/route.ts");
+const clarifyLoopRoute = loadRoute("src/app/api/loops/[id]/clarify/route.ts");
+const approveLoopRoute = loadRoute("src/app/api/loops/[id]/approve/route.ts");
+
+before(async () => { await pool.query("select 1 from pipeline_items limit 1"); });
+after(async () => { await pool.end(); });
+
+function request(body) { return { json: async () => body }; }
+function context(id) { return { params: Promise.resolve({ id }) }; }
+async function cleanupPipeline(id) { await pool.query("delete from pipeline_items where id = $1", [id]); }
+async function cleanupLoop(id) { await pool.query("delete from loops where id = $1", [id]); }
+
+for (const config of [
+  { label: "Guide", route: guideRoute, type: "guide", status: "draft", body: { action: "promote" }, target: "researching", relation: "investigate" },
+  { label: "YouTube", route: youtubeRoute, type: "video", status: "idea", body: { action: "set_stage", stage: "title_thumbnail", note: "atomic" }, target: "title_thumbnail", relation: "youtube_light_research" },
+]) {
+  test(`${config.label} real local handler rolls back an injected late event failure, then retries and replays idempotently`, async () => {
+    const id = randomUUID();
+    await pool.query(
+      `insert into pipeline_items (id, pipeline_type, title, status, priority, owner_agent, metadata) values ($1,$2,$3,$4,'medium','youtube','{}'::jsonb)`,
+      [id, config.type, `Atomic ${config.label}`, config.status],
+    );
+    try {
+      failure.eventTable = "event_log";
+      failure.armed = true;
+      await assert.rejects(() => config.route.POST(request(config.body), context(id)), /injected event_log failure/);
+      assert.equal((await pool.query("select status from pipeline_items where id=$1", [id])).rows[0].status, config.status);
+      assert.equal((await pool.query("select count(*)::int n from work_items where source_id=$1", [id])).rows[0].n, 0);
+      assert.equal((await pool.query("select count(*)::int n from event_log where entity_id=$1", [id])).rows[0].n, 0);
+
+      assert.equal((await config.route.POST(request(config.body), context(id))).status, 200);
+      assert.equal((await config.route.POST(request(config.body), context(id))).status, 200);
+      assert.equal((await pool.query("select status from pipeline_items where id=$1", [id])).rows[0].status, config.target);
+      assert.equal((await pool.query("select count(*)::int n from work_items where source_id=$1 and payload->>'relation_type'=$2", [id, config.relation])).rows[0].n, 1);
+      assert.equal((await pool.query("select count(*)::int n from event_log where entity_id=$1", [id])).rows[0].n, 1);
+    } finally {
+      failure.armed = false;
+      await cleanupPipeline(id);
+    }
+  });
+}
+
+test("YouTube published handler keeps snapshots, announcement pipeline/work, item update and event in one transaction", async () => {
+  const id = randomUUID();
+  const body = { action: "set_stage", stage: "published", youtube_url: "https://youtu.be/atomic123", note: "ship" };
+  await pool.query(
+    `insert into pipeline_items (id,pipeline_type,title,status,priority,owner_agent,metadata) values ($1,'video',$2,'editing','medium','youtube','{}'::jsonb)`,
+    [id, "Atomic published video"],
+  );
+  try {
+    failure.eventTable = "event_log";
+    failure.armed = true;
+    await assert.rejects(() => youtubeRoute.POST(request(body), context(id)), /injected event_log failure/);
+    assert.equal((await pool.query("select status from pipeline_items where id=$1", [id])).rows[0].status, "editing");
+    assert.equal((await pool.query("select count(*)::int n from work_items where source_id=$1", [id])).rows[0].n, 0);
+    assert.equal((await pool.query("select count(*)::int n from pipeline_items where source_id=$1", [id])).rows[0].n, 0);
+
+    assert.equal((await youtubeRoute.POST(request(body), context(id))).status, 200);
+    assert.equal((await youtubeRoute.POST(request(body), context(id))).status, 200);
+    assert.equal((await pool.query("select status from pipeline_items where id=$1", [id])).rows[0].status, "published");
+    assert.equal((await pool.query("select count(*)::int n from work_items where source_id=$1 and payload->>'action'='collect_youtube_snapshot'", [id])).rows[0].n, 3);
+    const email = await pool.query("select id from pipeline_items where source_id=$1 and pipeline_type='email_campaign'", [id]);
+    assert.equal(email.rowCount, 1);
+    assert.equal((await pool.query("select count(*)::int n from work_items where source_id=$1 and payload->>'action'='draft_video_announcement'", [email.rows[0].id])).rows[0].n, 1);
+    assert.equal((await pool.query("select count(*)::int n from event_log where entity_id=$1", [id])).rows[0].n, 1);
+  } finally {
+    failure.armed = false;
+    await pool.query("delete from pipeline_items where source_id=$1", [id]);
+    await cleanupPipeline(id);
+  }
+});
+
+test("Loop create real handler atomically persists entity+event and deduplicates replay", async () => {
+  const input = `Atomic create ${randomUUID()}`;
+  failure.eventTable = "loop_events";
+  failure.armed = true;
+  await assert.rejects(() => createLoopRoute.POST(request({ input })), /injected loop_events failure/);
+  assert.equal((await pool.query("select count(*)::int n from loops where name=$1", [input])).rows[0].n, 0);
+
+  const first = await createLoopRoute.POST(request({ input }));
+  const replay = await createLoopRoute.POST(request({ input }));
+  assert.equal(first.payload.loop.id, replay.payload.loop.id);
+  try {
+    assert.equal((await pool.query("select count(*)::int n from loops where name=$1", [input])).rows[0].n, 1);
+    assert.equal((await pool.query("select count(*)::int n from loop_events where loop_id=$1 and event_type='loop.created'", [first.payload.loop.id])).rows[0].n, 1);
+  } finally { await cleanupLoop(first.payload.loop.id); }
+});
+
+for (const config of [
+  { label: "submit", route: submitLoopRoute, initial: "planning", body: {}, target: "needs_approval", event: "loop.ready_for_approval" },
+  { label: "clarify", route: clarifyLoopRoute, initial: "needs_clarification", body: { response: "Use the safe option" }, target: "needs_approval", event: "loop.ready_for_approval" },
+  { label: "approve", route: approveLoopRoute, initial: "needs_approval", body: { action: "approve", queue: true }, target: "queued", event: "loop.queued" },
+]) {
+  test(`Loop ${config.label} real handler locks state, rolls back event failure, and replays once`, async () => {
+    const id = randomUUID();
+    await pool.query(
+      `insert into loops (id,key,name,status,clarification_questions,metadata,approval_scope) values ($1,$2,$3,$4,$5::jsonb,'{}'::jsonb,'{}'::jsonb)`,
+      [id, `atomic-${id}`, `Atomic ${config.label}`, config.initial, JSON.stringify(config.initial === "needs_clarification" ? [{ id: "q1", status: "open", question: "Which?" }] : [])],
+    );
+    try {
+      failure.eventTable = "loop_events";
+      failure.armed = true;
+      await assert.rejects(() => config.route.POST(request(config.body), context(id)), /injected loop_events failure/);
+      assert.equal((await pool.query("select status from loops where id=$1", [id])).rows[0].status, config.initial);
+      assert.equal((await pool.query("select count(*)::int n from loop_events where loop_id=$1", [id])).rows[0].n, 0);
+
+      assert.equal((await config.route.POST(request(config.body), context(id))).status, 200);
+      assert.equal((await config.route.POST(request(config.body), context(id))).status, 200);
+      assert.equal((await pool.query("select status from loops where id=$1", [id])).rows[0].status, config.target);
+      assert.equal((await pool.query("select count(*)::int n from loop_events where loop_id=$1 and event_type=$2", [id, config.event])).rows[0].n, 1);
+    } finally {
+      failure.armed = false;
+      await cleanupLoop(id);
+    }
+  });
+}

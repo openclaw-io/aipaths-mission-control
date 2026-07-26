@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getLocalMissionControlUser, isLocalAuthDisabled } from "@/lib/auth/local";
-import { query } from "@/lib/db/postgres";
+import { withTransaction } from "@/lib/db/postgres";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/admin";
 
@@ -28,19 +28,25 @@ export async function POST(
   const now = new Date().toISOString();
 
   if (useLocalMode) {
-    const loopRows = await query<{ id: string; status: string }>(`select id, status from loops where id = $1 limit 1`, [id]);
-    const loop = loopRows.rows[0];
-    if (!loop) return NextResponse.json({ error: "Loop not found" }, { status: 404 });
-    if (loop.status !== "planning") {
+    const result = await withTransaction(async (client) => {
+      const loopRows = await client.query<{ id: string; status: string }>(`select id, status from loops where id = $1 limit 1 for update`, [id]);
+      const loop = loopRows.rows[0];
+      if (!loop) return { kind: "missing" as const };
+      if (loop.status === "needs_approval") return { kind: "replay" as const };
+      if (loop.status !== "planning") return { kind: "invalid" as const };
+
+      await client.query(`update loops set status = 'needs_approval', updated_at = $1 where id = $2`, [now, id]);
+      await client.query(
+        `insert into loop_events (loop_id, event_type, from_status, to_status, actor, payload, created_at)
+         values ($1, 'loop.ready_for_approval', 'planning', 'needs_approval', $2, $3::jsonb, $4)`,
+        [id, actorIdentity, JSON.stringify({ source: 'human_trigger', dedupe_key: 'planning:submit:needs_approval' }), now],
+      );
+      return { kind: "success" as const };
+    });
+    if (result.kind === "missing") return NextResponse.json({ error: "Loop not found" }, { status: 404 });
+    if (result.kind === "invalid") {
       return NextResponse.json({ error: "Loop is not in planning" }, { status: 400 });
     }
-
-    await query(`update loops set status = 'needs_approval', updated_at = $1 where id = $2 and status = 'planning'`, [now, id]);
-    await query(
-      `insert into loop_events (loop_id, event_type, from_status, to_status, actor, payload, created_at)
-       values ($1, 'loop.ready_for_approval', 'planning', 'needs_approval', $2, $3::jsonb, $4)`,
-      [id, actorIdentity, JSON.stringify({ source: 'human_trigger' }), now],
-    );
     return NextResponse.json({ ok: true, id, status: "needs_approval" });
   }
 

@@ -4,7 +4,9 @@ import {
   createPipelineWorkItemLocal,
   getOrCreateVideoAnnouncementEmailItemLocal,
   getPipelineItemLocal,
+  insertPipelineTransitionEventLocal,
   updatePipelineItemLocal,
+  withLockedPipelineItemLocal,
 } from "@/lib/db/pipeline-local";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/admin";
@@ -143,6 +145,7 @@ async function createPublishedSnapshotWorkItems(input: {
   publishedAt: string;
   youtubeUrl: string | null;
   videoId: string | null;
+  localClient?: Parameters<typeof updatePipelineItemLocal>[2];
 }) {
   const snapshots = [
     { relationType: "youtube_snapshot_24h", label: "+24h", delayMs: 24 * 60 * 60 * 1000 },
@@ -181,7 +184,7 @@ async function createPublishedSnapshotWorkItems(input: {
       },
     };
     const result = input.localMode
-      ? await createPipelineWorkItemLocal(workInput)
+      ? await createPipelineWorkItemLocal(workInput, input.localClient)
       : await createPipelineWorkItem(input.db!, workInput);
     results.push({ relationType: snapshot.relationType, ...result });
   }
@@ -221,6 +224,7 @@ async function createVideoAnnouncementEmailWorkItem(input: {
   youtubeUrl: string | null;
   videoId: string | null;
   summary: string | null;
+  localClient?: Parameters<typeof updatePipelineItemLocal>[2];
 }) {
   const emailItem = input.localMode
     ? await getOrCreateVideoAnnouncementEmailItemLocal({
@@ -231,7 +235,7 @@ async function createVideoAnnouncementEmailWorkItem(input: {
         youtubeUrl: input.youtubeUrl,
         videoId: input.videoId,
         summary: input.summary,
-      })
+      }, input.localClient)
     : await (async () => {
         const now = new Date().toISOString();
         const { data: existing, error: existingError } = await input.db!
@@ -304,7 +308,7 @@ async function createVideoAnnouncementEmailWorkItem(input: {
     },
   };
   const result = input.localMode
-    ? await createPipelineWorkItemLocal(workInput)
+    ? await createPipelineWorkItemLocal(workInput, input.localClient)
     : await createPipelineWorkItem(input.db!, workInput);
 
   return { emailItem, ...result };
@@ -453,6 +457,7 @@ async function createStageAutomationWorkItem(input: {
   requestedBy: string;
   note: string | null;
   existingSummary: string | null;
+  localClient?: Parameters<typeof updatePipelineItemLocal>[2];
 }) {
   const config = getStageAutomationConfig(input.stage);
   if (!config) return null;
@@ -485,7 +490,7 @@ async function createStageAutomationWorkItem(input: {
   };
 
   return input.localMode
-    ? createPipelineWorkItemLocal(workInput)
+    ? createPipelineWorkItemLocal(workInput, input.localClient)
     : createPipelineWorkItem(input.db!, workInput);
 }
 
@@ -562,6 +567,41 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
   if (requestedAction === "save_learning_review") {
     const learning = toRecord(body.learning);
+    if (useLocalMode) {
+      const signature = `save_learning_review:${JSON.stringify(learning)}`;
+      const result = await withLockedPipelineItemLocal(id, ["video"], async ({ client, item: lockedItem }) => {
+        const lockedMetadata = getYouTubeMetadata(lockedItem.metadata);
+        if (lockedMetadata.local_transition_signature === signature) return { item: lockedItem };
+        const nextMetadata = {
+          ...lockedMetadata,
+          youtube_learning_v1: {
+            ...toRecord(lockedMetadata.youtube_learning_v1),
+            ...learning,
+            updated_at: now,
+            updated_by: actorIdentity,
+          },
+          local_transition_signature: signature,
+        };
+        const updated = await updatePipelineItemLocal(id, {
+          owner_agent: String(lockedItem.owner_agent || "youtube"),
+          metadata: nextMetadata,
+          updated_at: now,
+        }, client);
+        if (!updated) throw new Error("Failed to update learning review");
+        await insertPipelineTransitionEventLocal(client, {
+          domain: "youtube",
+          eventType: "youtube.save_learning_review",
+          pipelineItemId: id,
+          actor: actorIdentity,
+          dedupeKey: signature,
+          payload: { from_status: lockedItem.status, to_status: lockedItem.status },
+        });
+        return { item: updated };
+      });
+      if (!result) return NextResponse.json({ error: "Video item not found" }, { status: 404 });
+      return NextResponse.json({ item: result.item });
+    }
+
     const existingLearning = toRecord(metadata.youtube_learning_v1);
     const nextLearning = {
       ...existingLearning,
@@ -569,36 +609,18 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       updated_at: now,
       updated_by: actorIdentity,
     };
-    const nextMetadata = {
-      ...metadata,
-      youtube_learning_v1: nextLearning,
-    };
-
-    const updated = useLocalMode
-      ? await updatePipelineItemLocal(id, {
-          owner_agent: item.owner_agent || "youtube",
-          metadata: nextMetadata,
-          updated_at: now,
-        })
-      : await (async () => {
-          const { data, error } = await db!
-            .from("pipeline_items")
-            .update({
-              owner_agent: item.owner_agent || "youtube",
-              metadata: nextMetadata,
-              updated_at: now,
-            })
-            .eq("id", id)
-            .select("id, pipeline_type, title, slug, status, priority, owner_agent, requested_by, source_type, source_id, scheduled_for, published_at, current_url, content_path, content_format, metadata, created_at, updated_at")
-            .single();
-          if (error) throw new Error(error.message);
-          return data;
-        })().catch(() => null);
-
-    if (!updated) {
-      return NextResponse.json({ error: "Failed to update learning review" }, { status: 500 });
-    }
-
+    const nextMetadata = { ...metadata, youtube_learning_v1: nextLearning };
+    const updated = await (async () => {
+      const { data, error } = await db!
+        .from("pipeline_items")
+        .update({ owner_agent: item.owner_agent || "youtube", metadata: nextMetadata, updated_at: now })
+        .eq("id", id)
+        .select("id, pipeline_type, title, slug, status, priority, owner_agent, requested_by, source_type, source_id, scheduled_for, published_at, current_url, content_path, content_format, metadata, created_at, updated_at")
+        .single();
+      if (error) throw new Error(error.message);
+      return data;
+    })().catch(() => null);
+    if (!updated) return NextResponse.json({ error: "Failed to update learning review" }, { status: 500 });
     return NextResponse.json({ item: updated });
   }
 
@@ -673,63 +695,107 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       if (youtubeUrl) updatePayload.current_url = youtubeUrl;
     }
 
-    const updated = useLocalMode
-      ? await updatePipelineItemLocal(id, updatePayload)
-      : await (async () => {
-          const { data, error } = await db!
-            .from("pipeline_items")
-            .update(updatePayload)
-            .eq("id", id)
-            .select("id, pipeline_type, title, slug, status, priority, owner_agent, requested_by, source_type, source_id, scheduled_for, published_at, current_url, content_path, content_format, metadata, created_at, updated_at")
-            .single();
-          if (error) throw new Error(error.message);
-          return data;
-        })().catch(() => null);
+    if (useLocalMode) {
+      const signature = `set_stage:${requestedStage}:${note || ""}:${youtubeUrl || ""}:${videoId || ""}`;
+      const result = await withLockedPipelineItemLocal(id, ["video"], async ({ client, item: lockedItem }) => {
+        const lockedMetadata = getYouTubeMetadata(lockedItem.metadata);
+        if (lockedMetadata.local_transition_signature === signature) {
+          return { kind: "replay" as const, item: lockedItem, stageAutomationWorkItem: null, snapshotWorkItems: [], emailAnnouncementWorkItem: null };
+        }
+        if (String(lockedItem.updated_at || "") !== String(item.updated_at || "") || lockedItem.status !== item.status) {
+          return { kind: "stale" as const };
+        }
 
-    if (!updated) {
-      return NextResponse.json({ error: "Failed to update stage" }, { status: 500 });
+        const stageAutomationWorkItem = await createStageAutomationWorkItem({
+          localMode: true,
+          localClient: client,
+          pipelineItemId: String(lockedItem.id),
+          title: String(lockedItem.title),
+          stage: requestedStage,
+          priority: trimToNull(lockedItem.priority),
+          requestedBy: actorIdentity,
+          note,
+          existingSummary,
+        });
+        const snapshotWorkItems = requestedStage === "published" && (youtubeUrl || videoId)
+          ? await createPublishedSnapshotWorkItems({
+              localMode: true,
+              localClient: client,
+              pipelineItemId: String(lockedItem.id),
+              title: String(lockedItem.title),
+              priority: trimToNull(lockedItem.priority),
+              requestedBy: actorIdentity,
+              publishedAt: String(publishedAt || now),
+              youtubeUrl,
+              videoId,
+            })
+          : [];
+        const emailAnnouncementWorkItem = requestedStage === "published"
+          ? await createVideoAnnouncementEmailWorkItem({
+              localMode: true,
+              localClient: client,
+              videoPipelineItemId: String(lockedItem.id),
+              title: String(lockedItem.title),
+              priority: trimToNull(lockedItem.priority),
+              requestedBy: actorIdentity,
+              youtubeUrl,
+              videoId,
+              summary: existingSummary,
+            })
+          : null;
+        const updated = await updatePipelineItemLocal(id, {
+          ...updatePayload,
+          metadata: { ...nextMetadata, local_transition_signature: signature },
+        }, client);
+        if (!updated) throw new Error("Failed to update stage");
+        await insertPipelineTransitionEventLocal(client, {
+          domain: "youtube",
+          eventType: "youtube.set_stage",
+          pipelineItemId: id,
+          actor: actorIdentity,
+          dedupeKey: signature,
+          payload: { from_status: lockedItem.status, to_status: requestedStage },
+        });
+        return { kind: "success" as const, item: updated, stageAutomationWorkItem, snapshotWorkItems, emailAnnouncementWorkItem };
+      });
+      if (!result) return NextResponse.json({ error: "Video item not found" }, { status: 404 });
+      if (result.kind === "stale") return NextResponse.json({ error: "Video item changed; retry transition" }, { status: 409 });
+      return NextResponse.json({
+        item: result.item,
+        stageAutomationWorkItem: result.stageAutomationWorkItem,
+        snapshotWorkItems: result.snapshotWorkItems,
+        emailAnnouncementWorkItem: result.emailAnnouncementWorkItem,
+      });
     }
 
-    const stageAutomationWorkItem = await createStageAutomationWorkItem({
-      db: db || undefined,
-      localMode: useLocalMode,
-      pipelineItemId: item.id,
-      title: item.title,
-      stage: requestedStage,
-      priority: item.priority,
-      requestedBy: actorIdentity,
-      note,
-      existingSummary,
-    });
+    const updated = await (async () => {
+      const { data, error } = await db!
+        .from("pipeline_items")
+        .update(updatePayload)
+        .eq("id", id)
+        .select("id, pipeline_type, title, slug, status, priority, owner_agent, requested_by, source_type, source_id, scheduled_for, published_at, current_url, content_path, content_format, metadata, created_at, updated_at")
+        .single();
+      if (error) throw new Error(error.message);
+      return data;
+    })().catch(() => null);
+    if (!updated) return NextResponse.json({ error: "Failed to update stage" }, { status: 500 });
 
+    const stageAutomationWorkItem = await createStageAutomationWorkItem({
+      db: db!, localMode: false, pipelineItemId: item.id, title: item.title, stage: requestedStage,
+      priority: item.priority, requestedBy: actorIdentity, note, existingSummary,
+    });
     const snapshotWorkItems = requestedStage === "published" && (youtubeUrl || videoId)
       ? await createPublishedSnapshotWorkItems({
-          db: db || undefined,
-          localMode: useLocalMode,
-          pipelineItemId: item.id,
-          title: item.title,
-          priority: item.priority,
-          requestedBy: actorIdentity,
-          publishedAt: now,
-          youtubeUrl,
-          videoId,
+          db: db!, localMode: false, pipelineItemId: item.id, title: item.title, priority: item.priority,
+          requestedBy: actorIdentity, publishedAt: now, youtubeUrl, videoId,
         })
       : [];
-
     const emailAnnouncementWorkItem = requestedStage === "published"
       ? await createVideoAnnouncementEmailWorkItem({
-          db: db || undefined,
-          localMode: useLocalMode,
-          videoPipelineItemId: item.id,
-          title: item.title,
-          priority: item.priority,
-          requestedBy: actorIdentity,
-          youtubeUrl,
-          videoId,
-          summary: existingSummary,
+          db: db!, localMode: false, videoPipelineItemId: item.id, title: item.title, priority: item.priority,
+          requestedBy: actorIdentity, youtubeUrl, videoId, summary: existingSummary,
         })
       : null;
-
     return NextResponse.json({ item: updated, stageAutomationWorkItem, snapshotWorkItems, emailAnnouncementWorkItem });
   }
 
@@ -812,75 +878,90 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     publishedAt: item.published_at,
   });
 
+  if (useLocalMode) {
+    const signature = `gate:${gateKey}:${actionType}:${nextGateStatus}:${safeReason || ""}:${safeEvidenceSummary || ""}:${safeNextAction || ""}:${shouldCreateWorkItem}`;
+    const result = await withLockedPipelineItemLocal(id, ["video"], async ({ client, item: lockedItem }) => {
+      const lockedMetadata = getYouTubeMetadata(lockedItem.metadata);
+      if (lockedMetadata.local_transition_signature === signature) return { kind: "replay" as const, item: lockedItem, workItem: null };
+      if (String(lockedItem.updated_at || "") !== String(item.updated_at || "") || lockedItem.status !== item.status) return { kind: "stale" as const };
+
+      let localWorkItem: { id?: string } | null = null;
+      if (shouldCreateWorkItem) {
+        const relationType = requestedWorkItemRelationType === "investigate" ? "investigate" : gateKey;
+        const work = await createPipelineWorkItemLocal({
+          pipelineItemId: String(lockedItem.id),
+          pipelineType: "video",
+          title: relationType === "investigate"
+            ? `Investigate ${YOUTUBE_GATE_META[gateKey].label}: ${lockedItem.title}`
+            : `YouTube ${YOUTUBE_GATE_META[gateKey].label}: ${lockedItem.title}`,
+          instruction: createWorkItemInstruction({
+            title: String(lockedItem.title), gateKey, gateStatus: nextGateStatus, actionType, reason: safeReason,
+            evidenceSummary: actionType === "send_to_agent" ? previousGate.evidence_summary || null : safeEvidenceSummary,
+            nextAction: safeNextAction,
+          }),
+          priority: priorityLevelFromScore(scores.priority), ownerAgent: "youtube", requestedBy: actorIdentity,
+          relationType, mapRelationType: "investigate", payloadRelationType: relationType,
+          action: `youtube_gate_${gateKey}`, trigger: "youtube_decision_board",
+        }, client);
+        localWorkItem = work.workItem || null;
+        if (localWorkItem?.id) nextMetadata.gates[gateKey] = { ...updatedGate, work_item_id: localWorkItem.id };
+      }
+      const updated = await updatePipelineItemLocal(id, {
+        status: derivedStatus,
+        priority: priorityLevelFromScore(scores.priority),
+        owner_agent: "youtube",
+        metadata: { ...nextMetadata, local_transition_signature: signature },
+        updated_at: now,
+      }, client);
+      if (!updated) throw new Error("Failed to update gate state");
+      await insertPipelineTransitionEventLocal(client, {
+        domain: "youtube", eventType: `youtube.${actionType}`, pipelineItemId: id, actor: actorIdentity,
+        dedupeKey: signature,
+        payload: { gate_key: gateKey, from_status: lockedItem.status, to_status: derivedStatus, work_item_id: localWorkItem?.id || null },
+      });
+      return { kind: "success" as const, item: updated, workItem: localWorkItem };
+    });
+    if (!result) return NextResponse.json({ error: "Video item not found" }, { status: 404 });
+    if (result.kind === "stale") return NextResponse.json({ error: "Video item changed; retry transition" }, { status: 409 });
+    return NextResponse.json({ item: result.item, workItem: result.workItem });
+  }
+
   let workItem: { id?: string } | null = null;
   if (shouldCreateWorkItem) {
     const relationType = requestedWorkItemRelationType === "investigate" ? "investigate" : gateKey;
     const title = relationType === "investigate"
       ? `Investigate ${YOUTUBE_GATE_META[gateKey].label}: ${item.title}`
       : `YouTube ${YOUTUBE_GATE_META[gateKey].label}: ${item.title}`;
-
-    const workInput = {
+    const result = await createPipelineWorkItem(db!, {
       pipelineItemId: item.id,
       pipelineType: "video",
       title,
       instruction: createWorkItemInstruction({
-        title: item.title,
-        gateKey,
-        gateStatus: nextGateStatus,
-        actionType,
-        reason: safeReason,
+        title: item.title, gateKey, gateStatus: nextGateStatus, actionType, reason: safeReason,
         evidenceSummary: actionType === "send_to_agent" ? previousGate.evidence_summary || null : safeEvidenceSummary,
         nextAction: safeNextAction,
       }),
-      priority: priorityLevelFromScore(scores.priority),
-      ownerAgent: "youtube",
-      requestedBy: actorIdentity,
-      relationType,
-      mapRelationType: "investigate",
-      payloadRelationType: relationType,
-      action: `youtube_gate_${gateKey}`,
-      trigger: "youtube_decision_board",
-    };
-    const result = useLocalMode
-      ? await createPipelineWorkItemLocal(workInput)
-      : await createPipelineWorkItem(db!, workInput);
+      priority: priorityLevelFromScore(scores.priority), ownerAgent: "youtube", requestedBy: actorIdentity,
+      relationType, mapRelationType: "investigate", payloadRelationType: relationType,
+      action: `youtube_gate_${gateKey}`, trigger: "youtube_decision_board",
+    });
     workItem = result.workItem || null;
-    if (workItem?.id) {
-      nextMetadata.gates[gateKey] = {
-        ...updatedGate,
-        work_item_id: workItem.id,
-      };
-    }
+    if (workItem?.id) nextMetadata.gates[gateKey] = { ...updatedGate, work_item_id: workItem.id };
   }
 
-  const updated = useLocalMode
-    ? await updatePipelineItemLocal(id, {
-        status: derivedStatus,
-        priority: priorityLevelFromScore(scores.priority),
-        owner_agent: "youtube",
-        metadata: nextMetadata,
-        updated_at: now,
+  const updated = await (async () => {
+    const { data, error } = await db!
+      .from("pipeline_items")
+      .update({
+        status: derivedStatus, priority: priorityLevelFromScore(scores.priority), owner_agent: "youtube",
+        metadata: nextMetadata, updated_at: now,
       })
-    : await (async () => {
-        const { data, error } = await db!
-          .from("pipeline_items")
-          .update({
-            status: derivedStatus,
-            priority: priorityLevelFromScore(scores.priority),
-            owner_agent: "youtube",
-            metadata: nextMetadata,
-            updated_at: now,
-          })
-          .eq("id", id)
-          .select("id, pipeline_type, title, slug, status, priority, owner_agent, requested_by, source_type, source_id, scheduled_for, published_at, current_url, content_path, content_format, metadata, created_at, updated_at")
-          .single();
-        if (error) throw new Error(error.message);
-        return data;
-      })().catch(() => null);
-
-  if (!updated) {
-    return NextResponse.json({ error: "Failed to update gate state" }, { status: 500 });
-  }
-
+      .eq("id", id)
+      .select("id, pipeline_type, title, slug, status, priority, owner_agent, requested_by, source_type, source_id, scheduled_for, published_at, current_url, content_path, content_format, metadata, created_at, updated_at")
+      .single();
+    if (error) throw new Error(error.message);
+    return data;
+  })().catch(() => null);
+  if (!updated) return NextResponse.json({ error: "Failed to update gate state" }, { status: 500 });
   return NextResponse.json({ item: updated, workItem });
 }

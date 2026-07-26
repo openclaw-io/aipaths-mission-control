@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getLocalMissionControlUser, isLocalAuthDisabled } from "@/lib/auth/local";
-import { query } from "@/lib/db/postgres";
+import { withTransaction } from "@/lib/db/postgres";
+import type { PoolClient } from "pg";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/admin";
 
@@ -35,9 +36,9 @@ async function buildUniqueKey(supabase: ReturnType<typeof createServiceClient>, 
   return `${baseKey}-${Date.now()}`.slice(0, 100);
 }
 
-async function buildUniqueKeyLocal(input: string) {
+async function buildUniqueKeyLocal(input: string, client: Pick<PoolClient, "query">) {
   const baseKey = slugify(input) || `loop-${Date.now()}`;
-  const { rows } = await query<{ key: string }>(`select key from loops where key like $1`, [`${baseKey}%`]);
+  const { rows } = await client.query<{ key: string }>(`select key from loops where key like $1`, [`${baseKey}%`]);
   const existingKeys = new Set((rows || []).map((row) => row.key));
   if (!existingKeys.has(baseKey)) return baseKey;
 
@@ -74,8 +75,17 @@ export async function POST(request: NextRequest) {
   const now = new Date().toISOString();
 
   if (useLocalMode) {
-    const key = await buildUniqueKeyLocal(input);
-    const inserted = await query<{ id: string; key: string; status: string }>(
+    const dedupeKey = `quick-loop:${actorIdentity}:${input}`;
+    const data = await withTransaction(async (client) => {
+      await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [dedupeKey]);
+      const existing = await client.query<{ id: string; key: string; status: string }>(
+        `select id, key, status from loops where metadata ->> 'create_dedupe_key' = $1 order by created_at desc limit 1`,
+        [dedupeKey],
+      );
+      if (existing.rows[0]) return existing.rows[0];
+
+      const key = await buildUniqueKeyLocal(input, client);
+      const inserted = await client.query<{ id: string; key: string; status: string }>(
       `insert into loops (
          key, name, description, summary, type, status, priority, owner_agent,
          metadata, plan, clarification_questions, approval_scope, created_by, updated_at
@@ -88,7 +98,7 @@ export async function POST(request: NextRequest) {
         input,
         input,
         input,
-        JSON.stringify({ created_from: 'quick_loop_box' }),
+        JSON.stringify({ created_from: 'quick_loop_box', create_dedupe_key: dedupeKey }),
         JSON.stringify([]),
         JSON.stringify([]),
         JSON.stringify({
@@ -103,14 +113,16 @@ export async function POST(request: NextRequest) {
         actorIdentity,
         now,
       ],
-    );
-    const data = inserted.rows[0];
+      );
+      const created = inserted.rows[0];
 
-    await query(
-      `insert into loop_events (loop_id, event_type, from_status, to_status, actor, payload, created_at)
-       values ($1, 'loop.created', null, 'planning', $2, $3::jsonb, $4)`,
-      [data.id, actorIdentity, JSON.stringify({ source: 'quick_loop_box', input }), now],
-    );
+      await client.query(
+        `insert into loop_events (loop_id, event_type, from_status, to_status, actor, payload, created_at)
+         values ($1, 'loop.created', null, 'planning', $2, $3::jsonb, $4)`,
+        [created.id, actorIdentity, JSON.stringify({ source: 'quick_loop_box', input, dedupe_key: dedupeKey }), now],
+      );
+      return created;
+    });
 
     return NextResponse.json({ ok: true, loop: data });
   }

@@ -46,7 +46,7 @@ function transpileModule(sourcePath, requires = {}) {
 }
 
 const youtubePipeline = transpileModule(youtubeSource);
-const { orchestrateWorkItemCompletion } = transpileModule(completionSource, {
+const { orchestrateWorkItemCompletion, buildPublicationVerificationRequest } = transpileModule(completionSource, {
   "@/lib/youtube-pipeline": youtubePipeline,
 });
 
@@ -62,6 +62,7 @@ const agentCompletion = transpileModule(agentCompletionSource, {
   },
   "@/lib/db/mission-control": { normalizeRow: (row) => row },
   "@/lib/db/postgres": {
+    query: (text, params) => pool.query(text, params),
     withTransaction: async (run) => {
       const client = await pool.connect();
       try {
@@ -77,7 +78,7 @@ const agentCompletion = transpileModule(agentCompletionSource, {
       }
     },
   },
-  "@/lib/work-items/completion-orchestration": { orchestrateWorkItemCompletion },
+  "@/lib/work-items/completion-orchestration": { orchestrateWorkItemCompletion, buildPublicationVerificationRequest },
 });
 
 before(async () => {
@@ -308,11 +309,20 @@ for (const pipelineType of ["blog", "guide"]) {
       });
       const url = `https://aipaths.academy/${pipelineType}s/test-${pipelineType}`;
 
+      const completionBody = { status: "done", current_url: url, published_at: "2026-07-26T10:00:00.000Z" };
+      const verificationRequest = buildPublicationVerificationRequest(completed(workItem), pipelineItem, completionBody);
       await orchestrateWorkItemCompletion(client, {
         existing: workItem,
         updated: completed(workItem),
-        body: { status: "done", current_url: url, published_at: "2026-07-26T10:00:00.000Z" },
-        verifyPublishedContent,
+        body: completionBody,
+        publicationVerification: {
+          request: verificationRequest,
+          result: await verifyPublishedContent({ url }),
+          workItemId: workItem.id,
+          workItemUpdatedAt: workItem.updated_at ? String(workItem.updated_at) : null,
+          pipelineItemId: pipelineItem.id,
+          pipelineItemUpdatedAt: pipelineItem.updated_at ? String(pipelineItem.updated_at) : null,
+        },
       });
 
       const row = (await client.query("select status, current_url, published_at, metadata from public.pipeline_items where id = $1", [pipelineItem.id])).rows[0];
@@ -336,6 +346,46 @@ for (const pipelineType of ["blog", "guide"]) {
     });
   });
 }
+
+test("publication completion rejects stale preflight evidence under the row lock before applying live state", async () => {
+  await inRollbackTransaction(async (client) => {
+    const pipelineItem = await insertPipelineItem(client, {
+      pipeline_type: "blog",
+      title: "CAS publication",
+      slug: "cas-publication",
+      status: "scheduled",
+    });
+    const workItem = await insertWorkItem(client, pipelineItem, {
+      relation_type: "publish",
+      action: "publish_blog",
+      owner_agent: "dev",
+    });
+    const body = { status: "done", current_url: "https://aipaths.academy/blogs/cas-publication" };
+    const updated = completed(workItem);
+    const request = buildPublicationVerificationRequest(updated, pipelineItem, body);
+
+    await assert.rejects(
+      () => orchestrateWorkItemCompletion(client, {
+        existing: workItem,
+        updated,
+        body,
+        publicationVerification: {
+          request,
+          result: { ok: true, finalUrl: body.current_url },
+          workItemId: workItem.id,
+          workItemUpdatedAt: workItem.updated_at ? String(workItem.updated_at) : null,
+          pipelineItemId: pipelineItem.id,
+          pipelineItemUpdatedAt: "stale-version",
+        },
+      }),
+      /verification snapshot changed/,
+    );
+
+    const row = (await client.query("select status, current_url from pipeline_items where id=$1", [pipelineItem.id])).rows[0];
+    assert.equal(row.status, "scheduled");
+    assert.equal(row.current_url, null);
+  });
+});
 
 test("agent completion rolls the work item and pipeline effects back together when publication verification throws", async () => {
   const pipelineId = randomUUID();
