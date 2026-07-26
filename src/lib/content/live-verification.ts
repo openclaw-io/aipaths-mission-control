@@ -1,7 +1,8 @@
 import { lookup as dnsLookup } from "node:dns/promises";
-import { request as httpRequest } from "node:http";
+import { request as httpRequest, type ClientRequest, type IncomingMessage } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
+import ipaddr from "ipaddr.js";
 
 export type VerifyPublishedContentInput = {
   type: "blog" | "guide" | "doc";
@@ -28,7 +29,18 @@ type NetworkRequestInput = {
   family: number;
   timeoutMs: number;
   maxBodyBytes: number;
+  tlsCa?: string | Buffer;
 };
+
+export type PinnedLookup = (
+  hostname: string,
+  options: { all?: boolean },
+  callback: (
+    error: NodeJS.ErrnoException | null,
+    address: string | ResolvedAddress[],
+    family?: number,
+  ) => void,
+) => void;
 
 export type LiveVerificationOptions = {
   allowedHosts?: string[];
@@ -130,55 +142,20 @@ function hostMatchesAllowlist(hostname: string, allowedHosts: string[]) {
   });
 }
 
-function ipv4Octets(address: string) {
-  if (isIP(address) !== 4) return null;
-  const octets = address.split(".").map(Number);
-  return octets.length === 4 ? octets : null;
-}
-
-function isForbiddenIpv4(address: string) {
-  const octets = ipv4Octets(address);
-  if (!octets) return true;
-  const [a, b, c] = octets;
-  return a === 0
-    || a === 10
-    || a === 127
-    || (a === 100 && b >= 64 && b <= 127)
-    || (a === 169 && b === 254)
-    || (a === 172 && b >= 16 && b <= 31)
-    || (a === 192 && b === 0 && c === 0)
-    || (a === 192 && b === 0 && c === 2)
-    || (a === 192 && b === 168)
-    || (a === 198 && (b === 18 || b === 19))
-    || (a === 198 && b === 51 && c === 100)
-    || (a === 203 && b === 0 && c === 113)
-    || a >= 224;
-}
-
-function mappedIpv4(address: string) {
-  const normalized = address.toLowerCase();
-  const dotted = normalized.match(/^(?:::ffff:)(\d+\.\d+\.\d+\.\d+)$/)?.[1];
-  if (dotted) return dotted;
-  const hex = normalized.match(/^(?:::ffff:)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
-  if (!hex) return null;
-  const high = Number.parseInt(hex[1], 16);
-  const low = Number.parseInt(hex[2], 16);
-  return `${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`;
-}
-
 function isForbiddenIp(address: string) {
-  const family = isIP(address);
-  if (family === 4) return isForbiddenIpv4(address);
-  if (family !== 6) return true;
-  const normalized = address.toLowerCase().split("%")[0];
-  const mapped = mappedIpv4(normalized);
-  if (mapped) return isForbiddenIpv4(mapped);
-  return normalized === "::"
-    || normalized === "::1"
-    || /^f[cd]/.test(normalized)
-    || /^fe[89ab]/.test(normalized)
-    || normalized.startsWith("ff")
-    || normalized.startsWith("2001:db8:");
+  try {
+    const parsed = ipaddr.parse(address.split("%", 1)[0]);
+    if (parsed.range() !== "unicast") return true;
+    if (parsed instanceof ipaddr.IPv4) return false;
+
+    // Public IPv6 global unicast space is 2000::/3. Requiring both this prefix
+    // and ipaddr.js' unicast classification fail-closes transition mechanisms
+    // and special-purpose assignments (site-local, benchmarking, ORCHID,
+    // mapped/compatible IPv4, documentation, multicast, and reserved ranges).
+    return !parsed.match(ipaddr.IPv6.parseCIDR("2000::/3"));
+  } catch {
+    return true;
+  }
 }
 
 function assertSafeHostname(hostname: string, allowedHosts: string[]) {
@@ -199,57 +176,124 @@ function headerValue(headers: Record<string, string | string[] | undefined>, nam
   return Array.isArray(value) ? value[0] : value;
 }
 
-async function requestDefault(input: NetworkRequestInput): Promise<NetworkResponse> {
+export function createPinnedLookup(address: string, family: number): PinnedLookup {
+  return (_hostname, options, callback) => {
+    if (options?.all) {
+      callback(null, [{ address, family }]);
+      return;
+    }
+    callback(null, address, family);
+  };
+}
+
+export async function requestDefault(input: NetworkRequestInput): Promise<NetworkResponse> {
   const target = new URL(input.url);
   const requester = target.protocol === "https:" ? httpsRequest : httpRequest;
   return new Promise((resolve, reject) => {
     let settled = false;
+    let request: ClientRequest | undefined;
+    let activeResponse: IncomingMessage | undefined;
+    const deadlineError = () => new Error(`Publication verification timeout after ${input.timeoutMs}ms`);
+    const deadlineTimer = setTimeout(() => {
+      const error = deadlineError();
+      fail(error);
+      activeResponse?.destroy(error);
+      request?.destroy(error);
+    }, Math.max(0, input.timeoutMs));
     const fail = (error: Error) => {
       if (settled) return;
       settled = true;
+      clearTimeout(deadlineTimer);
       reject(error);
     };
-    const request = requester(target, {
-      method: "GET",
-      headers: {
-        "user-agent": "AIPaths Mission Control live-verifier/2.0",
-        accept: "text/html,application/xhtml+xml",
-        "accept-encoding": "identity",
-      },
-      lookup: (_hostname, _options, callback) => callback(null, input.address, input.family),
-      agent: false,
-    }, (response) => {
-      const declaredLength = Number(response.headers["content-length"] || 0);
-      if (declaredLength > input.maxBodyBytes) {
-        response.destroy();
-        fail(new Error(`Response body exceeds configured limit of ${input.maxBodyBytes} bytes`));
-        return;
-      }
-      const chunks: Buffer[] = [];
-      let bytes = 0;
-      response.on("data", (chunk: Buffer) => {
-        bytes += chunk.length;
-        if (bytes > input.maxBodyBytes) {
+    const succeed = (response: NetworkResponse) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadlineTimer);
+      resolve(response);
+    };
+
+    try {
+      request = requester(target, {
+        method: "GET",
+        headers: {
+          "user-agent": "AIPaths Mission Control live-verifier/2.0",
+          accept: "text/html,application/xhtml+xml",
+          "accept-encoding": "identity",
+        },
+        lookup: createPinnedLookup(input.address, input.family),
+        agent: false,
+        ...(input.tlsCa ? { ca: input.tlsCa } : {}),
+      }, (response) => {
+        activeResponse = response;
+        if (settled) {
+          response.destroy();
+          return;
+        }
+        const declaredLength = Number(response.headers["content-length"] || 0);
+        if (declaredLength > input.maxBodyBytes) {
           response.destroy();
           fail(new Error(`Response body exceeds configured limit of ${input.maxBodyBytes} bytes`));
           return;
         }
-        chunks.push(chunk);
+        const chunks: Buffer[] = [];
+        let bytes = 0;
+        response.on("data", (chunk: Buffer) => {
+          bytes += chunk.length;
+          if (bytes > input.maxBodyBytes) {
+            response.destroy();
+            fail(new Error(`Response body exceeds configured limit of ${input.maxBodyBytes} bytes`));
+            return;
+          }
+          chunks.push(chunk);
+        });
+        response.on("end", () => {
+          succeed({
+            status: response.statusCode || 0,
+            headers: response.headers,
+            body: Buffer.concat(chunks).toString("utf8"),
+          });
+        });
+        response.on("aborted", () => fail(new Error("Publication response was aborted")));
+        response.on("error", fail);
       });
-      response.on("end", () => {
+      request.on("error", fail);
+      request.end();
+    } catch (error) {
+      fail(error instanceof Error ? error : new Error(String(error)));
+    }
+  });
+}
+
+function timeoutError(timeoutMs: number) {
+  return new Error(`Publication verification timeout after ${timeoutMs}ms`);
+}
+
+function withDeadline<T>(operation: Promise<T>, deadline: number, timeoutMs: number): Promise<T> {
+  const remainingMs = deadline - Date.now();
+  if (remainingMs <= 0) return Promise.reject(timeoutError(timeoutMs));
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(timeoutError(timeoutMs));
+    }, remainingMs);
+    operation.then(
+      (value) => {
         if (settled) return;
         settled = true;
-        resolve({
-          status: response.statusCode || 0,
-          headers: response.headers,
-          body: Buffer.concat(chunks).toString("utf8"),
-        });
-      });
-      response.on("error", fail);
-    });
-    request.setTimeout(input.timeoutMs, () => request.destroy(new Error(`Publication verification timeout after ${input.timeoutMs}ms`)));
-    request.on("error", fail);
-    request.end();
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
   });
 }
 
@@ -268,24 +312,32 @@ async function fetchSafeHtml(initialUrl: string, options: LiveVerificationOption
     const target = new URL(currentUrl);
     if (target.protocol !== "http:" && target.protocol !== "https:") throw new Error(`Unsupported URL protocol: ${target.protocol}`);
     if (target.username || target.password) throw new Error("Publication URL credentials are forbidden");
-    assertSafeHostname(target.hostname, allowedHosts);
+    const hostname = target.hostname.replace(/^\[|\]$/g, "");
+    assertSafeHostname(hostname, allowedHosts);
 
-    const addresses = isIP(target.hostname)
-      ? [{ address: target.hostname, family: isIP(target.hostname) }]
-      : await resolveHost(target.hostname);
-    if (!addresses.length) throw new Error(`DNS returned no addresses for ${target.hostname}`);
-    const forbidden = addresses.find(({ address }) => isForbiddenIp(address));
-    if (forbidden) throw new Error(`DNS returned forbidden private, loopback, link-local, or metadata address: ${forbidden.address}`);
+    const addressFamily = isIP(hostname);
+    const addresses = addressFamily
+      ? [{ address: hostname, family: addressFamily }]
+      : await withDeadline(
+        Promise.resolve().then(() => resolveHost(hostname)),
+        deadline,
+        timeoutMs,
+      );
+    if (!addresses.length) throw new Error(`DNS returned no addresses for ${hostname}`);
+    const forbidden = addresses.find(({ address, family }) => (
+      isForbiddenIp(address) || isIP(address) !== family
+    ));
+    if (forbidden) throw new Error(`DNS returned forbidden or invalid non-public address: ${forbidden.address}`);
 
     const remainingMs = deadline - Date.now();
-    if (remainingMs <= 0) throw new Error(`Publication verification timeout after ${timeoutMs}ms`);
-    const response = await request({
+    if (remainingMs <= 0) throw timeoutError(timeoutMs);
+    const response = await withDeadline(request({
       url: target.toString(),
       address: addresses[0].address,
       family: addresses[0].family,
       timeoutMs: remainingMs,
       maxBodyBytes,
-    });
+    }), deadline, timeoutMs);
 
     if (!REDIRECT_STATUSES.has(response.status)) {
       return { ...response, finalUrl: target.toString() };
