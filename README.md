@@ -143,14 +143,23 @@ npm run suggestions:seed-hygiene
 
 The command requires `MISSION_CONTROL_DATABASE_URL`, validates the exact local target, writes `work_items` and `event_log` transactionally, and has no Supabase/cloud fallback.
 
-Run sync helper tests and the project checks with:
+Run the project tests with:
 
 ```bash
-node --test ops/local-postgres/sync-local-core-helpers.test.mjs
+npm test
 npm run test:youtube-statistics
 npm run lint
 plutil -lint ops/macos/*.plist
 ```
+
+`npm test`, `npm run test:loops`, and `npm run test:youtube-statistics` create a
+unique disposable PostgreSQL database on an exact loopback address, apply
+`ops/local-postgres/schema.sql`, run `node --test` with only the guarded
+`MISSION_CONTROL_TEST_DATABASE_URL`, and terminate connections/drop the database
+in cleanup. They deliberately remove `MISSION_CONTROL_DATABASE_URL` and refuse
+the live `aipaths_mission_control_local` database. To use a non-default local
+PostgreSQL role or port, set `MISSION_CONTROL_TEST_ADMIN_URL` to a loopback URL
+whose database is `postgres` or `template1`.
 
 ## Tech Stack
 

@@ -7,12 +7,11 @@ import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import pg from "pg";
 import ts from "typescript";
+import { requireMissionControlTestDatabaseUrl } from "../test-postgres-guard.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const helperSource = resolve(repoRoot, "src/lib/email-campaigns/local.ts");
-const pool = process.env.MISSION_CONTROL_DATABASE_URL
-  ? new pg.Pool({ connectionString: process.env.MISSION_CONTROL_DATABASE_URL })
-  : new pg.Pool({ database: "aipaths_mission_control_local", host: "127.0.0.1", port: 5432, user: "joaco" });
+const pool = new pg.Pool({ connectionString: requireMissionControlTestDatabaseUrl() });
 let failOnSql = null;
 
 async function withTestTransaction(run) {

@@ -7,9 +7,10 @@ import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import pg from "pg";
 import ts from "typescript";
+import { requireMissionControlTestDatabaseUrl } from "../test-postgres-guard.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
-const databaseUrl = process.env.MISSION_CONTROL_DATABASE_URL || "postgres://joaco@127.0.0.1:5432/aipaths_mission_control_local";
+const databaseUrl = requireMissionControlTestDatabaseUrl();
 const pool = new pg.Pool({ connectionString: databaseUrl, max: 4 });
 const failure = { eventTable: null, armed: false };
 
