@@ -37,22 +37,10 @@ function runNodeTests(args, env) {
       env,
       stdio: "inherit",
     });
-    const forwardSignal = (signal) => child.kill(signal);
-    const onSigint = () => forwardSignal("SIGINT");
-    const onSigterm = () => forwardSignal("SIGTERM");
-    process.once("SIGINT", onSigint);
-    process.once("SIGTERM", onSigterm);
-
-    const removeSignalHandlers = () => {
-      process.removeListener("SIGINT", onSigint);
-      process.removeListener("SIGTERM", onSigterm);
-    };
     child.once("error", (error) => {
-      removeSignalHandlers();
       rejectRun(error);
     });
     child.once("close", (code, signal) => {
-      removeSignalHandlers();
       resolveRun({ code: code ?? 1, signal });
     });
   });
@@ -82,33 +70,70 @@ export async function runTestsWithDisposablePostgres({
   const databaseUrl = databaseUrlForName(adminUrl, databaseName);
   const admin = new Client({ connectionString: adminUrl });
   let databaseCreated = false;
+  let requestedSignal;
+  let result;
+  let operationError;
+  let cleanupError;
+
+  const recordSignal = (signal) => {
+    if (!requestedSignal) {
+      requestedSignal = signal;
+      console.error(`[test-db] received ${signal}; waiting for safe child and database cleanup`);
+    } else {
+      console.error(`[test-db] already handling ${requestedSignal}; ignoring repeated ${signal} until cleanup completes`);
+    }
+  };
+  const onSigint = () => recordSignal("SIGINT");
+  const onSigterm = () => recordSignal("SIGTERM");
+  // These handlers cover connect, creation, schema setup, child execution, and
+  // teardown. In particular, do not forward the signal to node:test: it can
+  // kill a test worker in the middle of its own disposable-database cleanup.
+  process.on("SIGINT", onSigint);
+  process.on("SIGTERM", onSigterm);
 
   try {
     await admin.connect();
-    await admin.query(`CREATE DATABASE ${quotePostgresIdentifier(databaseName)}`);
-    databaseCreated = true;
-
-    const schema = await readFile(schemaPath, "utf8");
-    const testDatabase = new Client({ connectionString: databaseUrl });
-    try {
-      await testDatabase.connect();
-      await testDatabase.query(schema);
-    } finally {
-      await testDatabase.end().catch(() => {});
+    if (!requestedSignal) {
+      await admin.query(`CREATE DATABASE ${quotePostgresIdentifier(databaseName)}`);
+      databaseCreated = true;
     }
 
-    console.log(`[test-db] created disposable database ${databaseName}`);
-    return await runTests(testArgs, buildTestEnvironment(baseEnv, { adminUrl, databaseUrl }));
+    if (!requestedSignal) {
+      const schema = await readFile(schemaPath, "utf8");
+      const testDatabase = new Client({ connectionString: databaseUrl });
+      try {
+        await testDatabase.connect();
+        await testDatabase.query(schema);
+      } finally {
+        await testDatabase.end().catch(() => {});
+      }
+    }
+
+    if (!requestedSignal) {
+      console.log(`[test-db] created disposable database ${databaseName}`);
+      result = await runTests(testArgs, buildTestEnvironment(baseEnv, { adminUrl, databaseUrl }));
+    }
+  } catch (error) {
+    operationError = error;
   } finally {
     try {
       if (databaseCreated) {
         await removeDisposableDatabase(admin, databaseName);
         console.log(`[test-db] dropped disposable database ${databaseName}`);
       }
+    } catch (error) {
+      cleanupError = error;
     } finally {
       await admin.end().catch(() => {});
+      process.removeListener("SIGINT", onSigint);
+      process.removeListener("SIGTERM", onSigterm);
     }
   }
+
+  if (cleanupError) throw cleanupError;
+  if (requestedSignal) return { code: 1, signal: requestedSignal };
+  if (operationError) throw operationError;
+  return result;
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
