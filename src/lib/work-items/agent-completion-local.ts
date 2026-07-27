@@ -87,15 +87,16 @@ export async function patchAgentWorkItemWithCompletion(id: string, body: JsonRec
       ? body.payload_increment as JsonRecord
       : null;
 
-    const updates: Record<string, unknown> = { updated_at: new Date() };
+    const completionTime = new Date();
+    const updates: Record<string, unknown> = { updated_at: completionTime };
     if (status) updates.status = status;
     if (status === "ready") {
       updates.started_at = null;
       updates.completed_at = null;
     }
-    if (status === "in_progress") updates.started_at = new Date();
+    if (status === "in_progress") updates.started_at = completionTime;
     if ((status === "done" || status === "failed") && existing.status !== status) {
-      updates.completed_at = new Date();
+      updates.completed_at = completionTime;
     }
     if (scheduledFor !== undefined) updates.scheduled_for = scheduledFor;
     if (body.result && !(status === "done" && existing.status === "done")) {
@@ -112,6 +113,22 @@ export async function patchAgentWorkItemWithCompletion(id: string, body: JsonRec
         if (Number.isFinite(delta)) incrementedPayload[key] = Number(incrementedPayload[key] || 0) + delta;
       }
       nextPayload = incrementedPayload;
+    }
+    if (status === "done" && existing.status !== "done") {
+      nextPayload = {
+        ...(existing.payload || {}),
+        ...(nextPayload || {}),
+        ...(body.result !== undefined ? { result: body.result } : {}),
+        dispatch_state: "completed",
+        dispatch_completed_at: completionTime.toISOString(),
+      };
+    } else if (status === "failed" && existing.status !== "failed") {
+      nextPayload = {
+        ...(existing.payload || {}),
+        ...(nextPayload || {}),
+        dispatch_state: "failed",
+        dispatch_completed_at: completionTime.toISOString(),
+      };
     }
     if (nextPayload) updates.payload = nextPayload;
 

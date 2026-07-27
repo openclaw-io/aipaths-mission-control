@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { query, withTransaction } from "@/lib/db/postgres";
 import { getExecutionWindowConfig, isExecutionWindowOpenNow } from "@/lib/execution-window";
+import { buildLoopExecutionInstruction } from "@/lib/loops/execution-instruction";
 import {
   getPrimaryExecutionWorkItemLocal,
   isPrimaryExecutionOpen,
@@ -33,11 +34,14 @@ type LoopRow = {
   plan: Array<{ title?: string; status?: string; notes?: string | null }> | null;
   clarification_questions: ClarificationQuestion[] | null;
   metadata: {
+    original_input?: string | null;
     clarification_history?: ClarificationHistoryEntry[] | null;
   } | null;
   approval_scope: {
     approved?: boolean;
     can_execute_unattended?: boolean;
+    allowed_actions?: string[] | null;
+    forbidden_actions?: string[] | null;
     notes?: string | null;
   } | null;
 };
@@ -47,38 +51,6 @@ export const dynamic = "force-dynamic";
 function checkInternalAuth(req: NextRequest): boolean {
   const token = req.headers.get("authorization")?.replace("Bearer ", "");
   return !!token && token === process.env.AGENT_API_KEY;
-}
-
-function buildClarificationContext(loop: LoopRow) {
-  const clarificationHistory = Array.isArray(loop.metadata?.clarification_history)
-    ? loop.metadata?.clarification_history || []
-    : [];
-
-  const responses = clarificationHistory
-    .map((entry) => (typeof entry?.response === "string" ? entry.response.trim() : ""))
-    .filter(Boolean);
-
-  if (!responses.length) return null;
-
-  return `Latest clarification from requester:\n${responses.map((response) => `- ${response}`).join("\n")}`;
-}
-
-function buildInstruction(loop: LoopRow) {
-  const clarificationContext = buildClarificationContext(loop);
-  const parts = [
-    `Loop: ${loop.name || "Untitled Loop"}`,
-    loop.summary || loop.description ? `Summary: ${loop.summary || loop.description}` : null,
-    loop.target_outcome ? `Target outcome: ${loop.target_outcome}` : null,
-    loop.plan?.length
-      ? `Plan:\n${loop.plan
-          .map((step, index) => `- ${index + 1}. ${step.title || "Untitled step"}${step.notes ? ` (${step.notes})` : ""}`)
-          .join("\n")}`
-      : null,
-    clarificationContext,
-    loop.approval_scope?.notes ? `Approval notes: ${loop.approval_scope.notes}` : null,
-  ].filter(Boolean);
-
-  return parts.join("\n\n");
 }
 
 export async function POST(request: NextRequest) {
@@ -172,7 +144,7 @@ export async function POST(request: NextRequest) {
           loop.id,
           loop.id,
           `Execute loop: ${loop.name || "Untitled Loop"}`,
-          buildInstruction(loop),
+          buildLoopExecutionInstruction(loop),
           loop.priority || "medium",
           loop.owner_agent,
           JSON.stringify({

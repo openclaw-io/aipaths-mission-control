@@ -5,15 +5,12 @@ import { supabaseAdmin } from "@/lib/supabase/admin";
 import {
   getLoopStatusForPrimaryExecution,
   getPrimaryExecutionWorkItem,
-  isPrimaryExecutionOpen,
   listPrimaryExecutionWorkItems,
-  reconcileLoopStatusWithPrimaryExecution,
   type PrimaryExecutionWorkItem,
 } from "@/lib/loops/lifecycle";
 import {
   getPrimaryExecutionWorkItemLocal,
   listPrimaryExecutionWorkItemsLocal,
-  reconcileLoopStatusWithPrimaryExecutionLocal,
 } from "@/lib/loops/lifecycle-local";
 
 export type PlanStep = {
@@ -287,7 +284,7 @@ function extractDeliverableSummary(primaryExecution: PrimaryExecutionWorkItem | 
   return null;
 }
 
-async function reconcileLoopsWithPrimaryExecution(
+function deriveLoopStatusesFromPrimaryExecution(
   rows: LoopRow[],
   primaryExecutionByLoop: Map<string, PrimaryExecutionWorkItem>
 ) {
@@ -296,14 +293,6 @@ async function reconcileLoopsWithPrimaryExecution(
     const nextStatus = getLoopStatusForPrimaryExecution(loop.status, primaryExecution?.status);
 
     if (!nextStatus) continue;
-
-    await reconcileLoopStatusWithPrimaryExecution(supabaseAdmin, {
-      loopId: loop.id,
-      loopStatus: loop.status,
-      primaryExecution,
-      actor: "system:read_model",
-      reason: "read_model_primary_execution_sync",
-    });
 
     loop.status = nextStatus;
   }
@@ -348,13 +337,6 @@ export async function listLoopGalleryCards(): Promise<LoopGalleryCard[]> {
       const primaryExecution = primaryExecutionByLoop.get(loop.id) || null;
       const nextStatus = getLoopStatusForPrimaryExecution(loop.status, primaryExecution?.status);
       if (nextStatus) {
-        await reconcileLoopStatusWithPrimaryExecutionLocal(query, {
-          loopId: loop.id,
-          loopStatus: loop.status,
-          primaryExecution,
-          actor: 'system:read_model',
-          reason: 'read_model_primary_execution_sync',
-        });
         loop.status = nextStatus;
       }
     }
@@ -411,7 +393,7 @@ export async function listLoopGalleryCards(): Promise<LoopGalleryCard[]> {
 
   const workCounts = countBy(workLinks.data as Array<{ loop_id: string }>);
 
-  await reconcileLoopsWithPrimaryExecution(rows, primaryExecutionByLoop);
+  deriveLoopStatusesFromPrimaryExecution(rows, primaryExecutionByLoop);
 
   return rows.map((loop) => {
     const { progressPercent, progressLabel } = deriveProgress(loop);
@@ -465,13 +447,6 @@ export async function getLoopDetail(loopId: string): Promise<LoopDetailPayload |
     const primaryExecution = await getPrimaryExecutionWorkItemLocal(loopId);
     const nextStatus = getLoopStatusForPrimaryExecution(row.status, primaryExecution?.status);
     if (nextStatus) {
-      await reconcileLoopStatusWithPrimaryExecutionLocal(query, {
-        loopId,
-        loopStatus: row.status,
-        primaryExecution,
-        actor: 'system:read_model',
-        reason: 'read_model_primary_execution_sync',
-      });
       row.status = nextStatus;
     }
 
@@ -554,14 +529,6 @@ export async function getLoopDetail(loopId: string): Promise<LoopDetailPayload |
   const nextStatus = getLoopStatusForPrimaryExecution(row.status, primaryExecution?.status);
 
   if (nextStatus) {
-    await reconcileLoopStatusWithPrimaryExecution(supabaseAdmin, {
-      loopId,
-      loopStatus: row.status,
-      primaryExecution,
-      actor: "system:read_model",
-      reason: "read_model_primary_execution_sync",
-    });
-
     row.status = nextStatus;
   }
 

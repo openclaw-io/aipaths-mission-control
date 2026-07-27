@@ -14,7 +14,7 @@
     "sync:youtube-statistics:batch": "node scripts/sync-youtube-statistics-batch.mjs",
     "refresh:youtube-metadata": "node scripts/refresh-youtube-owned-video-metadata.mjs",
     "test": "node scripts/run-tests-with-disposable-postgres.mjs scripts/lib/__tests__/*.test.mjs",
-    "test:loops": "node scripts/run-tests-with-disposable-postgres.mjs scripts/lib/__tests__/work-item-loop-contract.test.mjs scripts/lib/__tests__/loops-total-cutover.test.mjs scripts/lib/__tests__/loops-cutover-postgres.test.mjs",
+    "test:loops": "node scripts/run-tests-with-disposable-postgres.mjs scripts/lib/__tests__/work-item-loop-contract.test.mjs scripts/lib/__tests__/loop-cycle-hardening.test.mjs scripts/lib/__tests__/loop-completion-postgres.test.mjs scripts/lib/__tests__/work-item-completion-orchestration.test.mjs scripts/lib/__tests__/loops-total-cutover.test.mjs scripts/lib/__tests__/loops-cutover-postgres.test.mjs",
     "rehearse:loops": "node scripts/rehearse-loops-cutover.mjs",
     "rehearse:loops:sql-editor": "node scripts/rehearse-loops-cutover.mjs --sql-editor",
     "rehearse:loops:recovery": "node scripts/rehearse-loops-cutover.mjs --sql-editor --inject-all-checkpoints",

@@ -4,6 +4,7 @@ import { createClient } from "@supabase/supabase-js";
 import { AGENT_ROUTING, isRoutedAgent } from "@/lib/agent-routing";
 import { isLocalAuthDisabled } from "@/lib/auth/local";
 import { query } from "@/lib/db/postgres";
+import { buildLoopWakeContext } from "@/lib/loops/execution-instruction";
 
 export const dynamic = "force-dynamic";
 
@@ -34,9 +35,12 @@ type LoopContextRow = {
   description: string | null;
   clarification_questions: ClarificationQuestion[] | null;
   metadata: {
+    original_input?: string | null;
     clarification_history?: ClarificationHistoryEntry[] | null;
   } | null;
   approval_scope: {
+    allowed_actions?: string[] | null;
+    forbidden_actions?: string[] | null;
     notes?: string | null;
   } | null;
 };
@@ -62,22 +66,7 @@ function buildLoopContext(loop: LoopContextRow) {
 
   const summary = loop.summary || loop.description;
   if (summary) parts.push(`Summary: ${summary}`);
-
-  const clarificationHistory = Array.isArray(loop.metadata?.clarification_history)
-    ? loop.metadata?.clarification_history || []
-    : [];
-
-  const responses = clarificationHistory
-    .map((entry) => (typeof entry?.response === "string" ? entry.response.trim() : ""))
-    .filter(Boolean);
-
-  if (responses.length) {
-    parts.push(`Latest clarification from requester:\n${responses.map((response) => `- ${response}`).join("\n")}`);
-  }
-
-  if (loop.approval_scope?.notes) {
-    parts.push(`Approval notes: ${loop.approval_scope.notes}`);
-  }
+  parts.push(buildLoopWakeContext(loop));
 
   return parts.join("\n\n");
 }

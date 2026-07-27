@@ -71,6 +71,77 @@ function readString(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+function completePlan(plan: unknown) {
+  if (!Array.isArray(plan)) return [];
+  return plan.map((step) => (
+    step && typeof step === "object" && !Array.isArray(step)
+      ? { ...(step as JsonRecord), status: "done" }
+      : step
+  ));
+}
+
+async function reconcilePrimaryLoopCompletion(
+  client: CompletionQueryClient,
+  workItem: WorkItemRow,
+) {
+  const linkedLoop = await client.query<{
+    id: string;
+    status: string;
+    plan: unknown;
+  }>(
+    `SELECT l.id, l.status, l.plan
+       FROM public.loop_work_items lwi
+       INNER JOIN public.loops l ON l.id = lwi.loop_id
+      WHERE lwi.work_item_id = $1
+        AND lwi.relation_type = 'primary_execution'
+      LIMIT 1
+      FOR UPDATE OF l`,
+    [workItem.id],
+  );
+  const loop = linkedLoop.rows[0];
+  if (!loop) return { applied: false, reason: "not_loop_primary_execution" };
+
+  const nextStatus = loop.status === "completed" ? "completed" : "in_review";
+  const nextPlan = completePlan(loop.plan);
+  const planWasAlreadyDone = Array.isArray(loop.plan)
+    && loop.plan.every((step) => (
+      !step || typeof step !== "object" || Array.isArray(step) || (step as JsonRecord).status === "done"
+    ));
+  if (loop.status === nextStatus && planWasAlreadyDone) {
+    return { applied: false, reason: "loop_completion_already_reconciled", loopId: loop.id };
+  }
+
+  const now = new Date().toISOString();
+  await client.query(
+    `UPDATE public.loops
+        SET status = $2,
+            plan = $3::jsonb,
+            updated_at = $4::timestamptz
+      WHERE id = $1`,
+    [loop.id, nextStatus, JSON.stringify(nextPlan), now],
+  );
+  await client.query(
+    `INSERT INTO public.loop_events
+       (loop_id, event_type, from_status, to_status, actor, payload, created_at)
+     VALUES ($1, 'loop.primary_execution_completed', $2, $3, $4, $5::jsonb, $6::timestamptz)`,
+    [
+      loop.id,
+      loop.status,
+      nextStatus,
+      readString(workItem.owner_agent) || "work-item-completion",
+      JSON.stringify({
+        work_item_id: workItem.id,
+        relation_type: "primary_execution",
+        work_item_status: "done",
+        plan_steps_completed: nextPlan.length,
+        dispatch_state: readString(asRecord(workItem.payload).dispatch_state),
+      }),
+      now,
+    ],
+  );
+  return { applied: true, effect: "loop_primary_execution_completed", loopId: loop.id };
+}
+
 function resolvePipelineAction(workItem: WorkItemRow, pipelineItem: JsonRecord) {
   const payload = asRecord(workItem.payload);
   let pipelineType = readString(payload.pipeline_type) || readString(pipelineItem.pipeline_type) || "";
@@ -416,12 +487,18 @@ export async function orchestrateWorkItemCompletion(
   const { existing, updated, body, publicationVerification } = input;
   if (body.status !== "done" || existing.status === "done") return { applied: false, reason: "not_a_new_completion" };
 
+  const loopCompletion = await reconcilePrimaryLoopCompletion(client, updated);
+
   const payload = asRecord(updated.payload);
   const sourcePipelineItemId = ["pipeline_item", "service"].includes(String(updated.source_type || ""))
     ? readString(updated.source_id)
     : null;
   const pipelineItemId = readString(payload.pipeline_item_id) || sourcePipelineItemId;
-  if (!pipelineItemId) return { applied: false, reason: "not_pipeline_backed" };
+  if (!pipelineItemId) {
+    return loopCompletion.applied
+      ? loopCompletion
+      : { applied: false, reason: "not_pipeline_backed" };
+  }
 
   const pipelineResult = await client.query<JsonRecord>(
     "SELECT * FROM public.pipeline_items WHERE id = $1 LIMIT 1 FOR UPDATE",

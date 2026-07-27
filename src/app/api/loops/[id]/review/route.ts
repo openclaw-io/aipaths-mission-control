@@ -3,6 +3,7 @@ import { getLocalMissionControlUser, isLocalAuthDisabled } from "@/lib/auth/loca
 import { withTransaction } from "@/lib/db/postgres";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/admin";
+import { buildLoopReworkInstruction } from "@/lib/loops/execution-instruction";
 import {
   getPrimaryExecutionWorkItem,
   isPrimaryExecutionOpen,
@@ -54,8 +55,14 @@ export async function POST(
       name: string | null;
       summary: string | null;
       description: string | null;
-      plan: unknown[] | null;
+      target_outcome: string | null;
+      plan: Array<{ title?: string | null; status?: string | null; notes?: string | null }> | null;
       metadata: Record<string, unknown> | null;
+      approval_scope: {
+        allowed_actions?: string[] | null;
+        forbidden_actions?: string[] | null;
+        notes?: string | null;
+      } | null;
       owner_agent: string | null;
     };
     type LocalPrimaryExecution = {
@@ -66,7 +73,7 @@ export async function POST(
 
     const localResult = await withTransaction(async (client) => {
       const loopRes = await client.query<LocalLoop>(
-        `select id, status, name, summary, description, plan, metadata, owner_agent
+        `select id, status, name, summary, description, target_outcome, plan, metadata, approval_scope, owner_agent
            from loops
           where id = $1
           limit 1
@@ -158,22 +165,7 @@ export async function POST(
       let workItemId: string | null = null;
       if (action === "request_changes" && primaryExecution) {
         workItemId = primaryExecution.work_item_id;
-        const reviewInstruction = [
-          `Loop: ${loop.name || id}`,
-          loop.summary ? `Summary: ${loop.summary}` : null,
-          loop.description ? `Description: ${loop.description}` : null,
-          Array.isArray(loop.plan) && loop.plan.length
-            ? `Current plan:\n${loop.plan.map((step: unknown, index: number) => {
-                const planStep = step && typeof step === "object" && !Array.isArray(step) ? step as { title?: unknown } : {};
-                return `- ${index + 1}. ${typeof planStep.title === "string" && planStep.title.trim() ? planStep.title : "Untitled step"}`;
-              }).join("\n")}`
-            : null,
-          "",
-          "Review requested changes:",
-          feedback || "No explicit feedback provided. Rework the deliverable based on review comments and produce an updated final output.",
-          "",
-          "Important: produce a fresh updated deliverable, and persist the final answer in payload.result/output/summary when completing the work item.",
-        ].filter(Boolean).join("\n");
+        const reviewInstruction = buildLoopReworkInstruction(loop, feedback, id);
         const existingWorkPayload = (primaryExecution.payload || {}) as Record<string, unknown>;
         const loopFeedbackHistory = Array.isArray(loopMetadata.latest_deliverable_feedback_history)
           ? loopMetadata.latest_deliverable_feedback_history
@@ -234,7 +226,7 @@ export async function POST(
   const supabase = createServiceClient();
   const { data: loop, error: loadError } = await supabase
     .from("loops")
-    .select("id, status, name, summary, description, plan, metadata, owner_agent")
+    .select("id, status, name, summary, description, target_outcome, plan, metadata, approval_scope, owner_agent")
     .eq("id", id)
     .maybeSingle();
 
@@ -328,23 +320,14 @@ export async function POST(
 
     const workItemId = links?.[0]?.work_item_id;
     if (workItemId) {
-      const existingPayload = (((loop.metadata || {}) as Record<string, unknown>).latest_deliverable_feedback_history as unknown[]) || [];
-      const reviewInstruction = [
-        `Loop: ${loop.name || id}`,
-        loop.summary ? `Summary: ${loop.summary}` : null,
-        loop.description ? `Description: ${loop.description}` : null,
-        Array.isArray(loop.plan) && loop.plan.length
-          ? `Current plan:\n${loop.plan.map((step: unknown, index: number) => {
-              const planStep = step && typeof step === "object" && !Array.isArray(step) ? step as { title?: unknown } : {};
-              return `- ${index + 1}. ${typeof planStep.title === "string" && planStep.title.trim() ? planStep.title : "Untitled step"}`;
-            }).join("\n")}`
-          : null,
-        "",
-        "Review requested changes:",
-        feedback || "No explicit feedback provided. Rework the deliverable based on review comments and produce an updated final output.",
-        "",
-        "Important: produce a fresh updated deliverable, and persist the final answer in payload.result/output/summary when completing the work item.",
-      ].filter(Boolean).join("\n");
+      const { data: existingWorkItem } = await supabase
+        .from("work_items")
+        .select("payload")
+        .eq("id", workItemId)
+        .maybeSingle();
+      const existingWorkPayload = (existingWorkItem?.payload || {}) as Record<string, unknown>;
+      const existingFeedback = (((loop.metadata || {}) as Record<string, unknown>).latest_deliverable_feedback_history as unknown[]) || [];
+      const reviewInstruction = buildLoopReworkInstruction(loop, feedback, id);
 
       await supabase
         .from("work_items")
@@ -354,10 +337,13 @@ export async function POST(
           completed_at: null,
           instruction: reviewInstruction,
           payload: {
+            ...existingWorkPayload,
             review_feedback: feedback || null,
             rework_requested_at: now,
             rework_requested_by: actorIdentity,
-            prior_review_feedback: existingPayload,
+            prior_review_feedback: Array.isArray(existingWorkPayload.prior_review_feedback)
+              ? existingWorkPayload.prior_review_feedback
+              : existingFeedback,
           },
         })
         .eq("id", workItemId);
