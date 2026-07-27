@@ -407,7 +407,7 @@ test("every terminal work-item state rejects delayed nonterminal agent updates",
   }
 });
 
-test("attempt identity protects in-progress claims, payload patches, and increments", async () => {
+test("attempt identity protects every effective attempt-scoped agent PATCH", async () => {
   const loopId = randomUUID();
   const workItemId = randomUUID();
   const attemptId = randomUUID();
@@ -419,29 +419,102 @@ test("attempt identity protects in-progress claims, payload patches, and increme
       payload: { execution_attempt_id: attemptId, execution_generation: 2, counter: 3 },
     });
     const before = (await pool.query(
-      "select status, started_at, completed_at, payload, updated_at from public.work_items where id = $1",
+      "select status, scheduled_for, started_at, completed_at, payload, updated_at from public.work_items where id = $1",
       [workItemId],
     )).rows[0];
 
-    for (const mutation of [
+    const mutations = [
       { status: "in_progress", payload_patch: { dispatch_state: "claimed_by_agent", claimed_by: "stale-agent" } },
+      { status: "ready" },
+      { scheduled_for: "2099-05-01T12:00:00.000Z" },
+      { output: { stale: true } },
+      { result: "stale result" },
       { payload_patch: { stale_patch: true } },
       { payload_increment: { counter: 10 } },
+    ];
+    for (const mutation of mutations) {
+      for (const executionAttemptId of [undefined, "superseded-attempt"]) {
+        await assert.rejects(
+          () => agentCompletion.patchAgentWorkItemWithCompletion(workItemId, {
+            ...mutation,
+            ...(executionAttemptId ? { execution_attempt_id: executionAttemptId } : {}),
+          }),
+          /stale_execution_attempt/,
+        );
+      }
+    }
+
+    const after = (await pool.query(
+      "select status, scheduled_for, started_at, completed_at, payload, updated_at from public.work_items where id = $1",
+      [workItemId],
+    )).rows[0];
+    assert.deepEqual(after, before);
+
+    const scheduledFor = "2099-05-01T12:00:00.000Z";
+    await agentCompletion.patchAgentWorkItemWithCompletion(workItemId, {
+      execution_attempt_id: attemptId,
+      scheduled_for: scheduledFor,
+    });
+    const accepted = (await pool.query(
+      "select scheduled_for from public.work_items where id = $1",
+      [workItemId],
+    )).rows[0];
+    assert.equal(new Date(accepted.scheduled_for).toISOString(), scheduledFor);
+  } finally {
+    await cleanupLoopGraph(loopId, workItemId);
+  }
+});
+
+test("empty and semantic no-op agent PATCHes are rejected without timestamps or events", async () => {
+  const loopId = randomUUID();
+  const workItemId = randomUUID();
+  const attemptId = randomUUID();
+  try {
+    await insertLoopGraph({
+      loopId,
+      workItemId,
+      plan: [{ id: "step-1", title: "Do not touch no-ops", status: "in_progress" }],
+      payload: {
+        execution_attempt_id: attemptId,
+        execution_generation: 1,
+        counter: 3,
+        context: { alpha: 1, beta: 2 },
+      },
+    });
+    const before = (await pool.query(
+      "select status, scheduled_for, started_at, completed_at, payload, updated_at from public.work_items where id = $1",
+      [workItemId],
+    )).rows[0];
+    const eventsBefore = Number((await pool.query(
+      "select count(*)::int as count from public.event_log where entity_id = $1",
+      [workItemId],
+    )).rows[0].count);
+
+    for (const noOp of [
+      {},
+      { execution_attempt_id: attemptId },
+      { execution_attempt_id: attemptId, status: "in_progress" },
+      { execution_attempt_id: attemptId, scheduled_for: null },
+      { execution_attempt_id: attemptId, payload_patch: { counter: 3 } },
+      { execution_attempt_id: attemptId, payload_patch: { context: { beta: 2, alpha: 1 } } },
+      { execution_attempt_id: attemptId, payload_increment: { counter: 0 } },
     ]) {
       await assert.rejects(
-        () => agentCompletion.patchAgentWorkItemWithCompletion(workItemId, {
-          ...mutation,
-          execution_attempt_id: "superseded-attempt",
-        }),
-        /stale_execution_attempt/,
+        () => agentCompletion.patchAgentWorkItemWithCompletion(workItemId, noOp),
+        /empty_work_item_patch/,
       );
     }
 
     const after = (await pool.query(
-      "select status, started_at, completed_at, payload, updated_at from public.work_items where id = $1",
+      "select status, scheduled_for, started_at, completed_at, payload, updated_at from public.work_items where id = $1",
       [workItemId],
     )).rows[0];
+    const eventsAfter = Number((await pool.query(
+      "select count(*)::int as count from public.event_log where entity_id = $1",
+      [workItemId],
+    )).rows[0].count);
     assert.deepEqual(after, before);
+    assert.equal(eventsAfter, eventsBefore);
   } finally {
     await cleanupLoopGraph(loopId, workItemId);
   }
@@ -569,6 +642,66 @@ test("Loop review rejects approval and rework outside the valid in-review/done-p
       const afterWork = (await pool.query("select status, payload, updated_at from public.work_items where id = $1", [workItemId])).rows[0];
       assert.deepEqual(afterLoop, beforeLoop);
       assert.deepEqual(afterWork, beforeWork);
+    } finally {
+      await cleanupLoopGraph(loopId, workItemId);
+    }
+  }
+});
+
+test("exact approve/request_changes review replays return 200 before the source-state matrix, while new actions remain invalid", async () => {
+  for (const action of ["approve_deliverable", "request_changes"]) {
+    const loopId = randomUUID();
+    const workItemId = randomUUID();
+    const attemptId = randomUUID();
+    const feedback = action === "approve_deliverable" ? "Ship this exact deliverable" : "Revise this exact detail";
+    try {
+      await insertLoopGraph({
+        loopId,
+        workItemId,
+        plan: [{ id: "step-1", title: "Replay review exactly", status: "done" }],
+        payload: { execution_attempt_id: attemptId, execution_generation: 1 },
+      });
+      await pool.query("update public.loops set status = 'in_review' where id = $1", [loopId]);
+      await pool.query("update public.work_items set status = 'done', completed_at = now() where id = $1", [workItemId]);
+
+      const invoke = (nextFeedback) => reviewRoute.POST(
+        { json: async () => ({ action, feedback: nextFeedback }) },
+        { params: Promise.resolve({ id: loopId }) },
+      );
+      const first = await invoke(feedback);
+      assert.equal(first.status, 200);
+      const beforeReplayLoop = (await pool.query(
+        "select status, metadata, updated_at from public.loops where id = $1",
+        [loopId],
+      )).rows[0];
+      const beforeReplayWork = (await pool.query(
+        "select status, instruction, payload, updated_at from public.work_items where id = $1",
+        [workItemId],
+      )).rows[0];
+      const eventsBefore = Number((await pool.query(
+        "select count(*)::int as count from public.loop_events where loop_id = $1",
+        [loopId],
+      )).rows[0].count);
+
+      const replay = await invoke(feedback);
+      assert.equal(replay.status, 200);
+      assert.equal(replay.payload.status, action === "approve_deliverable" ? "completed" : "in_progress");
+      assert.deepEqual((await pool.query(
+        "select status, metadata, updated_at from public.loops where id = $1",
+        [loopId],
+      )).rows[0], beforeReplayLoop);
+      assert.deepEqual((await pool.query(
+        "select status, instruction, payload, updated_at from public.work_items where id = $1",
+        [workItemId],
+      )).rows[0], beforeReplayWork);
+      assert.equal(Number((await pool.query(
+        "select count(*)::int as count from public.loop_events where loop_id = $1",
+        [loopId],
+      )).rows[0].count), eventsBefore);
+
+      const changedAction = await invoke(`${feedback} changed`);
+      assert.equal(changedAction.status, 409);
+      assert.equal(changedAction.payload.error, "invalid_review_state");
     } finally {
       await cleanupLoopGraph(loopId, workItemId);
     }

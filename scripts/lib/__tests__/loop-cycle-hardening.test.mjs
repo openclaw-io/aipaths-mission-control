@@ -192,6 +192,27 @@ test("cloud work-item completion fails closed before invoking the local transact
   assert.equal(writes, 0);
 });
 
+test("agent work-item PATCH returns a client error for an empty/no-op mutation", async () => {
+  const route = transpileModule(resolve(repoRoot, "src/app/api/agent/work-items/[id]/route.ts"), {
+    "next/server": { NextResponse: { json: (payload, init = {}) => ({ payload, status: init.status || 200 }) } },
+    "@/lib/auth/local": { isLocalAuthDisabled: () => true },
+    "@/lib/db/mission-control": { getWorkItem: async () => null },
+    "@/lib/work-items/agent-completion-local": {
+      patchAgentWorkItemWithCompletion: async () => { throw new Error("empty_work_item_patch"); },
+    },
+  }, { Error });
+  const response = await route.PATCH(
+    {
+      headers: { get: () => "Bearer test-key" },
+      json: async () => ({}),
+    },
+    { params: Promise.resolve({ id: "work-1" }) },
+  );
+
+  assert.equal(response.status, 400);
+  assert.equal(response.payload.error, "empty_work_item_patch");
+});
+
 for (const action of ["approve_deliverable", "request_changes"]) {
   test(`cloud Loop review ${action} fails closed without partial multi-call writes`, async () => {
     let serviceClients = 0;
@@ -239,17 +260,27 @@ test("completion takes the Loop row lock before the work-item row lock", () => {
   assert.ok(workLock > loopLock, "completion must lock Loop before work item");
 });
 
-test("materialization creates an attempt identity and notify propagates it in terminal PATCH commands", () => {
+test("materialization creates an attempt identity and notify serializes it in every generated claim/terminal PATCH payload", () => {
   const materializer = readFileSync(resolve(repoRoot, "src/app/api/loops/materialize-queued/route.ts"), "utf8");
-  const notifier = readFileSync(resolve(repoRoot, "src/app/api/work-items/notify/route.ts"), "utf8");
   assert.match(materializer, /execution_attempt_id:\s*randomUUID\(\)/);
   assert.match(materializer, /execution_generation:\s*1/);
-  assert.match(notifier, /execution_attempt_id/);
-  const sessionBuilder = notifier.slice(
-    notifier.indexOf("function buildWorkItemSessionKey"),
-    notifier.indexOf("function shellSingleQuote"),
+
+  const notifier = transpileModule(resolve(repoRoot, "src/app/api/work-items/notify/route.ts"), {
+    "node:child_process": { spawn: () => { throw new Error("unexpected spawn"); } },
+    "next/server": { NextResponse: { json: (payload, init = {}) => ({ payload, status: init.status || 200 }) } },
+    "@supabase/supabase-js": { createClient: () => { throw new Error("unexpected client"); } },
+    "@/lib/agent-routing": { AGENT_ROUTING: {}, isRoutedAgent: () => false },
+    "@/lib/auth/local": { isLocalAuthDisabled: () => true },
+    "@/lib/db/postgres": { query: async () => ({ rows: [] }) },
+    "@/lib/loops/execution-instruction": { buildLoopWakeContext: () => "" },
+  });
+  const executionAttemptId = "attempt-notify-1";
+  for (const status of ["in_progress", "done", "failed"]) {
+    const serialized = notifier.serializeWorkItemStatusPayload(status, { execution_attempt_id: executionAttemptId });
+    assert.deepEqual(JSON.parse(serialized), { status, execution_attempt_id: executionAttemptId });
+  }
+  assert.deepEqual(
+    JSON.parse(notifier.serializeWorkItemStatusPayload("in_progress", {})),
+    { status: "in_progress" },
   );
-  assert.match(sessionBuilder, /execution_attempt_id/);
-  assert.match(notifier, /buildWorkItemStatusCommand\(item\.id, "done", workPayload\)/);
-  assert.match(notifier, /buildWorkItemStatusCommand\(item\.id, "failed", workPayload\)/);
 });

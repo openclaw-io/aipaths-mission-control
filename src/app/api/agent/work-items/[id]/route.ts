@@ -56,7 +56,11 @@ export async function PATCH(
     return NextResponse.json(data);
   } catch (error) {
     const message = error instanceof Error ? error.message : "local_postgres_write_failed";
-    const statusCode = message === "stale_execution_attempt" || message === "terminal_status_conflict" ? 409 : 500;
+    const statusCode = message === "empty_work_item_patch"
+      ? 400
+      : message === "stale_execution_attempt" || message === "terminal_status_conflict"
+        ? 409
+        : 500;
     return NextResponse.json({ error: message }, { status: statusCode });
   }
 }

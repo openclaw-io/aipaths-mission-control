@@ -99,23 +99,6 @@ export async function POST(
       );
       const primaryExecution = primaryRes.rows[0] || null;
 
-      if (action === "approve_deliverable" || action === "request_changes") {
-        if (loop.status !== "in_review") {
-          return { kind: "invalid_transition" as const, error: "invalid_review_state" };
-        }
-        if (!primaryExecution) {
-          return { kind: "invalid_transition" as const, error: "primary_execution_missing" };
-        }
-        if (primaryExecution.status !== "done") {
-          return {
-            kind: "invalid_transition" as const,
-            error: "primary_execution_not_done",
-            workItemId: primaryExecution.work_item_id,
-            workItemStatus: primaryExecution.status,
-          };
-        }
-      }
-
       const loopMetadata = (loop.metadata || {}) as Record<string, unknown>;
       const reviewHistory = Array.isArray(loopMetadata.review_history)
         ? loopMetadata.review_history
@@ -132,6 +115,26 @@ export async function POST(
 
       if (isReplay) {
         return { kind: "success" as const, workItemId: null, ownerAgent: loop.owner_agent };
+      }
+
+      // Exact review replays are valid after the first request has already
+      // changed both source rows. Any genuinely new action must still satisfy
+      // the source-state matrix below.
+      if (action === "approve_deliverable" || action === "request_changes") {
+        if (loop.status !== "in_review") {
+          return { kind: "invalid_transition" as const, error: "invalid_review_state" };
+        }
+        if (!primaryExecution) {
+          return { kind: "invalid_transition" as const, error: "primary_execution_missing" };
+        }
+        if (primaryExecution.status !== "done") {
+          return {
+            kind: "invalid_transition" as const,
+            error: "primary_execution_not_done",
+            workItemId: primaryExecution.work_item_id,
+            workItemStatus: primaryExecution.status,
+          };
+        }
       }
 
       const metadata = {

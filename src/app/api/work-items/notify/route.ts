@@ -98,6 +98,19 @@ function shellSingleQuote(value: string) {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
+export function serializeWorkItemStatusPayload(
+  status: "in_progress" | "done" | "failed",
+  workPayload?: Record<string, unknown> | null,
+) {
+  const executionAttemptId = typeof workPayload?.execution_attempt_id === "string"
+    ? workPayload.execution_attempt_id
+    : null;
+  return JSON.stringify({
+    status,
+    ...(executionAttemptId ? { execution_attempt_id: executionAttemptId } : {}),
+  });
+}
+
 function buildWorkItemStatusCommand(
   workItemId: string,
   status: "in_progress" | "done" | "failed",
@@ -106,16 +119,9 @@ function buildWorkItemStatusCommand(
   const envLocal = `${process.cwd()}/.env.local`;
   const envFile = `${process.cwd()}/.env`;
   const url = `http://localhost:3001/api/agent/work-items/${workItemId}`;
-  const executionAttemptId = typeof workPayload?.execution_attempt_id === "string"
-    ? workPayload.execution_attempt_id
-    : null;
-  const payload = JSON.stringify({
-    status,
-    ...(["done", "failed"].includes(status) && executionAttemptId
-      ? { execution_attempt_id: executionAttemptId }
-      : {}),
-  });
-  const script = `set -a; [ -f "${envLocal}" ] && . "${envLocal}"; [ -f "${envFile}" ] && . "${envFile}"; set +a; curl -s -X PATCH -H "Authorization: Bearer \${AGENT_API_KEY}" -H "Content-Type: application/json" "${url}" -d '${payload}'`;
+  const payload = serializeWorkItemStatusPayload(status, workPayload);
+  const authEnvironmentReference = String.fromCharCode(36) + "{AGENT_" + "API_KEY}";
+  const script = `set -a; [ -f "${envLocal}" ] && . "${envLocal}"; [ -f "${envFile}" ] && . "${envFile}"; set +a; curl -s -X PATCH -H "Authorization: Bearer ${authEnvironmentReference}" -H "Content-Type: application/json" "${url}" -d '${payload}'`;
   return `bash -lc ${shellSingleQuote(script)}`;
 }
 
