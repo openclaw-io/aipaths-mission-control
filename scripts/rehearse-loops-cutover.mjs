@@ -1,9 +1,16 @@
 #!/usr/bin/env node
+import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { executeSqlEditorStatements, splitTopLevelSql } from "./lib/sql-editor-harness.mjs";
+import {
+  assertDisposableTestDatabaseUrl,
+  assertTestAdminDatabaseUrl,
+  databaseUrlForName,
+  defaultTestAdminDatabaseUrl,
+} from "./lib/test-postgres-guard.mjs";
 
 const { Client } = pg;
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -260,20 +267,59 @@ async function assertExactProjectFingerprint(client, schemaBefore, dataBefore, l
 }
 
 export async function runLoopsCutoverRehearsal({
-  adminConnectionString = process.env.LOOPS_REHEARSAL_ADMIN_URL || "postgres:///postgres",
+  adminConnectionString = process.env.MISSION_CONTROL_TEST_ADMIN_URL
+    || process.env.LOOPS_REHEARSAL_ADMIN_URL
+    || defaultTestAdminDatabaseUrl(),
   executionMode = "transactional",
   injectFailureAfterRename = false,
   injectFailureAfterEveryMutation = false,
 } = {}) {
-  const database = `mc_loops_rehearsal_${process.pid}_${Date.now()}`;
-  const admin = new Client({ connectionString: adminConnectionString });
+  const database = `mc_loops_rehearsal_${process.pid}_${Date.now()}_${randomBytes(4).toString("hex")}`;
+  const guardedAdminUrl = assertTestAdminDatabaseUrl(adminConnectionString).toString();
+  const admin = new Client({ connectionString: guardedAdminUrl });
   let scratch;
-  await admin.connect();
+  let adminConnected = false;
+  let databaseCreated = false;
+  let requestedSignal;
+  let signalAbortPromise;
+  let scratchConnectionError;
+  let cleanupError;
+
+  const dropDatabase = () => admin.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(database)} WITH (FORCE)`);
+  const recordSignal = (signal) => {
+    if (requestedSignal) {
+      console.error(`[loops-rehearsal] already handling ${requestedSignal}; ignoring repeated ${signal} until cleanup completes`);
+      return;
+    }
+    requestedSignal = signal;
+    console.error(`[loops-rehearsal] received ${signal}; aborting and dropping ${database}`);
+    // FORCE-dropping through the idle admin connection interrupts any active
+    // scratch query, causing the main flow to enter its finally block promptly.
+    if (adminConnected && databaseCreated) {
+      signalAbortPromise = dropDatabase()
+        .then(() => { databaseCreated = false; })
+        .catch(() => {});
+    }
+  };
+  const onSigint = () => recordSignal("SIGINT");
+  const onSigterm = () => recordSignal("SIGTERM");
+  process.on("SIGINT", onSigint);
+  process.on("SIGTERM", onSigterm);
+
   try {
+    await admin.connect();
+    adminConnected = true;
+    if (requestedSignal) throw new Error(`Rehearsal interrupted by ${requestedSignal}`);
     await admin.query(`CREATE DATABASE ${quoteIdentifier(database)}`);
-    const adminUrl = new URL(adminConnectionString.includes("://") ? adminConnectionString : "postgres://localhost/postgres");
-    adminUrl.pathname = `/${database}`;
-    scratch = new Client({ connectionString: adminUrl.toString() });
+    databaseCreated = true;
+    if (requestedSignal) throw new Error(`Rehearsal interrupted by ${requestedSignal}`);
+    const scratchUrl = databaseUrlForName(guardedAdminUrl, database);
+    assertDisposableTestDatabaseUrl(scratchUrl, "LOOPS_REHEARSAL_DATABASE_URL");
+    scratch = new Client({ connectionString: scratchUrl });
+    // FORCE DROP can surface as an idle-client error instead of rejecting an
+    // in-flight query. Keep it inside the controlled cleanup path rather than
+    // allowing EventEmitter's unhandled `error` behavior to terminate Node.
+    scratch.on("error", (error) => { scratchConnectionError ??= error; });
     await scratch.connect();
 
     const [preflight, forward, postflight, rollback] = await Promise.all([
@@ -567,9 +613,27 @@ export async function runLoopsCutoverRehearsal({
       adversarialReviewerCases: "rejected-with-exact-fingerprints",
     };
   } finally {
-    if (scratch) await scratch.end().catch(() => {});
-    await admin.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(database)} WITH (FORCE)`).catch(() => {});
-    await admin.end().catch(() => {});
+    try {
+      if (scratch) await scratch.end().catch(() => {});
+      if (signalAbortPromise) await signalAbortPromise;
+      if (adminConnected && databaseCreated) {
+        await dropDatabase();
+        databaseCreated = false;
+      }
+    } catch (error) {
+      cleanupError = error;
+    } finally {
+      await admin.end().catch(() => {});
+      process.removeListener("SIGINT", onSigint);
+      process.removeListener("SIGTERM", onSigterm);
+    }
+    if (cleanupError) throw cleanupError;
+    if (requestedSignal) {
+      const error = new Error(`Loops PostgreSQL rehearsal terminated by ${requestedSignal}`);
+      error.signal = requestedSignal;
+      throw error;
+    }
+    if (scratchConnectionError) throw scratchConnectionError;
   }
 }
 
@@ -582,6 +646,6 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     console.log(`Loops PostgreSQL rehearsal passed: ${JSON.stringify(result)}`);
   } catch (error) {
     console.error(error instanceof Error ? error.stack : error);
-    process.exitCode = 1;
+    process.exitCode = error?.signal === "SIGINT" ? 130 : error?.signal === "SIGTERM" ? 143 : 1;
   }
 }
