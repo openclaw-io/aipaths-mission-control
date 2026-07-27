@@ -4,39 +4,60 @@ import { useEffect, useState } from "react";
 
 export function SchedulerToggle() {
   const [enabled, setEnabled] = useState<boolean | null>(null);
-  const [maxConcurrent, setMaxConcurrent] = useState("2");
-  const [dailyBudget, setDailyBudget] = useState("50");
+  const [maxConcurrent, setMaxConcurrent] = useState("");
+  const [dailyBudget, setDailyBudget] = useState("");
+  const [scheduleMinutes, setScheduleMinutes] = useState<number | null>(null);
+  const [configError, setConfigError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     fetch("/api/scheduler")
-      .then((r) => r.json())
-      .then((config) => {
-        setEnabled(config.enabled !== "false");
-        setMaxConcurrent(config.max_concurrent || "2");
-        setDailyBudget(config.daily_budget_usd || "50");
+      .then(async (response) => {
+        const config = await response.json();
+        if (!response.ok) throw new Error(config.error || "Scheduler config read failed");
+        if (config.valid !== true) {
+          const errors = Array.isArray(config.errors) ? config.errors.join("; ") : "invalid canonical controls";
+          throw new Error(errors);
+        }
+        setEnabled(config.enabled);
+        setMaxConcurrent(String(config.max_concurrent));
+        setDailyBudget(String(config.daily_budget_usd));
+        setScheduleMinutes(config.schedule_minutes);
       })
-      .catch(() => {});
+      .catch((error) => {
+        setConfigError(error instanceof Error ? error.message : "Scheduler config read failed");
+      });
   }, []);
 
   async function toggle() {
     const newValue = !enabled;
     setSaving(true);
-    await fetch("/api/scheduler", {
+    const response = await fetch("/api/scheduler", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ enabled: String(newValue) }),
+      body: JSON.stringify({ enabled: newValue }),
     });
-    setEnabled(newValue);
+    if (response.ok) setEnabled(newValue);
     setSaving(false);
   }
 
-  async function updateConfig(key: string, value: string) {
+  async function updateConfig(key: "max_concurrent" | "daily_budget_usd", value: string) {
+    const parsed = Number(value);
+    if (!Number.isSafeInteger(parsed)) return;
     await fetch("/api/scheduler", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ [key]: value }),
+      body: JSON.stringify({ [key]: parsed }),
     });
+  }
+
+  if (configError) {
+    return (
+      <div className="rounded-xl border border-red-900/60 bg-red-950/20 p-5">
+        <h3 className="text-sm font-semibold text-red-300">⚠ Scheduler config degraded</h3>
+        <p className="mt-2 text-xs text-red-200">{configError}</p>
+      </div>
+    );
   }
 
   if (enabled === null) return null;
@@ -88,7 +109,7 @@ export function SchedulerToggle() {
         </div>
         <div className="flex items-center gap-1.5">
           <span className="text-gray-500">Every:</span>
-          <span className="text-gray-400">10 min</span>
+          <span className="text-gray-400">{scheduleMinutes} min</span>
         </div>
       </div>
     </div>

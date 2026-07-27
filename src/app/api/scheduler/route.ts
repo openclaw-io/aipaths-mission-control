@@ -1,28 +1,26 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getLocalMissionControlUser, isLocalAuthDisabled } from "@/lib/auth/local";
 import { query } from "@/lib/db/postgres";
+import { buildSchedulerConfigResponse, parseSchedulerPatch } from "@/lib/scheduler/config";
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/admin";
 
 export const dynamic = "force-dynamic";
 
 /**
- * GET /api/scheduler — get scheduler config
- * PATCH /api/scheduler — update config (enabled, max_concurrent, daily_budget_usd)
+ * GET /api/scheduler — get typed scheduler config
+ * PATCH /api/scheduler — validate and update canonical allowlisted controls
  */
 export async function GET() {
   if (isLocalAuthDisabled()) {
     const { rows } = await query<{ key: string; value: string }>(`select key, value from scheduler_config`);
-    const config: Record<string, string> = {};
-    for (const row of rows || []) config[row.key] = row.value;
-    return NextResponse.json(config);
+    return NextResponse.json(buildSchedulerConfigResponse(rows || []));
   }
 
   const supabase = createServiceClient();
-  const { data } = await supabase.from("scheduler_config").select("key, value");
-  const config: Record<string, string> = {};
-  for (const row of data || []) config[row.key] = row.value;
-  return NextResponse.json(config);
+  const { data, error } = await supabase.from("scheduler_config").select("key, value");
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  return NextResponse.json(buildSchedulerConfigResponse(data || []));
 }
 
 export async function PATCH(req: NextRequest) {
@@ -36,26 +34,36 @@ export async function PATCH(req: NextRequest) {
   }
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const body = await req.json();
+  let patch: ReturnType<typeof parseSchedulerPatch>;
+  try {
+    patch = parseSchedulerPatch(await req.json());
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Invalid scheduler config";
+    return NextResponse.json({ error: message }, { status: 400 });
+  }
 
+  const updatedAt = new Date().toISOString();
   if (useLocalMode) {
-    for (const [key, value] of Object.entries(body)) {
-      await query(
-        `insert into scheduler_config (key, value, updated_at)
-         values ($1, $2, $3)
-         on conflict (key) do update set value = excluded.value, updated_at = excluded.updated_at`,
-        [key, String(value), new Date().toISOString()],
-      );
+    try {
+      for (const [key, value] of Object.entries(patch)) {
+        await query(
+          `insert into scheduler_config (key, value, updated_at)
+           values ($1, $2, $3)
+           on conflict (key) do update set value = excluded.value, updated_at = excluded.updated_at`,
+          [key, value, updatedAt],
+        );
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Scheduler config write failed";
+      return NextResponse.json({ error: message }, { status: 500 });
     }
-    return NextResponse.json({ ok: true });
+    return NextResponse.json({ ok: true, config: patch });
   }
 
   const supabase = createServiceClient();
-  for (const [key, value] of Object.entries(body)) {
-    await supabase
-      .from("scheduler_config")
-      .upsert({ key, value: String(value), updated_at: new Date().toISOString() });
-  }
+  const rows = Object.entries(patch).map(([key, value]) => ({ key, value, updated_at: updatedAt }));
+  const { error } = await supabase.from("scheduler_config").upsert(rows);
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-  return NextResponse.json({ ok: true });
+  return NextResponse.json({ ok: true, config: patch });
 }
