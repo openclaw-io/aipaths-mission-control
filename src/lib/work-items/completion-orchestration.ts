@@ -142,6 +142,51 @@ async function reconcilePrimaryLoopCompletion(
   return { applied: true, effect: "loop_primary_execution_completed", loopId: loop.id };
 }
 
+async function reconcilePrimaryLoopCancellation(
+  client: CompletionQueryClient,
+  workItem: WorkItemRow,
+) {
+  const linkedLoop = await client.query<{ id: string; status: string }>(
+    `SELECT l.id, l.status
+       FROM public.loop_work_items lwi
+       INNER JOIN public.loops l ON l.id = lwi.loop_id
+      WHERE lwi.work_item_id = $1
+        AND lwi.relation_type = 'primary_execution'
+      LIMIT 1
+      FOR UPDATE OF l`,
+    [workItem.id],
+  );
+  const loop = linkedLoop.rows[0];
+  if (!loop) return { applied: false, reason: "not_loop_primary_execution" };
+
+  const now = new Date().toISOString();
+  await client.query(
+    `UPDATE public.loops
+        SET status = 'blocked', updated_at = $2::timestamptz
+      WHERE id = $1`,
+    [loop.id, now],
+  );
+  await client.query(
+    `INSERT INTO public.loop_events
+       (loop_id, event_type, from_status, to_status, actor, payload, created_at)
+     VALUES ($1, 'loop.primary_execution_canceled', $2, 'blocked', $3, $4::jsonb, $5::timestamptz)`,
+    [
+      loop.id,
+      loop.status,
+      readString(workItem.owner_agent) || "work-item-completion",
+      JSON.stringify({
+        reason: "primary_execution_canceled_needs_attention",
+        work_item_id: workItem.id,
+        relation_type: "primary_execution",
+        work_item_status: "canceled",
+        dispatch_state: readString(asRecord(workItem.payload).dispatch_state),
+      }),
+      now,
+    ],
+  );
+  return { applied: true, effect: "loop_primary_execution_canceled", loopId: loop.id };
+}
+
 function resolvePipelineAction(workItem: WorkItemRow, pipelineItem: JsonRecord) {
   const payload = asRecord(workItem.payload);
   let pipelineType = readString(payload.pipeline_type) || readString(pipelineItem.pipeline_type) || "";
@@ -485,6 +530,9 @@ export async function orchestrateWorkItemCompletion(
   input: CompletionOrchestrationInput,
 ) {
   const { existing, updated, body, publicationVerification } = input;
+  if (body.status === "canceled" && existing.status !== "canceled") {
+    return reconcilePrimaryLoopCancellation(client, updated);
+  }
   if (body.status !== "done" || existing.status === "done") return { applied: false, reason: "not_a_new_completion" };
 
   const loopCompletion = await reconcilePrimaryLoopCompletion(client, updated);

@@ -364,6 +364,217 @@ test("terminal status matrix rejects late done/failed inversions", async () => {
   }
 });
 
+test("every terminal work-item state rejects delayed nonterminal agent updates", async () => {
+  for (const firstStatus of ["done", "failed", "canceled"]) {
+    for (const lateStatus of ["ready", "in_progress"]) {
+      const loopId = randomUUID();
+      const workItemId = randomUUID();
+      const attemptId = randomUUID();
+      try {
+        await insertLoopGraph({
+          loopId,
+          workItemId,
+          plan: [{ id: "step-1", title: "Never reopen implicitly", status: "in_progress" }],
+          payload: { execution_attempt_id: attemptId, execution_generation: 1 },
+        });
+        await agentCompletion.patchAgentWorkItemWithCompletion(workItemId, {
+          status: firstStatus,
+          execution_attempt_id: attemptId,
+        });
+        const before = (await pool.query(
+          "select status, started_at, completed_at, payload, updated_at from public.work_items where id = $1",
+          [workItemId],
+        )).rows[0];
+
+        await assert.rejects(
+          () => agentCompletion.patchAgentWorkItemWithCompletion(workItemId, {
+            status: lateStatus,
+            execution_attempt_id: attemptId,
+            payload_patch: { delayed_update: true },
+          }),
+          /terminal_status_conflict/,
+        );
+
+        const after = (await pool.query(
+          "select status, started_at, completed_at, payload, updated_at from public.work_items where id = $1",
+          [workItemId],
+        )).rows[0];
+        assert.deepEqual(after, before);
+      } finally {
+        await cleanupLoopGraph(loopId, workItemId);
+      }
+    }
+  }
+});
+
+test("attempt identity protects in-progress claims, payload patches, and increments", async () => {
+  const loopId = randomUUID();
+  const workItemId = randomUUID();
+  const attemptId = randomUUID();
+  try {
+    await insertLoopGraph({
+      loopId,
+      workItemId,
+      plan: [{ id: "step-1", title: "Protect current attempt", status: "in_progress" }],
+      payload: { execution_attempt_id: attemptId, execution_generation: 2, counter: 3 },
+    });
+    const before = (await pool.query(
+      "select status, started_at, completed_at, payload, updated_at from public.work_items where id = $1",
+      [workItemId],
+    )).rows[0];
+
+    for (const mutation of [
+      { status: "in_progress", payload_patch: { dispatch_state: "claimed_by_agent", claimed_by: "stale-agent" } },
+      { payload_patch: { stale_patch: true } },
+      { payload_increment: { counter: 10 } },
+    ]) {
+      await assert.rejects(
+        () => agentCompletion.patchAgentWorkItemWithCompletion(workItemId, {
+          ...mutation,
+          execution_attempt_id: "superseded-attempt",
+        }),
+        /stale_execution_attempt/,
+      );
+    }
+
+    const after = (await pool.query(
+      "select status, started_at, completed_at, payload, updated_at from public.work_items where id = $1",
+      [workItemId],
+    )).rows[0];
+    assert.deepEqual(after, before);
+  } finally {
+    await cleanupLoopGraph(loopId, workItemId);
+  }
+});
+
+test("canceling a primary execution atomically closes dispatch and blocks its Loop with an event", async () => {
+  const loopId = randomUUID();
+  const workItemId = randomUUID();
+  const attemptId = randomUUID();
+  try {
+    await insertLoopGraph({
+      loopId,
+      workItemId,
+      plan: [{ id: "step-1", title: "Canceled step", status: "in_progress" }],
+      payload: {
+        execution_attempt_id: attemptId,
+        execution_generation: 1,
+        dispatch_state: "notified_agent",
+      },
+    });
+
+    await pool.query(`
+      create or replace function pg_temp.reject_test_loop_cancel_event() returns trigger language plpgsql as $$
+      begin
+        if new.loop_id = '${loopId}'::uuid and new.event_type = 'loop.primary_execution_canceled' then
+          raise exception 'injected Loop cancellation event failure';
+        end if;
+        return new;
+      end $$;
+      create trigger reject_test_loop_cancel_event before insert on public.loop_events
+      for each row execute function pg_temp.reject_test_loop_cancel_event();
+    `);
+
+    await assert.rejects(
+      () => agentCompletion.patchAgentWorkItemWithCompletion(workItemId, {
+        status: "canceled",
+        execution_attempt_id: attemptId,
+        result: "operator canceled execution",
+      }),
+      /injected Loop cancellation event failure/,
+    );
+    const rolledBackLoop = (await pool.query("select status from public.loops where id = $1", [loopId])).rows[0];
+    const rolledBackWork = (await pool.query(
+      "select status, instruction, completed_at, payload from public.work_items where id = $1",
+      [workItemId],
+    )).rows[0];
+    assert.equal(rolledBackLoop.status, "in_progress");
+    assert.equal(rolledBackWork.status, "in_progress");
+    assert.equal(rolledBackWork.instruction, "Original instruction");
+    assert.equal(rolledBackWork.completed_at, null);
+    assert.equal(rolledBackWork.payload.dispatch_state, "notified_agent");
+    await pool.query("drop trigger reject_test_loop_cancel_event on public.loop_events");
+
+    await agentCompletion.patchAgentWorkItemWithCompletion(workItemId, {
+      status: "canceled",
+      execution_attempt_id: attemptId,
+      result: "operator canceled execution",
+    });
+
+    const loop = (await pool.query("select status, plan from public.loops where id = $1", [loopId])).rows[0];
+    const work = (await pool.query(
+      "select status, completed_at, payload from public.work_items where id = $1",
+      [workItemId],
+    )).rows[0];
+    const events = await pool.query(
+      `select event_type, from_status, to_status, payload
+         from public.loop_events
+        where loop_id = $1 and event_type = 'loop.primary_execution_canceled'`,
+      [loopId],
+    );
+
+    assert.equal(work.status, "canceled");
+    assert.ok(work.completed_at);
+    assert.equal(work.payload.dispatch_state, "canceled");
+    assert.ok(work.payload.dispatch_completed_at);
+    assert.equal(loop.status, "blocked");
+    assert.equal(loop.plan[0].status, "in_progress");
+    assert.equal(events.rowCount, 1);
+    assert.equal(events.rows[0].from_status, "in_progress");
+    assert.equal(events.rows[0].to_status, "blocked");
+    assert.equal(events.rows[0].payload.work_item_id, workItemId);
+    assert.equal(events.rows[0].payload.work_item_status, "canceled");
+  } finally {
+    await cleanupLoopGraph(loopId, workItemId);
+  }
+});
+
+test("Loop review rejects approval and rework outside the valid in-review/done-primary matrix", async () => {
+  const invalidCases = [
+    { action: "approve_deliverable", loopStatus: "in_progress", primaryStatus: "done", error: "invalid_review_state" },
+    { action: "approve_deliverable", loopStatus: "in_review", primaryStatus: "failed", error: "primary_execution_not_done" },
+    { action: "approve_deliverable", loopStatus: "in_review", primaryStatus: "canceled", error: "primary_execution_not_done" },
+    { action: "approve_deliverable", loopStatus: "in_review", primaryStatus: null, error: "primary_execution_missing" },
+    { action: "request_changes", loopStatus: "completed", primaryStatus: "done", error: "invalid_review_state" },
+    { action: "request_changes", loopStatus: "in_review", primaryStatus: "failed", error: "primary_execution_not_done" },
+  ];
+
+  for (const testCase of invalidCases) {
+    const loopId = randomUUID();
+    const workItemId = randomUUID();
+    try {
+      await insertLoopGraph({
+        loopId,
+        workItemId,
+        plan: [{ id: "step-1", title: "Review gate", status: "done" }],
+        payload: { execution_attempt_id: randomUUID(), execution_generation: 1 },
+      });
+      await pool.query("update public.loops set status = $1 where id = $2", [testCase.loopStatus, loopId]);
+      if (testCase.primaryStatus === null) {
+        await pool.query("delete from public.loop_work_items where loop_id = $1", [loopId]);
+      } else {
+        await pool.query("update public.work_items set status = $1, completed_at = now() where id = $2", [testCase.primaryStatus, workItemId]);
+      }
+      const beforeLoop = (await pool.query("select status, metadata, updated_at from public.loops where id = $1", [loopId])).rows[0];
+      const beforeWork = (await pool.query("select status, payload, updated_at from public.work_items where id = $1", [workItemId])).rows[0];
+
+      const response = await reviewRoute.POST(
+        { json: async () => ({ action: testCase.action, feedback: "must not mutate invalid source state" }) },
+        { params: Promise.resolve({ id: loopId }) },
+      );
+
+      assert.equal(response.status, 409);
+      assert.equal(response.payload.error, testCase.error);
+      const afterLoop = (await pool.query("select status, metadata, updated_at from public.loops where id = $1", [loopId])).rows[0];
+      const afterWork = (await pool.query("select status, payload, updated_at from public.work_items where id = $1", [workItemId])).rows[0];
+      assert.deepEqual(afterLoop, beforeLoop);
+      assert.deepEqual(afterWork, beforeWork);
+    } finally {
+      await cleanupLoopGraph(loopId, workItemId);
+    }
+  }
+});
+
 test("concurrent completion and request_changes serialize without deadlock and reject any superseded attempt", async () => {
   const loopId = randomUUID();
   const workItemId = randomUUID();
@@ -381,6 +592,11 @@ test("concurrent completion and request_changes serialize without deadlock and r
         durable_context: { preserve: true },
       },
     });
+    await pool.query("update public.loops set status = 'in_review' where id = $1", [loopId]);
+    await pool.query(
+      "update public.work_items set status = 'done', completed_at = now(), payload = payload || $1::jsonb where id = $2",
+      [JSON.stringify({ dispatch_state: "completed", dispatch_completed_at: new Date().toISOString() }), workItemId],
+    );
 
     const [completionResult, reworkResult] = await Promise.allSettled([
       agentCompletion.patchAgentWorkItemWithCompletion(workItemId, {

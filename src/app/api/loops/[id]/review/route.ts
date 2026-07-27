@@ -4,7 +4,6 @@ import { getLocalMissionControlUser, isLocalAuthDisabled } from "@/lib/auth/loca
 import { withTransaction } from "@/lib/db/postgres";
 import { createClient } from "@/lib/supabase/server";
 import { buildLoopReworkInstruction } from "@/lib/loops/execution-instruction";
-import { isPrimaryExecutionOpen } from "@/lib/loops/lifecycle";
 
 export const dynamic = "force-dynamic";
 
@@ -100,34 +99,21 @@ export async function POST(
       );
       const primaryExecution = primaryRes.rows[0] || null;
 
-      if (transition.nextStatus === "completed" && primaryExecution && isPrimaryExecutionOpen(primaryExecution.status)) {
-        if (loop.status !== "in_progress") {
-          await client.query(
-            `update loops set status = 'in_progress', updated_at = $1 where id = $2`,
-            [now, id],
-          );
-          await client.query(
-            `insert into loop_events (loop_id, event_type, from_status, to_status, actor, payload, created_at)
-             values ($1, 'loop.lifecycle_reconciled', $2, 'in_progress', $3, $4::jsonb, $5)`,
-            [
-              id,
-              loop.status,
-              actorIdentity,
-              JSON.stringify({
-                reason: "review_completion_blocked_by_open_primary_execution",
-                relation_type: "primary_execution",
-                work_item_id: primaryExecution.work_item_id,
-                work_item_status: primaryExecution.status,
-              }),
-              now,
-            ],
-          );
+      if (action === "approve_deliverable" || action === "request_changes") {
+        if (loop.status !== "in_review") {
+          return { kind: "invalid_transition" as const, error: "invalid_review_state" };
         }
-        return {
-          kind: "primary_open" as const,
-          workItemId: primaryExecution.work_item_id,
-          workItemStatus: primaryExecution.status,
-        };
+        if (!primaryExecution) {
+          return { kind: "invalid_transition" as const, error: "primary_execution_missing" };
+        }
+        if (primaryExecution.status !== "done") {
+          return {
+            kind: "invalid_transition" as const,
+            error: "primary_execution_not_done",
+            workItemId: primaryExecution.work_item_id,
+            workItemStatus: primaryExecution.status,
+          };
+        }
       }
 
       const loopMetadata = (loop.metadata || {}) as Record<string, unknown>;
@@ -224,9 +210,14 @@ export async function POST(
     if (localResult.kind === "not_found") {
       return NextResponse.json({ error: "Loop not found" }, { status: 404 });
     }
-    if (localResult.kind === "primary_open") {
+    if (localResult.kind === "invalid_transition") {
       return NextResponse.json(
-        { error: "primary_execution_still_open", workItemId: localResult.workItemId, workItemStatus: localResult.workItemStatus },
+        {
+          error: localResult.error,
+          ...("workItemId" in localResult
+            ? { workItemId: localResult.workItemId, workItemStatus: localResult.workItemStatus }
+            : {}),
+        },
         { status: 409 },
       );
     }

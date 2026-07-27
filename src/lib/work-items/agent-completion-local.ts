@@ -90,20 +90,28 @@ export async function patchAgentWorkItemWithCompletion(id: string, body: JsonRec
     const status = typeof body.status === "string" ? body.status : null;
     const existingPayload = (existing.payload || {}) as JsonRecord;
     const terminalStatuses = new Set(["done", "failed", "canceled"]);
-    if (status && terminalStatuses.has(status)) {
-      const expectedAttempt = typeof existingPayload.execution_attempt_id === "string"
-        ? existingPayload.execution_attempt_id
-        : null;
-      const suppliedAttempt = typeof body.execution_attempt_id === "string"
-        ? body.execution_attempt_id
-        : null;
-      if (expectedAttempt && suppliedAttempt !== expectedAttempt) {
-        throw new Error("stale_execution_attempt");
-      }
-      if (terminalStatuses.has(existing.status)) {
-        if (existing.status !== status) throw new Error("terminal_status_conflict");
-        return normalizeRow(existing);
-      }
+    const expectedAttempt = typeof existingPayload.execution_attempt_id === "string"
+      ? existingPayload.execution_attempt_id
+      : null;
+    const suppliedAttempt = typeof body.execution_attempt_id === "string"
+      ? body.execution_attempt_id
+      : null;
+    const attemptScopedMutation = status !== null
+      || body.result !== undefined
+      || body.output !== undefined
+      || body.payload_patch !== undefined
+      || body.payload_increment !== undefined;
+
+    // Terminal rows are immutable from the agent endpoint. The sole accepted
+    // replay is the identical terminal state for the current attempt, and it
+    // must be a true no-op. Human review/rework is the only reopening path.
+    if (terminalStatuses.has(existing.status)) {
+      if (!status || status !== existing.status) throw new Error("terminal_status_conflict");
+      if (expectedAttempt && suppliedAttempt !== expectedAttempt) throw new Error("stale_execution_attempt");
+      return normalizeRow(existing);
+    }
+    if (attemptScopedMutation && expectedAttempt && suppliedAttempt !== expectedAttempt) {
+      throw new Error("stale_execution_attempt");
     }
     const scheduledFor = typeof body.scheduled_for === "string" || body.scheduled_for === null
       ? body.scheduled_for
@@ -123,7 +131,7 @@ export async function patchAgentWorkItemWithCompletion(id: string, body: JsonRec
       updates.completed_at = null;
     }
     if (status === "in_progress") updates.started_at = completionTime;
-    if ((status === "done" || status === "failed") && existing.status !== status) {
+    if ((status === "done" || status === "failed" || status === "canceled") && existing.status !== status) {
       updates.completed_at = completionTime;
     }
     if (scheduledFor !== undefined) updates.scheduled_for = scheduledFor;
@@ -155,6 +163,13 @@ export async function patchAgentWorkItemWithCompletion(id: string, body: JsonRec
         ...(existing.payload || {}),
         ...(nextPayload || {}),
         dispatch_state: "failed",
+        dispatch_completed_at: completionTime.toISOString(),
+      };
+    } else if (status === "canceled" && existing.status !== "canceled") {
+      nextPayload = {
+        ...(existing.payload || {}),
+        ...(nextPayload || {}),
+        dispatch_state: "canceled",
         dispatch_completed_at: completionTime.toISOString(),
       };
     }
