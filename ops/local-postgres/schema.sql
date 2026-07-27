@@ -25,8 +25,32 @@ INSERT INTO public.scheduler_config (key, value) VALUES
   ('enabled', 'true'),
   ('max_concurrent', '2'),
   ('daily_budget_usd', '50'),
-  ('schedule_minutes', '10')
-ON CONFLICT (key) DO NOTHING;
+  ('schedule_minutes', '5')
+ON CONFLICT (key) DO UPDATE SET
+  value = CASE EXCLUDED.key
+    WHEN 'enabled' THEN CASE
+      WHEN lower(trim(scheduler_config.value)) IN ('true', 'false')
+        THEN lower(trim(scheduler_config.value))
+      ELSE 'false'
+    END
+    WHEN 'max_concurrent' THEN CASE
+      WHEN trim(scheduler_config.value) ~ '^[0-9]+$' THEN CASE
+        WHEN scheduler_config.value::numeric BETWEEN 1 AND 10 THEN trim(scheduler_config.value)
+        ELSE '2'
+      END
+      ELSE '2'
+    END
+    WHEN 'daily_budget_usd' THEN CASE
+      WHEN trim(scheduler_config.value) ~ '^[0-9]+$' THEN CASE
+        WHEN scheduler_config.value::numeric BETWEEN 1 AND 100000 THEN trim(scheduler_config.value)
+        ELSE '50'
+      END
+      ELSE '50'
+    END
+    WHEN 'schedule_minutes' THEN '5'
+    ELSE scheduler_config.value
+  END,
+  updated_at = now();
 
 CREATE TABLE IF NOT EXISTS public.execution_window_config (
   id text PRIMARY KEY DEFAULT 'global',
@@ -94,10 +118,13 @@ INSERT INTO public.cron_health (
 )
 VALUES (
   'work-item-scheduler',
-  'every ' || COALESCE((SELECT value FROM public.scheduler_config WHERE key = 'schedule_minutes'), '10') || ' min',
-  'DB-native Mission Control work-item scheduler (interval job)',
+  'every 5 min',
+  'DB-native Mission Control work-item scheduler (launchd StartInterval job)',
   'scheduled',
-  COALESCE((SELECT value::boolean FROM public.scheduler_config WHERE key = 'enabled'), true),
+  CASE
+    WHEN (SELECT lower(trim(value)) FROM public.scheduler_config WHERE key = 'enabled') = 'true' THEN true
+    ELSE false
+  END,
   'unknown'
 )
 ON CONFLICT (cron_name) DO UPDATE SET

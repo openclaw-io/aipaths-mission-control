@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 type CronRow = {
   cron_name: string;
   schedule: string;
+  schedule_minutes: number;
   state: "paused" | "scheduled" | "degraded";
   last_run_at: string | null;
   enabled: boolean;
@@ -12,16 +13,6 @@ type CronRow = {
   last_error?: string | null;
   rows_affected?: number | null;
 };
-
-function scheduleMinutes(schedule: string) {
-  const s = schedule.toLowerCase();
-  const minMatch = s.match(/every\s+(\d+)\s+min/);
-  if (minMatch) return Number(minMatch[1]);
-  const hourMatch = s.match(/every\s+(\d+)\s+hour/);
-  if (hourMatch) return Number(hourMatch[1]) * 60;
-  if (s.includes("hourly")) return 60;
-  return null;
-}
 
 function formatCountdown(ms: number) {
   const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
@@ -46,6 +37,7 @@ export function QueueSchedulerStatus() {
           setCron({
             cron_name: data.cron_name,
             schedule: data.schedule,
+            schedule_minutes: data.schedule_minutes,
             state: data.state,
             last_run_at: data.last_run_at,
             enabled: data.enabled,
@@ -71,7 +63,9 @@ export function QueueSchedulerStatus() {
 
   const nextRun = useMemo(() => {
     if (!cron?.enabled) return null;
-    const mins = cron?.schedule ? scheduleMinutes(cron.schedule) : null;
+    const mins = Number.isInteger(cron.schedule_minutes) && cron.schedule_minutes > 0
+      ? cron.schedule_minutes
+      : null;
     if (!mins || !cron.last_run_at) return null;
     return new Date(cron.last_run_at).getTime() + mins * 60_000;
   }, [cron]);

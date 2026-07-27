@@ -6,17 +6,17 @@ export function SchedulerToggle() {
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [maxConcurrent, setMaxConcurrent] = useState("2");
   const [dailyBudget, setDailyBudget] = useState("50");
-  const [scheduleMinutes, setScheduleMinutes] = useState("10");
+  const [scheduleMinutes, setScheduleMinutes] = useState(5);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     fetch("/api/scheduler")
       .then((r) => r.json())
       .then((config) => {
-        setEnabled(config.enabled !== "false");
-        setMaxConcurrent(config.max_concurrent || "2");
-        setDailyBudget(config.daily_budget_usd || "50");
-        setScheduleMinutes(config.schedule_minutes || "10");
+        setEnabled(config.enabled === true);
+        setMaxConcurrent(String(config.max_concurrent || 2));
+        setDailyBudget(String(config.daily_budget_usd || 50));
+        if (Number.isInteger(config.schedule_minutes)) setScheduleMinutes(config.schedule_minutes);
       })
       .catch(() => {});
   }, []);
@@ -24,20 +24,22 @@ export function SchedulerToggle() {
   async function toggle() {
     const newValue = !enabled;
     setSaving(true);
-    await fetch("/api/scheduler", {
+    const response = await fetch("/api/scheduler", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ enabled: String(newValue) }),
+      body: JSON.stringify({ enabled: newValue }),
     });
-    setEnabled(newValue);
+    if (response.ok) setEnabled(newValue);
     setSaving(false);
   }
 
-  async function updateConfig(key: string, value: string) {
+  async function updateConfig(key: "max_concurrent" | "daily_budget_usd", value: string) {
+    const parsed = Number(value);
+    if (!Number.isSafeInteger(parsed)) return;
     await fetch("/api/scheduler", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ [key]: value }),
+      body: JSON.stringify({ [key]: parsed }),
     });
   }
 
