@@ -179,6 +179,9 @@ function makeReviewHarness({ failEvent = false, failWork = false, notifyError = 
         execution_context: { branch: "feature/review" },
         result: { summary: "Previous deliverable" },
         prior_review_feedback: ["payload feedback"],
+        dispatch_state: "completed",
+        dispatch_session_id: "old-session-id",
+        dispatch_session_key: "old-session-key",
       },
       updated_at: "2026-07-25T10:00:00.000Z",
       created_at: "2026-07-24T10:00:00.000Z",
@@ -262,6 +265,7 @@ function makeReviewHarness({ failEvent = false, failWork = false, notifyError = 
     "@/lib/db/postgres": postgres,
     "@/lib/supabase/server": { createClient: async () => { throw new Error("unexpected cloud auth"); } },
     "@/lib/supabase/admin": { createServiceClient: () => { throw new Error("unexpected cloud client"); } },
+    "node:crypto": { randomUUID: () => "attempt-2" },
     "@/lib/loops/execution-instruction": executionInstruction,
     "@/lib/loops/lifecycle": {
       getPrimaryExecutionWorkItem: async () => null,
@@ -302,6 +306,11 @@ test("local Loop review commits loop, event and work reset before best-effort no
   assert.deepEqual(harness.state.workItem.payload.result, { summary: "Previous deliverable" });
   assert.deepEqual(harness.state.workItem.payload.prior_review_feedback, ["payload feedback"]);
   assert.equal(harness.state.workItem.payload.review_feedback, "Please preserve the execution context");
+  assert.equal(harness.state.workItem.payload.execution_attempt_id, "attempt-2");
+  assert.equal(harness.state.workItem.payload.execution_generation, 1);
+  assert.equal(harness.state.workItem.payload.dispatch_state, "ready_for_rework");
+  assert.equal(harness.state.workItem.payload.dispatch_session_key, undefined);
+  assert.equal(harness.state.workItem.payload.dispatch_session_id, undefined);
   assert.match(harness.state.workItem.instruction, /No modificar archivos ni servicios/);
   assert.match(harness.state.workItem.instruction, /Forbidden actions:\n- modify_files\n- restart_services/);
   assert.ok(harness.log.indexOf("commit") < harness.log.indexOf("notify"));

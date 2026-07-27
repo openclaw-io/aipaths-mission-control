@@ -8,7 +8,7 @@ import ts from "typescript";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
-function transpileModule(sourcePath, requires = {}) {
+function transpileModule(sourcePath, requires = {}, globals = {}) {
   const source = readFileSync(sourcePath, "utf8");
   const transpiled = ts.transpileModule(source, {
     compilerOptions: {
@@ -34,6 +34,8 @@ function transpileModule(sourcePath, requires = {}) {
     Set,
     RegExp,
     console,
+    process: { env: { AGENT_API_KEY: "test-key" } },
+    ...globals,
   };
   vm.runInNewContext(transpiled, sandbox, { filename: sourcePath });
   return cjsModule.exports;
@@ -112,8 +114,142 @@ test("Loop creation stores the request byte-for-byte instead of only normalized 
   assert.equal(JSON.parse(eventParams[2]).input, originalInput);
 });
 
-test("Loop read model does not persist primary-execution lifecycle transitions", () => {
+test("explicit plan-pending write path promotes an already planned Loop with its event", async () => {
+  let updateSql = "";
+  let eventSql = "";
+  const route = transpileModule(resolve(repoRoot, "src/app/api/loops/plan-pending/route.ts"), {
+    "next/server": { NextResponse: { json: (payload, init = {}) => ({ payload, status: init.status || 200 }) } },
+    "@/lib/db/postgres": {
+      query: async () => ({ rows: [{
+        id: "loop-ready",
+        status: "planning",
+        key: "loop-ready",
+        name: "Already normalized",
+        summary: "Ready for approval",
+        description: "Planned explicitly",
+        priority: "medium",
+        metadata: { normalized_at: "2026-07-27T00:00:00.000Z" },
+        plan: [{ id: "step-1", title: "Execute", status: "pending", notes: null }],
+        clarification_questions: [],
+      }] }),
+      withTransaction: async (run) => run({
+        async query(sql) {
+          const normalized = sql.replace(/\s+/g, " ").trim().toLowerCase();
+          if (normalized.startsWith("update public.loops")) {
+            updateSql = normalized;
+            return { rows: [{ id: "loop-ready" }] };
+          }
+          if (normalized.startsWith("insert into public.loop_events")) {
+            eventSql = normalized;
+            return { rows: [] };
+          }
+          throw new Error(`Unexpected explicit planner SQL: ${normalized}`);
+        },
+      }),
+    },
+  });
+  const request = { headers: { get: () => "Bearer test-key" } };
+
+  const response = await route.POST(request);
+
+  assert.equal(response.status, 200);
+  assert.equal(response.payload.promoted, 1);
+  assert.match(updateSql, /status = 'needs_approval'/);
+  assert.match(updateSql, /status = 'planning'/);
+  assert.match(eventSql, /loop\.ready_for_approval/);
+});
+
+test("Loop read model is strictly read-only and cannot persist any lifecycle transition", () => {
   const source = readFileSync(resolve(repoRoot, "src/lib/loops/read-model.ts"), "utf8");
   assert.doesNotMatch(source, /reconcileLoopStatusWithPrimaryExecution(?:Local)?/);
   assert.doesNotMatch(source, /system:read_model/);
+  assert.doesNotMatch(source, /\b(?:update|insert|delete)\b/i);
+  assert.doesNotMatch(source, /\.(?:update|insert|delete)\s*\(/);
+});
+
+test("cloud work-item completion fails closed before invoking the local transactional writer", async () => {
+  let writes = 0;
+  const route = transpileModule(resolve(repoRoot, "src/app/api/agent/work-items/[id]/route.ts"), {
+    "next/server": { NextResponse: { json: (payload, init = {}) => ({ payload, status: init.status || 200 }) } },
+    "@/lib/auth/local": { isLocalAuthDisabled: () => false },
+    "@/lib/db/mission-control": { getWorkItem: async () => null },
+    "@/lib/work-items/agent-completion-local": {
+      patchAgentWorkItemWithCompletion: async () => {
+        writes += 1;
+        throw new Error("local writer must not run in cloud mode");
+      },
+    },
+  });
+  const request = {
+    headers: { get: () => "Bearer test-key" },
+    json: async () => ({ status: "done" }),
+  };
+
+  const response = await route.PATCH(request, { params: Promise.resolve({ id: "work-1" }) });
+
+  assert.equal(response.status, 503);
+  assert.equal(response.payload.error, "cloud_work_item_completion_not_supported");
+  assert.equal(writes, 0);
+});
+
+for (const action of ["approve_deliverable", "request_changes"]) {
+  test(`cloud Loop review ${action} fails closed without partial multi-call writes`, async () => {
+    let serviceClients = 0;
+    const route = transpileModule(resolve(repoRoot, "src/app/api/loops/[id]/review/route.ts"), {
+      "next/server": { NextResponse: { json: (payload, init = {}) => ({ payload, status: init.status || 200 }) } },
+      "@/lib/auth/local": {
+        getLocalMissionControlUser: () => null,
+        isLocalAuthDisabled: () => false,
+      },
+      "@/lib/db/postgres": { withTransaction: async () => { throw new Error("unexpected local transaction"); } },
+      "@/lib/supabase/server": {
+        createClient: async () => ({ auth: { getUser: async () => ({ data: { user: { id: "reviewer-1" } } }) } }),
+      },
+      "@/lib/supabase/admin": {
+        createServiceClient: () => {
+          serviceClients += 1;
+          throw new Error("cloud writes must not start");
+        },
+      },
+      "node:crypto": { randomUUID: () => "unused-cloud-attempt" },
+      "@/lib/loops/execution-instruction": { buildLoopReworkInstruction: () => "rework" },
+      "@/lib/loops/lifecycle": {
+        getPrimaryExecutionWorkItem: async () => null,
+        isPrimaryExecutionOpen: () => false,
+        reconcileLoopStatusWithPrimaryExecution: async () => {},
+      },
+    });
+
+    const response = await route.POST(
+      { json: async () => ({ action, feedback: "preserve this exact feedback" }) },
+      { params: Promise.resolve({ id: "loop-1" }) },
+    );
+
+    assert.equal(response.status, 503);
+    assert.equal(response.payload.error, "cloud_loop_review_writes_not_supported");
+    assert.equal(serviceClients, 0);
+  });
+}
+
+test("completion takes the Loop row lock before the work-item row lock", () => {
+  const source = readFileSync(resolve(repoRoot, "src/lib/work-items/agent-completion-local.ts"), "utf8");
+  const loopLock = source.indexOf("FOR UPDATE OF l");
+  const workLock = source.indexOf("WHERE id = $1 LIMIT 1 FOR UPDATE");
+  assert.ok(loopLock >= 0, "completion is missing the primary Loop lock");
+  assert.ok(workLock > loopLock, "completion must lock Loop before work item");
+});
+
+test("materialization creates an attempt identity and notify propagates it in terminal PATCH commands", () => {
+  const materializer = readFileSync(resolve(repoRoot, "src/app/api/loops/materialize-queued/route.ts"), "utf8");
+  const notifier = readFileSync(resolve(repoRoot, "src/app/api/work-items/notify/route.ts"), "utf8");
+  assert.match(materializer, /execution_attempt_id:\s*randomUUID\(\)/);
+  assert.match(materializer, /execution_generation:\s*1/);
+  assert.match(notifier, /execution_attempt_id/);
+  const sessionBuilder = notifier.slice(
+    notifier.indexOf("function buildWorkItemSessionKey"),
+    notifier.indexOf("function shellSingleQuote"),
+  );
+  assert.match(sessionBuilder, /execution_attempt_id/);
+  assert.match(notifier, /buildWorkItemStatusCommand\(item\.id, "done", workPayload\)/);
+  assert.match(notifier, /buildWorkItemStatusCommand\(item\.id, "failed", workPayload\)/);
 });

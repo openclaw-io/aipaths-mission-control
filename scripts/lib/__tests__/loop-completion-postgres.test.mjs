@@ -11,7 +11,7 @@ import { requireMissionControlTestDatabaseUrl } from "../test-postgres-guard.mjs
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
-function transpileModule(sourcePath, requires = {}) {
+function transpileModule(sourcePath, requires = {}, globals = {}) {
   const source = readFileSync(sourcePath, "utf8");
   const transpiled = ts.transpileModule(source, {
     compilerOptions: {
@@ -38,6 +38,9 @@ function transpileModule(sourcePath, requires = {}) {
     Object,
     Array,
     Math,
+    console,
+    process: { env: { AGENT_API_KEY: "test-key" } },
+    ...globals,
   };
   vm.runInNewContext(transpiled, sandbox, { filename: sourcePath });
   return cjsModule.exports;
@@ -71,6 +74,41 @@ const agentCompletion = transpileModule(resolve(repoRoot, "src/lib/work-items/ag
   },
   "@/lib/work-items/completion-orchestration": completion,
 });
+
+const executionInstruction = transpileModule(resolve(repoRoot, "src/lib/loops/execution-instruction.ts"));
+const reviewRoute = transpileModule(resolve(repoRoot, "src/app/api/loops/[id]/review/route.ts"), {
+  "next/server": { NextResponse: { json: (payload, init = {}) => ({ payload, status: init.status || 200 }) } },
+  "node:crypto": { randomUUID },
+  "@/lib/auth/local": {
+    isLocalAuthDisabled: () => true,
+    getLocalMissionControlUser: () => ({ email: "concurrency-reviewer@example.test" }),
+  },
+  "@/lib/db/postgres": {
+    withTransaction: async (run) => {
+      const client = await pool.connect();
+      try {
+        await client.query("begin");
+        await client.query("set local lock_timeout = '5s'");
+        const result = await run(client);
+        await client.query("commit");
+        return result;
+      } catch (error) {
+        await client.query("rollback");
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
+  },
+  "@/lib/supabase/server": { createClient: async () => { throw new Error("unexpected cloud auth"); } },
+  "@/lib/supabase/admin": { createServiceClient: () => { throw new Error("unexpected cloud client"); } },
+  "@/lib/loops/execution-instruction": executionInstruction,
+  "@/lib/loops/lifecycle": {
+    getPrimaryExecutionWorkItem: async () => null,
+    isPrimaryExecutionOpen: (status) => Boolean(status && !["done", "failed", "canceled"].includes(status)),
+    reconcileLoopStatusWithPrimaryExecution: async () => {},
+  },
+}, { fetch: async () => ({ ok: true, status: 200 }), console });
 
 before(async () => {
   await pool.query("select 1 from public.loops limit 1");
@@ -204,6 +242,178 @@ test("Loop reconciliation failure rolls back the work item completion", async ()
     assert.deepEqual(work.payload.session_context, { id: "keep" });
   } finally {
     await pool.query("drop trigger if exists reject_test_loop_event on public.loop_events");
+    await cleanupLoopGraph(loopId, workItemId);
+  }
+});
+
+test("replaying done for the same execution attempt is a true no-op", async () => {
+  const loopId = randomUUID();
+  const workItemId = randomUUID();
+  const attemptId = randomUUID();
+  try {
+    await insertLoopGraph({
+      loopId,
+      workItemId,
+      plan: [{ id: "step-1", title: "Finish once", status: "pending" }],
+      payload: { execution_attempt_id: attemptId, execution_generation: 1, counter: 4 },
+    });
+    await agentCompletion.patchAgentWorkItemWithCompletion(workItemId, {
+      status: "done",
+      execution_attempt_id: attemptId,
+      output: { value: "first" },
+      payload_increment: { counter: 2 },
+      result: "first result",
+    });
+    const before = (await pool.query(
+      "select status, instruction, payload, completed_at, updated_at from public.work_items where id = $1",
+      [workItemId],
+    )).rows[0];
+    const eventsBefore = Number((await pool.query(
+      "select count(*)::int as count from public.event_log where entity_id = $1",
+      [workItemId],
+    )).rows[0].count);
+
+    const replay = await agentCompletion.patchAgentWorkItemWithCompletion(workItemId, {
+      status: "done",
+      execution_attempt_id: attemptId,
+      output: { value: "must-not-overwrite" },
+      payload_increment: { counter: 100 },
+      payload_patch: { injected: true },
+      result: "must not be appended",
+    });
+    const after = (await pool.query(
+      "select status, instruction, payload, completed_at, updated_at from public.work_items where id = $1",
+      [workItemId],
+    )).rows[0];
+    const eventsAfter = Number((await pool.query(
+      "select count(*)::int as count from public.event_log where entity_id = $1",
+      [workItemId],
+    )).rows[0].count);
+
+    assert.equal(replay.status, "done");
+    assert.deepEqual(after, before);
+    assert.equal(after.payload.counter, 6);
+    assert.deepEqual(after.payload.output, { value: "first" });
+    assert.equal(after.payload.injected, undefined);
+    assert.equal(eventsAfter, eventsBefore);
+  } finally {
+    await cleanupLoopGraph(loopId, workItemId);
+  }
+});
+
+test("a late completion from a superseded execution attempt is rejected without mutation", async () => {
+  const loopId = randomUUID();
+  const workItemId = randomUUID();
+  const currentAttemptId = randomUUID();
+  try {
+    await insertLoopGraph({
+      loopId,
+      workItemId,
+      plan: [{ id: "step-1", title: "Current generation", status: "pending" }],
+      payload: { execution_attempt_id: currentAttemptId, execution_generation: 2, dispatch_state: "ready_for_rework" },
+    });
+    const before = (await pool.query("select status, payload, updated_at from public.work_items where id = $1", [workItemId])).rows[0];
+
+    await assert.rejects(
+      () => agentCompletion.patchAgentWorkItemWithCompletion(workItemId, {
+        status: "done",
+        execution_attempt_id: "superseded-attempt",
+        output: { stale: true },
+      }),
+      /stale_execution_attempt/,
+    );
+
+    const after = (await pool.query("select status, payload, updated_at from public.work_items where id = $1", [workItemId])).rows[0];
+    assert.deepEqual(after, before);
+  } finally {
+    await cleanupLoopGraph(loopId, workItemId);
+  }
+});
+
+test("terminal status matrix rejects late done/failed inversions", async () => {
+  for (const [firstStatus, lateStatus] of [["done", "failed"], ["failed", "done"]]) {
+    const loopId = randomUUID();
+    const workItemId = randomUUID();
+    const attemptId = randomUUID();
+    try {
+      await insertLoopGraph({
+        loopId,
+        workItemId,
+        plan: [{ id: "step-1", title: "Terminal once", status: "pending" }],
+        payload: { execution_attempt_id: attemptId, execution_generation: 1 },
+      });
+      await agentCompletion.patchAgentWorkItemWithCompletion(workItemId, {
+        status: firstStatus,
+        execution_attempt_id: attemptId,
+      });
+      const before = (await pool.query("select status, payload, completed_at, updated_at from public.work_items where id = $1", [workItemId])).rows[0];
+
+      await assert.rejects(
+        () => agentCompletion.patchAgentWorkItemWithCompletion(workItemId, {
+          status: lateStatus,
+          execution_attempt_id: attemptId,
+        }),
+        /terminal_status_conflict/,
+      );
+
+      const after = (await pool.query("select status, payload, completed_at, updated_at from public.work_items where id = $1", [workItemId])).rows[0];
+      assert.deepEqual(after, before);
+    } finally {
+      await cleanupLoopGraph(loopId, workItemId);
+    }
+  }
+});
+
+test("concurrent completion and request_changes serialize without deadlock and reject any superseded attempt", async () => {
+  const loopId = randomUUID();
+  const workItemId = randomUUID();
+  const attemptId = randomUUID();
+  try {
+    await insertLoopGraph({
+      loopId,
+      workItemId,
+      plan: [{ id: "step-1", title: "Concurrent handoff", status: "in_progress" }],
+      payload: {
+        execution_attempt_id: attemptId,
+        execution_generation: 1,
+        dispatch_state: "notified_agent",
+        dispatch_session_key: "old-session",
+        durable_context: { preserve: true },
+      },
+    });
+
+    const [completionResult, reworkResult] = await Promise.allSettled([
+      agentCompletion.patchAgentWorkItemWithCompletion(workItemId, {
+        status: "done",
+        execution_attempt_id: attemptId,
+        output: { candidate: "possibly completed before rework" },
+      }),
+      reviewRoute.POST(
+        { json: async () => ({ action: "request_changes", feedback: "Run a fresh attempt" }) },
+        { params: Promise.resolve({ id: loopId }) },
+      ),
+    ]);
+
+    assert.equal(reworkResult.status, "fulfilled");
+    if (completionResult.status === "rejected") {
+      assert.match(String(completionResult.reason), /stale_execution_attempt/);
+    }
+    for (const result of [completionResult, reworkResult]) {
+      if (result.status === "rejected") assert.doesNotMatch(String(result.reason), /deadlock|lock timeout/i);
+    }
+
+    const loop = (await pool.query("select status from public.loops where id = $1", [loopId])).rows[0];
+    const work = (await pool.query("select status, started_at, completed_at, payload from public.work_items where id = $1", [workItemId])).rows[0];
+    assert.equal(loop.status, "in_progress");
+    assert.equal(work.status, "ready");
+    assert.equal(work.started_at, null);
+    assert.equal(work.completed_at, null);
+    assert.notEqual(work.payload.execution_attempt_id, attemptId);
+    assert.equal(work.payload.execution_generation, 2);
+    assert.equal(work.payload.dispatch_state, "ready_for_rework");
+    assert.equal(work.payload.dispatch_session_key, undefined);
+    assert.deepEqual(work.payload.durable_context, { preserve: true });
+  } finally {
     await cleanupLoopGraph(loopId, workItemId);
   }
 });

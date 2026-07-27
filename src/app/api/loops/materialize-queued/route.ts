@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { NextResponse, type NextRequest } from "next/server";
 import { query, withTransaction } from "@/lib/db/postgres";
 import { getExecutionWindowConfig, isExecutionWindowOpenNow } from "@/lib/execution-window";
@@ -153,6 +154,9 @@ export async function POST(request: NextRequest) {
             source_loop_title: loop.name || "Untitled Loop",
             materializer: "loop-execution-materializer",
             loop_status_at_materialization: loop.status,
+            execution_attempt_id: randomUUID(),
+            execution_generation: 1,
+            dispatch_state: "ready",
           }),
         ]);
 

@@ -66,9 +66,20 @@ export async function patchAgentWorkItemWithCompletion(id: string, body: JsonRec
   }
 
   return withTransaction(async (client) => {
-    // Serialize concurrent completion retries. The work-item update, pipeline
-    // completion effects, generated work items/maps, and event log commit or
-    // roll back as one local Postgres transaction.
+    // All Loop completion/rework transactions lock Loop -> work item. Looking
+    // up the relation does not lock either row; taking the Loop lock first
+    // prevents an inversion with the review/request_changes path.
+    await client.query(
+      `SELECT l.id
+         FROM public.loop_work_items lwi
+         INNER JOIN public.loops l ON l.id = lwi.loop_id
+        WHERE lwi.work_item_id = $1
+          AND lwi.relation_type = 'primary_execution'
+        LIMIT 1
+        FOR UPDATE OF l`,
+      [id],
+    );
+
     const existingResult = await client.query(
       "SELECT * FROM public.work_items WHERE id = $1 LIMIT 1 FOR UPDATE",
       [id],
@@ -77,6 +88,23 @@ export async function patchAgentWorkItemWithCompletion(id: string, body: JsonRec
     if (!existing) return null;
 
     const status = typeof body.status === "string" ? body.status : null;
+    const existingPayload = (existing.payload || {}) as JsonRecord;
+    const terminalStatuses = new Set(["done", "failed", "canceled"]);
+    if (status && terminalStatuses.has(status)) {
+      const expectedAttempt = typeof existingPayload.execution_attempt_id === "string"
+        ? existingPayload.execution_attempt_id
+        : null;
+      const suppliedAttempt = typeof body.execution_attempt_id === "string"
+        ? body.execution_attempt_id
+        : null;
+      if (expectedAttempt && suppliedAttempt !== expectedAttempt) {
+        throw new Error("stale_execution_attempt");
+      }
+      if (terminalStatuses.has(existing.status)) {
+        if (existing.status !== status) throw new Error("terminal_status_conflict");
+        return normalizeRow(existing);
+      }
+    }
     const scheduledFor = typeof body.scheduled_for === "string" || body.scheduled_for === null
       ? body.scheduled_for
       : undefined;

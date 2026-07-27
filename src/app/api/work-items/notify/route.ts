@@ -80,6 +80,11 @@ function buildWorkItemSessionKey(agentId: string, workItemId: string, payload?: 
     return `agent:${agentId}:mission-control:work-item:${workItemId}:dispatch:${dispatchSessionId}`;
   }
 
+  const executionAttemptId = typeof payload?.execution_attempt_id === "string" ? payload.execution_attempt_id : "";
+  if (executionAttemptId) {
+    return `agent:${agentId}:mission-control:work-item:${workItemId}:execution:${executionAttemptId}`;
+  }
+
   const dispatchAttempt = Number(payload?.dispatch_attempts || 0);
   const staleRequeues = Number(payload?.stale_claim_requeue_count || 0);
   const manualRequeues = Number(payload?.manual_requeue_count || 0);
@@ -93,11 +98,23 @@ function shellSingleQuote(value: string) {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
-function buildWorkItemStatusCommand(workItemId: string, status: "in_progress" | "done" | "failed") {
+function buildWorkItemStatusCommand(
+  workItemId: string,
+  status: "in_progress" | "done" | "failed",
+  workPayload?: Record<string, unknown> | null,
+) {
   const envLocal = `${process.cwd()}/.env.local`;
   const envFile = `${process.cwd()}/.env`;
   const url = `http://localhost:3001/api/agent/work-items/${workItemId}`;
-  const payload = JSON.stringify({ status });
+  const executionAttemptId = typeof workPayload?.execution_attempt_id === "string"
+    ? workPayload.execution_attempt_id
+    : null;
+  const payload = JSON.stringify({
+    status,
+    ...(["done", "failed"].includes(status) && executionAttemptId
+      ? { execution_attempt_id: executionAttemptId }
+      : {}),
+  });
   const script = `set -a; [ -f "${envLocal}" ] && . "${envLocal}"; [ -f "${envFile}" ] && . "${envFile}"; set +a; curl -s -X PATCH -H "Authorization: Bearer \${AGENT_API_KEY}" -H "Content-Type: application/json" "${url}" -d '${payload}'`;
   return `bash -lc ${shellSingleQuote(script)}`;
 }
@@ -368,9 +385,9 @@ export async function POST(request: NextRequest) {
     message += `\n## Community publish contract\nPublish only the approved copy in <#${targetChannelId}> (${targetChannelName}). Do not publish news/radar items in #anuncios; #anuncios is only for blogs, guides, videos, and major content launches. Wrap every raw URL as <https://...> so Discord suppresses link previews/embeds. After publishing, complete this work item with current_url/published_at if available. Send the publication log/update to <#${logChannelId}>, not to your private director channel. Suggested log: “Anuncio: [title] — lo publiqué en #${targetChannelName}. Post: [ver post](<POST_URL>)”.\n`;
   }
 
-  const claimCommand = buildWorkItemStatusCommand(item.id, "in_progress");
-  const completeCommand = buildWorkItemStatusCommand(item.id, "done");
-  const failCommand = buildWorkItemStatusCommand(item.id, "failed");
+  const claimCommand = buildWorkItemStatusCommand(item.id, "in_progress", workPayload);
+  const completeCommand = buildWorkItemStatusCommand(item.id, "done", workPayload);
+  const failCommand = buildWorkItemStatusCommand(item.id, "failed", workPayload);
 
   message += `\n## REQUIRED: Update work item status via Mission Control API
 These commands load the Mission Control repo env before calling the API.

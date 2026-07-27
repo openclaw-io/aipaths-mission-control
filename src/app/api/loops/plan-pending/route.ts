@@ -208,7 +208,63 @@ export async function POST(request: NextRequest) {
     const hasMeaningfulName = cleanText(loop.name).length > 0 && !/^new loop$/i.test(cleanText(loop.name));
     const hasMeaningfulSummary = cleanText(loop.summary).length > 0;
 
-    if (alreadyNormalized && (hasMeaningfulPlan || hasMeaningfulName || hasMeaningfulSummary)) {
+    if (alreadyNormalized && hasMeaningfulPlan) {
+      const clarificationHistory = Array.isArray(metadata.clarification_history)
+        ? metadata.clarification_history
+        : [];
+      const latestClarification = clarificationHistory.at(-1);
+      const latestResponse = latestClarification && typeof latestClarification === "object" && !Array.isArray(latestClarification)
+        ? cleanText(String((latestClarification as JsonObject).response || "")).toLowerCase()
+        : "";
+      const explicitlyNotReady = Boolean(
+        metadata.normalization_invalidated_at
+        || metadata.manual_triage_reason
+        || /desestim|cancel|descart|viejo|old/.test(latestResponse)
+      );
+      if (explicitlyNotReady) {
+        details.push({ loopId: loop.id, action: "already_normalized_not_ready" });
+        continue;
+      }
+
+      const now = new Date().toISOString();
+      try {
+        const updated = await withTransaction(async (client) => {
+          const updateResult = await client.query(`
+            UPDATE public.loops
+               SET status = 'needs_approval',
+                   updated_at = $1::timestamptz
+             WHERE id = $2
+               AND status = 'planning'
+             RETURNING id
+          `, [now, loop.id]);
+          if (!updateResult.rows[0]) return false;
+
+          await client.query(`
+            INSERT INTO public.loop_events
+              (loop_id, event_type, from_status, to_status, actor, payload, created_at)
+            VALUES
+              ($1, 'loop.ready_for_approval', 'planning', 'needs_approval', 'loop-planner', $2::jsonb, $3::timestamptz)
+          `, [
+            loop.id,
+            JSON.stringify({ source: "explicit_plan_pending_promotion", guarded: true }),
+            now,
+          ]);
+          return true;
+        });
+
+        if (updated) {
+          promoted++;
+          details.push({ loopId: loop.id, action: "already_planned_and_promoted" });
+        } else {
+          details.push({ loopId: loop.id, action: "skipped_status_changed" });
+        }
+      } catch (updateError) {
+        details.push({ loopId: loop.id, action: `error:${updateError instanceof Error ? updateError.message : "update_failed"}` });
+      }
+      continue;
+    }
+
+    if (alreadyNormalized && (hasMeaningfulName || hasMeaningfulSummary)) {
       details.push({ loopId: loop.id, action: "already_normalized_skipped" });
       continue;
     }

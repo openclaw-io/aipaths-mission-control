@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { isLocalAuthDisabled } from "@/lib/auth/local";
 import { getWorkItem, type JsonRecord } from "@/lib/db/mission-control";
 import { patchAgentWorkItemWithCompletion } from "@/lib/work-items/agent-completion-local";
 
@@ -42,11 +43,20 @@ export async function PATCH(
     return NextResponse.json({ error: "Invalid status" }, { status: 400 });
   }
 
+  // Completion orchestration spans work items, Loops, pipeline rows, maps and
+  // events. The only supported write architecture is one local Postgres
+  // transaction; the REST/Supabase path cannot provide that atomicity.
+  if (!isLocalAuthDisabled()) {
+    return NextResponse.json({ error: "cloud_work_item_completion_not_supported" }, { status: 503 });
+  }
+
   try {
     const data = await patchAgentWorkItemWithCompletion(id, body);
     if (!data) return NextResponse.json({ error: "Work item not found" }, { status: 404 });
     return NextResponse.json(data);
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "local_postgres_write_failed" }, { status: 500 });
+    const message = error instanceof Error ? error.message : "local_postgres_write_failed";
+    const statusCode = message === "stale_execution_attempt" || message === "terminal_status_conflict" ? 409 : 500;
+    return NextResponse.json({ error: message }, { status: statusCode });
   }
 }
