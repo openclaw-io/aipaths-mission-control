@@ -154,10 +154,12 @@ plutil -lint ops/macos/*.plist
 
 `npm test`, `npm run test:loops`, and `npm run test:youtube-statistics` create a
 unique disposable PostgreSQL database on an exact loopback address, apply
-`ops/local-postgres/schema.sql`, run `node --test` with only the guarded
-`MISSION_CONTROL_TEST_DATABASE_URL`, and terminate connections/drop the database
-in cleanup. They deliberately remove `MISSION_CONTROL_DATABASE_URL` and refuse
-the live `aipaths_mission_control_local` database. To use a non-default local
+`ops/local-postgres/schema.sql`, run `node --test` with the guarded
+`MISSION_CONTROL_TEST_DATABASE_URL` (also mirrored to
+`MISSION_CONTROL_DATABASE_URL` for compatibility), and terminate connections/drop
+the database in cleanup. Test mode fails closed without that dedicated URL,
+removes inherited PostgreSQL `PG*` fallbacks, and refuses the live
+`aipaths_mission_control_local` database. To use a non-default local
 PostgreSQL role or port, set `MISSION_CONTROL_TEST_ADMIN_URL` to a loopback URL
 whose database is `postgres` or `template1`.
 

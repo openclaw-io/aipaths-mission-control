@@ -22,10 +22,16 @@ export function buildTestEnvironment(baseEnv, { adminUrl, databaseUrl }) {
     NODE_ENV: "test",
     MISSION_CONTROL_TEST_ADMIN_URL: adminUrl,
     MISSION_CONTROL_TEST_DATABASE_URL: databaseUrl,
+    // Compatibility for application paths that consume the operational name:
+    // in test mode it is pinned to the exact same disposable target.
+    MISSION_CONTROL_DATABASE_URL: databaseUrl,
   };
-  // No test child receives an operational/default database variable. DB-backed
-  // tests can only opt in through the dedicated, guarded test URL.
-  delete env.MISSION_CONTROL_DATABASE_URL;
+  // libpq/pg accepts many PG* fallback variables. Remove all of them rather
+  // than maintaining an incomplete allow/deny list (PGDATABASE, PGHOST,
+  // PGHOSTADDR, PGPORT, PGSERVICE, PGSERVICEFILE, and future additions).
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("PG")) delete env[key];
+  }
   delete env.DATABASE_URL;
   return env;
 }
@@ -36,6 +42,11 @@ function runNodeTests(args, env) {
       cwd: repoRoot,
       env,
       stdio: "inherit",
+      // A terminal sends Ctrl-C/termination to its foreground process group.
+      // Isolate node:test (and its workers) so only this wrapper handles that
+      // group signal and can wait for nested cleanup before dropping the outer
+      // database. On Windows detached has different process semantics.
+      detached: process.platform !== "win32",
     });
     child.once("error", (error) => {
       rejectRun(error);

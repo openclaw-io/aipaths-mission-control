@@ -49,6 +49,12 @@ async function dropIfPresent(admin, database) {
   await admin.query(`DROP DATABASE IF EXISTS ${quotePostgresIdentifier(database)} WITH (FORCE)`);
 }
 
+function signalProcessGroup(child, signal) {
+  if (process.platform === "win32") return child.kill(signal);
+  process.kill(-child.pid, signal);
+  return true;
+}
+
 async function runWrapperSignalCase(signal, { repeated = false } = {}) {
   const adminUrl = assertTestAdminDatabaseUrl(process.env.MISSION_CONTROL_TEST_ADMIN_URL).toString();
   const admin = new Client({ connectionString: adminUrl });
@@ -64,6 +70,10 @@ async function runWrapperSignalCase(signal, { repeated = false } = {}) {
       cwd: repoRoot,
       env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
+      // Make the wrapper the leader of a fresh group, then signal that whole
+      // group exactly as a terminal/supervisor would. The wrapper must isolate
+      // its own node:test child for nested finally blocks to survive.
+      detached: process.platform !== "win32",
     });
     const capture = collectProcess(child);
     const ready = await waitForOutput(capture, /\[signal-fixture-ready\] (mc_loops_rehearsal_[a-z0-9_]+)/, child);
@@ -73,10 +83,10 @@ async function runWrapperSignalCase(signal, { repeated = false } = {}) {
     assert.equal(await databaseExists(admin, outerDatabase), true);
     assert.equal(await databaseExists(admin, rehearsalDatabase), true);
 
-    assert.equal(child.kill(signal), true);
+    assert.equal(signalProcessGroup(child, signal), true);
     if (repeated) {
       await delay(25);
-      assert.equal(child.kill(signal), true);
+      assert.equal(signalProcessGroup(child, signal), true);
     }
     const result = await capture.closed;
     assert.deepEqual(result, { code: signal === "SIGINT" ? 130 : 143, signal: null }, capture.output);
@@ -91,13 +101,16 @@ async function runWrapperSignalCase(signal, { repeated = false } = {}) {
 }
 
 for (const [signal, repeated] of [["SIGTERM", true], ["SIGINT", false]]) {
-  test(`disposable test wrapper cleans outer and nested databases after ${signal}${repeated ? " and a repeated signal" : ""}`, { timeout: 30_000 }, async () => {
+  test(`whole wrapper process-group ${signal}${repeated ? " plus a repeated signal" : ""} cleans outer and nested databases`, {
+    timeout: 30_000,
+    skip: process.platform === "win32" && "POSIX process-group behavior",
+  }, async () => {
     await runWrapperSignalCase(signal, { repeated });
   });
 }
 
 for (const signal of ["SIGTERM", "SIGINT"]) {
-  test(`loops rehearsal drops its scratch database after ${signal}`, { timeout: 30_000 }, async () => {
+  test(`loops rehearsal drops its scratch database after whole process-group ${signal}`, { timeout: 30_000 }, async () => {
     const adminUrl = assertTestAdminDatabaseUrl(process.env.MISSION_CONTROL_TEST_ADMIN_URL).toString();
     const admin = new Client({ connectionString: adminUrl });
     await admin.connect();
@@ -105,6 +118,7 @@ for (const signal of ["SIGTERM", "SIGINT"]) {
       cwd: repoRoot,
       env: { ...process.env, MISSION_CONTROL_TEST_ADMIN_URL: adminUrl },
       stdio: ["ignore", "pipe", "pipe"],
+      detached: process.platform !== "win32",
     });
     const capture = collectProcess(child);
     const databasePrefix = `mc_loops_rehearsal_${child.pid}_`;
@@ -124,7 +138,7 @@ for (const signal of ["SIGTERM", "SIGINT"]) {
         await delay(20);
       }
       assert.ok(database, `rehearsal database was not observed:\n${capture.output}`);
-      assert.equal(child.kill(signal), true);
+      assert.equal(signalProcessGroup(child, signal), true);
       const result = await capture.closed;
       assert.deepEqual(result, { code: signal === "SIGINT" ? 130 : 143, signal: null }, capture.output);
       assert.equal(await databaseExists(admin, database), false, capture.output);
