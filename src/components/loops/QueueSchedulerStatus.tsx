@@ -62,7 +62,7 @@ export function QueueSchedulerStatus() {
   }, []);
 
   const nextRun = useMemo(() => {
-    if (!cron?.enabled) return null;
+    if (!cron || cron.state === "degraded" || cron.last_status === "error" || !cron.enabled) return null;
     const mins = Number.isInteger(cron.schedule_minutes) && cron.schedule_minutes > 0
       ? cron.schedule_minutes
       : null;
@@ -74,15 +74,23 @@ export function QueueSchedulerStatus() {
     return <div className="text-xs text-gray-500">Checking scheduler…</div>;
   }
 
+  if (cron.state === "degraded" || cron.last_status === "error") {
+    return (
+      <div className="text-xs text-red-300">
+        Scheduler degraded · {cron.schedule}
+        {cron.last_error ? ` · ${cron.last_error}` : ""}
+      </div>
+    );
+  }
+
   if (!cron.enabled) {
     return <div className="text-xs text-amber-300">Scheduler paused · {cron.schedule}</div>;
   }
 
   if (!nextRun) {
     return (
-      <div className={`text-xs ${cron.state === "degraded" ? "text-red-300" : "text-gray-400"}`}>
+      <div className="text-xs text-gray-400">
         Scheduler {cron.state} · {cron.schedule}
-        {cron.last_status === "error" && cron.last_error ? ` · ${cron.last_error}` : ""}
       </div>
     );
   }

@@ -2,6 +2,7 @@ import { isLocalAuthDisabled } from "@/lib/auth/local";
 import { query } from "@/lib/db/postgres";
 import { createClient } from "@/lib/supabase/server";
 import CronsClient from "@/components/crons/CronsClient";
+import { SchedulerToggle } from "@/components/SchedulerToggle";
 
 type CronRow = {
   id: string;
@@ -43,6 +44,9 @@ export default async function CronsPage() {
         <p className="mt-2 text-gray-400">
           Monitor scheduled jobs and cron health.
         </p>
+        <div className="mt-6">
+          <SchedulerToggle />
+        </div>
         <CronsClient
           crons={(cronsRes.rows ?? []) as CronRow[]}
           logs={(logsRes.rows ?? []) as CronLog[]}
@@ -75,6 +79,9 @@ export default async function CronsPage() {
       <p className="mt-2 text-gray-400">
         Monitor scheduled jobs and cron health.
       </p>
+      <div className="mt-6">
+        <SchedulerToggle />
+      </div>
       <CronsClient
         crons={(cronsResult.data ?? []) as CronRow[]}
         logs={(logsResult.data ?? []) as CronLog[]}

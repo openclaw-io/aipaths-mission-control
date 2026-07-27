@@ -59,22 +59,52 @@ export function parseSchedulerPatch(body: unknown): SchedulerPatch {
   return patch;
 }
 
-function responseInteger(value: unknown, fallback: number, min: number, max: number) {
+export type SchedulerConfigValidation = {
+  valid: boolean;
+  errors: string[];
+  enabled: boolean | null;
+  max_concurrent: number | null;
+  daily_budget_usd: number | null;
+  schedule_minutes: number | null;
+};
+
+function persistedInteger(value: unknown, field: string, min: number, max: number, errors: string[]) {
   try {
-    return parseInteger(value, "scheduler config value", min, max);
-  } catch {
-    return fallback;
+    return parseInteger(value, field, min, max);
+  } catch (error) {
+    errors.push(error instanceof Error ? error.message : `${field} is invalid`);
+    return null;
   }
+}
+
+/** Validate all canonical controls without substituting operational defaults. */
+export function inspectSchedulerConfigRows(rows: SchedulerConfigRow[]): SchedulerConfigValidation {
+  const values = Object.fromEntries(rows.map(({ key, value }) => [key, value]));
+  const errors: string[] = [];
+
+  let enabled: boolean | null = null;
+  if (values.enabled === "true") enabled = true;
+  else if (values.enabled === "false") enabled = false;
+  else errors.push('enabled must be exactly "true" or "false"');
+
+  const maxConcurrent = persistedInteger(values.max_concurrent, "max_concurrent", 1, 10, errors);
+  const dailyBudget = persistedInteger(values.daily_budget_usd, "daily_budget_usd", 1, 100_000, errors);
+  const scheduleMinutes = persistedInteger(values.schedule_minutes, "schedule_minutes", 1, 1440, errors);
+  if (scheduleMinutes !== null && scheduleMinutes !== LAUNCHER_SCHEDULE_MINUTES) {
+    errors.push(`schedule_minutes must match launchd StartInterval (${LAUNCHER_SCHEDULE_MINUTES})`);
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+    enabled,
+    max_concurrent: maxConcurrent,
+    daily_budget_usd: dailyBudget,
+    schedule_minutes: scheduleMinutes,
+  };
 }
 
 /** Typed API representation used by the UI; persisted values remain text. */
 export function buildSchedulerConfigResponse(rows: SchedulerConfigRow[]) {
-  const values = Object.fromEntries(rows.map(({ key, value }) => [key, value]));
-  return {
-    enabled: values.enabled === "true",
-    max_concurrent: responseInteger(values.max_concurrent, 2, 1, 10),
-    daily_budget_usd: responseInteger(values.daily_budget_usd, 50, 1, 100_000),
-    // The launcher is the execution authority. Never advertise a corrupt DB cadence.
-    schedule_minutes: LAUNCHER_SCHEDULE_MINUTES,
-  };
+  return inspectSchedulerConfigRows(rows);
 }

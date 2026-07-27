@@ -54,6 +54,33 @@ test("status never advertises a config cadence that disagrees with the launcher"
   assert.equal(LAUNCHER_SCHEDULE_MINUTES, 5);
 });
 
+test("status degrades for every missing, malformed, or out-of-range canonical control", () => {
+  const invalidCases = [
+    ["max_concurrent", undefined],
+    ["max_concurrent", "0"],
+    ["max_concurrent", "11"],
+    ["max_concurrent", "2.5"],
+    ["daily_budget_usd", undefined],
+    ["daily_budget_usd", "0"],
+    ["daily_budget_usd", "100001"],
+    ["daily_budget_usd", "1.5"],
+    ["schedule_minutes", undefined],
+  ];
+
+  for (const [key, value] of invalidCases) {
+    const rows = validRows.filter((row) => row.key !== key);
+    if (value !== undefined) rows.push({ key, value });
+    const status = buildWorkItemSchedulerStatus(rows, {
+      last_run_at: "2026-07-27T12:00:00.000Z",
+      last_status: "ok",
+      last_error: null,
+      rows_affected: 0,
+    });
+    assert.equal(status.state, "degraded", `${key}=${String(value)} must degrade`);
+    assert.match(status.last_error || "", new RegExp(key));
+  }
+});
+
 test("an idle interval job remains scheduled between successful runs", () => {
   const status = buildWorkItemSchedulerStatus(validRows, {
     last_run_at: "2026-07-27T12:00:00.000Z",
@@ -119,18 +146,28 @@ test("scheduler PATCH is allowlisted, normalized, and range checked before write
   }
 });
 
-test("scheduler GET presents typed values and keeps schedule_minutes an integer", () => {
+test("scheduler GET presents typed valid values without defaults", () => {
   assert.deepEqual(buildSchedulerConfigResponse(validRows), {
+    valid: true,
+    errors: [],
     enabled: true,
     max_concurrent: 2,
     daily_budget_usd: 50,
     schedule_minutes: 5,
   });
+});
 
+test("scheduler GET reports corruption and never invents operational defaults", () => {
   const invalid = buildSchedulerConfigResponse([{ key: "enabled", value: "yes" }]);
-  assert.equal(invalid.enabled, false);
-  assert.equal(Number.isInteger(invalid.schedule_minutes), true);
-  assert.equal(invalid.schedule_minutes, 5);
+  assert.equal(invalid.valid, false);
+  assert.equal(invalid.enabled, null);
+  assert.equal(invalid.max_concurrent, null);
+  assert.equal(invalid.daily_budget_usd, null);
+  assert.equal(invalid.schedule_minutes, null);
+  assert.match(invalid.errors.join(" "), /enabled/i);
+  assert.match(invalid.errors.join(" "), /max_concurrent/i);
+  assert.match(invalid.errors.join(" "), /daily_budget_usd/i);
+  assert.match(invalid.errors.join(" "), /schedule_minutes/i);
 });
 
 test("migration safely normalizes historical invalid enabled and seeds launcher cadence", () => {
@@ -182,4 +219,23 @@ test("queue UI consumes the integer schedule_minutes instead of reparsing displa
   assert.match(source, /schedule_minutes:\s*number/);
   assert.match(source, /data\.schedule_minutes/);
   assert.doesNotMatch(source, /function scheduleMinutes\(schedule: string\)/);
+});
+
+test("queue UI renders degraded/error state before paused state", () => {
+  const source = readFileSync(new URL("../../../src/components/loops/QueueSchedulerStatus.tsx", import.meta.url), "utf8");
+  const degradedGuard = source.indexOf('cron.state === "degraded"');
+  const errorGuard = source.indexOf('cron.last_status === "error"');
+  const pausedGuard = source.indexOf("!cron.enabled");
+  assert.ok(degradedGuard >= 0 && degradedGuard < pausedGuard, "degraded must be checked before paused");
+  assert.ok(errorGuard >= 0 && errorGuard < pausedGuard, "error must be checked before paused");
+});
+
+test("scheduler config UI exposes API corruption as degradation instead of defaults", () => {
+  const source = readFileSync(new URL("../../../src/components/SchedulerToggle.tsx", import.meta.url), "utf8");
+  const cronsPage = readFileSync(new URL("../../../src/app/crons/page.tsx", import.meta.url), "utf8");
+  assert.match(source, /config\.valid\s*!==\s*true/);
+  assert.match(source, /Scheduler config degraded/);
+  assert.doesNotMatch(source, /config\.max_concurrent\s*\|\|\s*2/);
+  assert.doesNotMatch(source, /config\.daily_budget_usd\s*\|\|\s*50/);
+  assert.match(cronsPage, /<SchedulerToggle\s*\/>/);
 });

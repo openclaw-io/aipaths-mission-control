@@ -4,21 +4,29 @@ import { useEffect, useState } from "react";
 
 export function SchedulerToggle() {
   const [enabled, setEnabled] = useState<boolean | null>(null);
-  const [maxConcurrent, setMaxConcurrent] = useState("2");
-  const [dailyBudget, setDailyBudget] = useState("50");
-  const [scheduleMinutes, setScheduleMinutes] = useState(5);
+  const [maxConcurrent, setMaxConcurrent] = useState("");
+  const [dailyBudget, setDailyBudget] = useState("");
+  const [scheduleMinutes, setScheduleMinutes] = useState<number | null>(null);
+  const [configError, setConfigError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     fetch("/api/scheduler")
-      .then((r) => r.json())
-      .then((config) => {
-        setEnabled(config.enabled === true);
-        setMaxConcurrent(String(config.max_concurrent || 2));
-        setDailyBudget(String(config.daily_budget_usd || 50));
-        if (Number.isInteger(config.schedule_minutes)) setScheduleMinutes(config.schedule_minutes);
+      .then(async (response) => {
+        const config = await response.json();
+        if (!response.ok) throw new Error(config.error || "Scheduler config read failed");
+        if (config.valid !== true) {
+          const errors = Array.isArray(config.errors) ? config.errors.join("; ") : "invalid canonical controls";
+          throw new Error(errors);
+        }
+        setEnabled(config.enabled);
+        setMaxConcurrent(String(config.max_concurrent));
+        setDailyBudget(String(config.daily_budget_usd));
+        setScheduleMinutes(config.schedule_minutes);
       })
-      .catch(() => {});
+      .catch((error) => {
+        setConfigError(error instanceof Error ? error.message : "Scheduler config read failed");
+      });
   }, []);
 
   async function toggle() {
@@ -41,6 +49,15 @@ export function SchedulerToggle() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ [key]: parsed }),
     });
+  }
+
+  if (configError) {
+    return (
+      <div className="rounded-xl border border-red-900/60 bg-red-950/20 p-5">
+        <h3 className="text-sm font-semibold text-red-300">⚠ Scheduler config degraded</h3>
+        <p className="mt-2 text-xs text-red-200">{configError}</p>
+      </div>
+    );
   }
 
   if (enabled === null) return null;
