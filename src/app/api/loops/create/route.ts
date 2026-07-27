@@ -66,9 +66,9 @@ export async function POST(request: NextRequest) {
 
   const actorIdentity = String(user.email || user.id || "local@mission-control");
   const body = await request.json().catch(() => ({}));
-  const input = typeof body?.input === "string" ? body.input.trim() : "";
+  const input = typeof body?.input === "string" ? body.input : "";
 
-  if (!input) {
+  if (!input.trim()) {
     return NextResponse.json({ error: "Loop input is required" }, { status: 400 });
   }
 
@@ -98,7 +98,7 @@ export async function POST(request: NextRequest) {
         input,
         input,
         input,
-        JSON.stringify({ created_from: 'quick_loop_box', create_dedupe_key: dedupeKey }),
+        JSON.stringify({ created_from: 'quick_loop_box', create_dedupe_key: dedupeKey, original_input: input }),
         JSON.stringify([]),
         JSON.stringify([]),
         JSON.stringify({
@@ -143,6 +143,7 @@ export async function POST(request: NextRequest) {
       owner_agent: "systems",
       metadata: {
         created_from: "quick_loop_box",
+        original_input: input,
       },
       plan: [],
       clarification_questions: [],

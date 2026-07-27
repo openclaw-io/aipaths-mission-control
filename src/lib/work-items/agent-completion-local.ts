@@ -27,6 +27,32 @@ const WORK_ITEM_COLUMNS = `
   payload
 `;
 
+function jsonValuesEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left)
+      && Array.isArray(right)
+      && left.length === right.length
+      && left.every((value, index) => jsonValuesEqual(value, right[index]));
+  }
+  if (!left || !right || typeof left !== "object" || typeof right !== "object") return false;
+  const leftRecord = left as JsonRecord;
+  const rightRecord = right as JsonRecord;
+  const leftKeys = Object.keys(leftRecord).sort();
+  const rightKeys = Object.keys(rightRecord).sort();
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every((key, index) => key === rightKeys[index] && jsonValuesEqual(leftRecord[key], rightRecord[key]));
+}
+
+function scheduledValuesEqual(left: unknown, right: string | null) {
+  if (left === null || left === undefined || left === "") return right === null;
+  if (right === null) return false;
+  const leftTime = new Date(left as string | number | Date).getTime();
+  const rightTime = new Date(right).getTime();
+  if (Number.isFinite(leftTime) && Number.isFinite(rightTime)) return leftTime === rightTime;
+  return String(left) === right;
+}
+
 export async function patchAgentWorkItemWithCompletion(id: string, body: JsonRecord) {
   // Resolve and fetch the publication URL before opening a transaction. Once
   // locked, orchestration rebuilds this request and rejects stale evidence.
@@ -66,9 +92,20 @@ export async function patchAgentWorkItemWithCompletion(id: string, body: JsonRec
   }
 
   return withTransaction(async (client) => {
-    // Serialize concurrent completion retries. The work-item update, pipeline
-    // completion effects, generated work items/maps, and event log commit or
-    // roll back as one local Postgres transaction.
+    // All Loop completion/rework transactions lock Loop -> work item. Looking
+    // up the relation does not lock either row; taking the Loop lock first
+    // prevents an inversion with the review/request_changes path.
+    await client.query(
+      `SELECT l.id
+         FROM public.loop_work_items lwi
+         INNER JOIN public.loops l ON l.id = lwi.loop_id
+        WHERE lwi.work_item_id = $1
+          AND lwi.relation_type = 'primary_execution'
+        LIMIT 1
+        FOR UPDATE OF l`,
+      [id],
+    );
+
     const existingResult = await client.query(
       "SELECT * FROM public.work_items WHERE id = $1 LIMIT 1 FOR UPDATE",
       [id],
@@ -77,6 +114,23 @@ export async function patchAgentWorkItemWithCompletion(id: string, body: JsonRec
     if (!existing) return null;
 
     const status = typeof body.status === "string" ? body.status : null;
+    const existingPayload = (existing.payload || {}) as JsonRecord;
+    const terminalStatuses = new Set(["done", "failed", "canceled"]);
+    const expectedAttempt = typeof existingPayload.execution_attempt_id === "string"
+      ? existingPayload.execution_attempt_id
+      : null;
+    const suppliedAttempt = typeof body.execution_attempt_id === "string"
+      ? body.execution_attempt_id
+      : null;
+
+    // Terminal rows are immutable from the agent endpoint. The sole accepted
+    // replay is the identical terminal state for the current attempt, and it
+    // must be a true no-op. Human review/rework is the only reopening path.
+    if (terminalStatuses.has(existing.status)) {
+      if (!status || status !== existing.status) throw new Error("terminal_status_conflict");
+      if (expectedAttempt && suppliedAttempt !== expectedAttempt) throw new Error("stale_execution_attempt");
+      return normalizeRow(existing);
+    }
     const scheduledFor = typeof body.scheduled_for === "string" || body.scheduled_for === null
       ? body.scheduled_for
       : undefined;
@@ -87,17 +141,20 @@ export async function patchAgentWorkItemWithCompletion(id: string, body: JsonRec
       ? body.payload_increment as JsonRecord
       : null;
 
-    const updates: Record<string, unknown> = { updated_at: new Date() };
-    if (status) updates.status = status;
-    if (status === "ready") {
+    const completionTime = new Date();
+    const updates: Record<string, unknown> = {};
+    if (status && status !== existing.status) updates.status = status;
+    if (status === "ready" && existing.status !== "ready") {
       updates.started_at = null;
       updates.completed_at = null;
     }
-    if (status === "in_progress") updates.started_at = new Date();
-    if ((status === "done" || status === "failed") && existing.status !== status) {
-      updates.completed_at = new Date();
+    if (status === "in_progress" && existing.status !== "in_progress") updates.started_at = completionTime;
+    if ((status === "done" || status === "failed" || status === "canceled") && existing.status !== status) {
+      updates.completed_at = completionTime;
     }
-    if (scheduledFor !== undefined) updates.scheduled_for = scheduledFor;
+    if (scheduledFor !== undefined && !scheduledValuesEqual(existing.scheduled_for, scheduledFor)) {
+      updates.scheduled_for = scheduledFor;
+    }
     if (body.result && !(status === "done" && existing.status === "done")) {
       updates.instruction = `${existing.instruction || ""}\n\nResult:\n${String(body.result)}`.trim();
     }
@@ -113,7 +170,38 @@ export async function patchAgentWorkItemWithCompletion(id: string, body: JsonRec
       }
       nextPayload = incrementedPayload;
     }
-    if (nextPayload) updates.payload = nextPayload;
+    if (status === "done" && existing.status !== "done") {
+      nextPayload = {
+        ...(existing.payload || {}),
+        ...(nextPayload || {}),
+        ...(body.result !== undefined ? { result: body.result } : {}),
+        dispatch_state: "completed",
+        dispatch_completed_at: completionTime.toISOString(),
+      };
+    } else if (status === "failed" && existing.status !== "failed") {
+      nextPayload = {
+        ...(existing.payload || {}),
+        ...(nextPayload || {}),
+        dispatch_state: "failed",
+        dispatch_completed_at: completionTime.toISOString(),
+      };
+    } else if (status === "canceled" && existing.status !== "canceled") {
+      nextPayload = {
+        ...(existing.payload || {}),
+        ...(nextPayload || {}),
+        dispatch_state: "canceled",
+        dispatch_completed_at: completionTime.toISOString(),
+      };
+    }
+    if (nextPayload && !jsonValuesEqual(nextPayload, existing.payload || {})) updates.payload = nextPayload;
+
+    // execution_attempt_id is a concurrency token, not a mutation by itself.
+    // Reject empty and semantic no-ops before touching updated_at or event_log.
+    if (Object.keys(updates).length === 0) throw new Error("empty_work_item_patch");
+    if (expectedAttempt && suppliedAttempt !== expectedAttempt) {
+      throw new Error("stale_execution_attempt");
+    }
+    updates.updated_at = completionTime;
 
     const keys = Object.keys(updates);
     const values = keys.map((key) => updates[key]);

@@ -1,13 +1,9 @@
+import { randomUUID } from "node:crypto";
 import { NextResponse, type NextRequest } from "next/server";
 import { getLocalMissionControlUser, isLocalAuthDisabled } from "@/lib/auth/local";
 import { withTransaction } from "@/lib/db/postgres";
 import { createClient } from "@/lib/supabase/server";
-import { createServiceClient } from "@/lib/supabase/admin";
-import {
-  getPrimaryExecutionWorkItem,
-  isPrimaryExecutionOpen,
-  reconcileLoopStatusWithPrimaryExecution,
-} from "@/lib/loops/lifecycle";
+import { buildLoopReworkInstruction } from "@/lib/loops/execution-instruction";
 
 export const dynamic = "force-dynamic";
 
@@ -45,6 +41,14 @@ export async function POST(
     return NextResponse.json({ error: "Invalid review action" }, { status: 400 });
   }
 
+  // A Loop review transition can update the Loop, event history and primary
+  // execution together. Supabase REST calls cannot make those writes atomic,
+  // so cloud mode is deliberately unavailable instead of claiming partial
+  // success. Local Postgres below is the sole supported write architecture.
+  if (!useLocalMode) {
+    return NextResponse.json({ error: "cloud_loop_review_writes_not_supported" }, { status: 503 });
+  }
+
   const now = new Date().toISOString();
 
   if (useLocalMode) {
@@ -54,8 +58,14 @@ export async function POST(
       name: string | null;
       summary: string | null;
       description: string | null;
-      plan: unknown[] | null;
+      target_outcome: string | null;
+      plan: Array<{ title?: string | null; status?: string | null; notes?: string | null }> | null;
       metadata: Record<string, unknown> | null;
+      approval_scope: {
+        allowed_actions?: string[] | null;
+        forbidden_actions?: string[] | null;
+        notes?: string | null;
+      } | null;
       owner_agent: string | null;
     };
     type LocalPrimaryExecution = {
@@ -66,7 +76,7 @@ export async function POST(
 
     const localResult = await withTransaction(async (client) => {
       const loopRes = await client.query<LocalLoop>(
-        `select id, status, name, summary, description, plan, metadata, owner_agent
+        `select id, status, name, summary, description, target_outcome, plan, metadata, approval_scope, owner_agent
            from loops
           where id = $1
           limit 1
@@ -89,36 +99,6 @@ export async function POST(
       );
       const primaryExecution = primaryRes.rows[0] || null;
 
-      if (transition.nextStatus === "completed" && primaryExecution && isPrimaryExecutionOpen(primaryExecution.status)) {
-        if (loop.status !== "in_progress") {
-          await client.query(
-            `update loops set status = 'in_progress', updated_at = $1 where id = $2`,
-            [now, id],
-          );
-          await client.query(
-            `insert into loop_events (loop_id, event_type, from_status, to_status, actor, payload, created_at)
-             values ($1, 'loop.lifecycle_reconciled', $2, 'in_progress', $3, $4::jsonb, $5)`,
-            [
-              id,
-              loop.status,
-              actorIdentity,
-              JSON.stringify({
-                reason: "review_completion_blocked_by_open_primary_execution",
-                relation_type: "primary_execution",
-                work_item_id: primaryExecution.work_item_id,
-                work_item_status: primaryExecution.status,
-              }),
-              now,
-            ],
-          );
-        }
-        return {
-          kind: "primary_open" as const,
-          workItemId: primaryExecution.work_item_id,
-          workItemStatus: primaryExecution.status,
-        };
-      }
-
       const loopMetadata = (loop.metadata || {}) as Record<string, unknown>;
       const reviewHistory = Array.isArray(loopMetadata.review_history)
         ? loopMetadata.review_history
@@ -135,6 +115,26 @@ export async function POST(
 
       if (isReplay) {
         return { kind: "success" as const, workItemId: null, ownerAgent: loop.owner_agent };
+      }
+
+      // Exact review replays are valid after the first request has already
+      // changed both source rows. Any genuinely new action must still satisfy
+      // the source-state matrix below.
+      if (action === "approve_deliverable" || action === "request_changes") {
+        if (loop.status !== "in_review") {
+          return { kind: "invalid_transition" as const, error: "invalid_review_state" };
+        }
+        if (!primaryExecution) {
+          return { kind: "invalid_transition" as const, error: "primary_execution_missing" };
+        }
+        if (primaryExecution.status !== "done") {
+          return {
+            kind: "invalid_transition" as const,
+            error: "primary_execution_not_done",
+            workItemId: primaryExecution.work_item_id,
+            workItemStatus: primaryExecution.status,
+          };
+        }
       }
 
       const metadata = {
@@ -158,22 +158,7 @@ export async function POST(
       let workItemId: string | null = null;
       if (action === "request_changes" && primaryExecution) {
         workItemId = primaryExecution.work_item_id;
-        const reviewInstruction = [
-          `Loop: ${loop.name || id}`,
-          loop.summary ? `Summary: ${loop.summary}` : null,
-          loop.description ? `Description: ${loop.description}` : null,
-          Array.isArray(loop.plan) && loop.plan.length
-            ? `Current plan:\n${loop.plan.map((step: unknown, index: number) => {
-                const planStep = step && typeof step === "object" && !Array.isArray(step) ? step as { title?: unknown } : {};
-                return `- ${index + 1}. ${typeof planStep.title === "string" && planStep.title.trim() ? planStep.title : "Untitled step"}`;
-              }).join("\n")}`
-            : null,
-          "",
-          "Review requested changes:",
-          feedback || "No explicit feedback provided. Rework the deliverable based on review comments and produce an updated final output.",
-          "",
-          "Important: produce a fresh updated deliverable, and persist the final answer in payload.result/output/summary when completing the work item.",
-        ].filter(Boolean).join("\n");
+        const reviewInstruction = buildLoopReworkInstruction(loop, feedback, id);
         const existingWorkPayload = (primaryExecution.payload || {}) as Record<string, unknown>;
         const loopFeedbackHistory = Array.isArray(loopMetadata.latest_deliverable_feedback_history)
           ? loopMetadata.latest_deliverable_feedback_history
@@ -181,17 +166,42 @@ export async function POST(
         const priorReviewFeedback = Array.isArray(existingWorkPayload.prior_review_feedback)
           ? existingWorkPayload.prior_review_feedback
           : loopFeedbackHistory;
-        const workPayload = {
-          ...existingWorkPayload,
+        const workPayload: Record<string, unknown> = { ...existingWorkPayload };
+        for (const key of [
+          "dispatch_session_id",
+          "dispatch_session_key",
+          "dispatch_session_started_at",
+          "dispatch_wake_mode",
+          "dispatch_cron_job_id",
+          "dispatch_cron_run_id",
+          "dispatch_completed_at",
+          "dispatch_failure_reason",
+          "dispatch_retry_scheduled_for",
+          "dispatch_escalation",
+          "claimed_at",
+          "claimed_by",
+          "error",
+        ]) {
+          delete workPayload[key];
+        }
+        const currentGeneration = Number(existingWorkPayload.execution_generation);
+        Object.assign(workPayload, {
           review_feedback: feedback || null,
           rework_requested_at: now,
           rework_requested_by: actorIdentity,
           prior_review_feedback: priorReviewFeedback,
-        };
+          execution_attempt_id: randomUUID(),
+          execution_generation: Number.isInteger(currentGeneration) && currentGeneration >= 0
+            ? currentGeneration + 1
+            : 1,
+          dispatch_state: "ready_for_rework",
+          dispatch_attempts: 0,
+          wake_failure_count: 0,
+        });
 
         await client.query(
           `update work_items
-              set status = 'ready', updated_at = $1, completed_at = null, instruction = $2, payload = $3::jsonb
+              set status = 'ready', updated_at = $1, started_at = null, completed_at = null, instruction = $2, payload = $3::jsonb
             where id = $4`,
           [now, reviewInstruction, JSON.stringify(workPayload), workItemId],
         );
@@ -203,9 +213,14 @@ export async function POST(
     if (localResult.kind === "not_found") {
       return NextResponse.json({ error: "Loop not found" }, { status: 404 });
     }
-    if (localResult.kind === "primary_open") {
+    if (localResult.kind === "invalid_transition") {
       return NextResponse.json(
-        { error: "primary_execution_still_open", workItemId: localResult.workItemId, workItemStatus: localResult.workItemStatus },
+        {
+          error: localResult.error,
+          ...("workItemId" in localResult
+            ? { workItemId: localResult.workItemId, workItemStatus: localResult.workItemStatus }
+            : {}),
+        },
         { status: 409 },
       );
     }
@@ -231,155 +246,7 @@ export async function POST(
     return NextResponse.json({ ok: true, id, status: transition.nextStatus });
   }
 
-  const supabase = createServiceClient();
-  const { data: loop, error: loadError } = await supabase
-    .from("loops")
-    .select("id, status, name, summary, description, plan, metadata, owner_agent")
-    .eq("id", id)
-    .maybeSingle();
-
-  if (loadError) {
-    return NextResponse.json({ error: loadError.message }, { status: 500 });
-  }
-
-  if (!loop) {
-    return NextResponse.json({ error: "Loop not found" }, { status: 404 });
-  }
-
-  if (transition.nextStatus === "completed") {
-    const primaryExecution = await getPrimaryExecutionWorkItem(supabase, id);
-
-    if (primaryExecution && isPrimaryExecutionOpen(primaryExecution.status)) {
-      await reconcileLoopStatusWithPrimaryExecution(supabase, {
-        loopId: id,
-        loopStatus: loop.status,
-        primaryExecution,
-        actor: actorIdentity,
-        reason: "review_completion_blocked_by_open_primary_execution",
-        now,
-      });
-
-      return NextResponse.json(
-        {
-          error: "primary_execution_still_open",
-          workItemId: primaryExecution.workItemId,
-          workItemStatus: primaryExecution.status,
-        },
-        { status: 409 }
-      );
-    }
-  }
-
-  const metadata = {
-    ...((loop.metadata || {}) as Record<string, unknown>),
-    review_history: [
-      ...((((loop.metadata || {}) as Record<string, unknown>).review_history as unknown[]) || []),
-      {
-        action,
-        feedback: feedback || null,
-        acted_at: now,
-        acted_by: actorIdentity,
-      },
-    ],
-  };
-
-  const updates: Record<string, unknown> = {
-    status: transition.nextStatus,
-    metadata,
-    updated_at: now,
-  };
-
-  if (transition.nextStatus === "completed") {
-    updates.last_completed_at = now;
-  }
-
-  const { error: updateError } = await supabase
-    .from("loops")
-    .update(updates)
-    .eq("id", id);
-
-  if (updateError) {
-    return NextResponse.json({ error: updateError.message }, { status: 500 });
-  }
-
-  const { error: eventError } = await supabase.from("loop_events").insert({
-    loop_id: id,
-    event_type: transition.eventType,
-    from_status: loop.status,
-    to_status: transition.nextStatus,
-    actor: actorIdentity,
-    payload: {
-      action,
-      feedback: feedback || null,
-    },
-  });
-
-  if (eventError) {
-    return NextResponse.json({ error: eventError.message }, { status: 500 });
-  }
-
-  if (action === "request_changes") {
-    const { data: links } = await supabase
-      .from("loop_work_items")
-      .select("work_item_id")
-      .eq("loop_id", id)
-      .eq("relation_type", "primary_execution")
-      .limit(1);
-
-    const workItemId = links?.[0]?.work_item_id;
-    if (workItemId) {
-      const existingPayload = (((loop.metadata || {}) as Record<string, unknown>).latest_deliverable_feedback_history as unknown[]) || [];
-      const reviewInstruction = [
-        `Loop: ${loop.name || id}`,
-        loop.summary ? `Summary: ${loop.summary}` : null,
-        loop.description ? `Description: ${loop.description}` : null,
-        Array.isArray(loop.plan) && loop.plan.length
-          ? `Current plan:\n${loop.plan.map((step: unknown, index: number) => {
-              const planStep = step && typeof step === "object" && !Array.isArray(step) ? step as { title?: unknown } : {};
-              return `- ${index + 1}. ${typeof planStep.title === "string" && planStep.title.trim() ? planStep.title : "Untitled step"}`;
-            }).join("\n")}`
-          : null,
-        "",
-        "Review requested changes:",
-        feedback || "No explicit feedback provided. Rework the deliverable based on review comments and produce an updated final output.",
-        "",
-        "Important: produce a fresh updated deliverable, and persist the final answer in payload.result/output/summary when completing the work item.",
-      ].filter(Boolean).join("\n");
-
-      await supabase
-        .from("work_items")
-        .update({
-          status: "ready",
-          updated_at: now,
-          completed_at: null,
-          instruction: reviewInstruction,
-          payload: {
-            review_feedback: feedback || null,
-            rework_requested_at: now,
-            rework_requested_by: actorIdentity,
-            prior_review_feedback: existingPayload,
-          },
-        })
-        .eq("id", workItemId);
-
-      try {
-        await fetch("http://127.0.0.1:3001/api/work-items/notify", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${process.env.AGENT_API_KEY}`,
-          },
-          body: JSON.stringify({
-            workItemId,
-            agent: loop.owner_agent,
-            action: "unblocked",
-          }),
-        });
-      } catch (error) {
-        console.error("[loop-review] notify on request_changes failed:", error);
-      }
-    }
-  }
-
-  return NextResponse.json({ ok: true, id, status: transition.nextStatus });
+  // Unreachable because cloud mode returned fail-closed above. Keep a final
+  // defensive response if the local-mode predicate ever stops being stable.
+  return NextResponse.json({ error: "cloud_loop_review_writes_not_supported" }, { status: 503 });
 }

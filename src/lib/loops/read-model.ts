@@ -5,15 +5,12 @@ import { supabaseAdmin } from "@/lib/supabase/admin";
 import {
   getLoopStatusForPrimaryExecution,
   getPrimaryExecutionWorkItem,
-  isPrimaryExecutionOpen,
   listPrimaryExecutionWorkItems,
-  reconcileLoopStatusWithPrimaryExecution,
   type PrimaryExecutionWorkItem,
 } from "@/lib/loops/lifecycle";
 import {
   getPrimaryExecutionWorkItemLocal,
   listPrimaryExecutionWorkItemsLocal,
-  reconcileLoopStatusWithPrimaryExecutionLocal,
 } from "@/lib/loops/lifecycle-local";
 
 export type PlanStep = {
@@ -138,68 +135,11 @@ function hasOpenClarifications(loop: LoopRow): boolean {
   return (loop.clarification_questions || []).some((q) => q.status === "open");
 }
 
-function isReadyForApproval(loop: LoopRow): boolean {
-  if (loop.status !== "planning") return false;
-  if (hasOpenClarifications(loop)) return false;
-
-  const metadata = (loop.metadata || {}) as Record<string, unknown>;
-  const clarificationHistory = Array.isArray(metadata.clarification_history) ? metadata.clarification_history : [];
-  const latestClarificationText = clarificationHistory.length
-    ? String((clarificationHistory[clarificationHistory.length - 1] as Record<string, unknown>).response || "").toLowerCase()
-    : "";
-
-  if (
-    metadata.normalization_invalidated_at ||
-    metadata.manual_triage_reason ||
-    /desestim|cancel|descart|viejo|old/.test(latestClarificationText)
-  ) {
-    return false;
-  }
-
-  return (loop.plan || []).length > 0;
-}
-
-async function autoPromotePlanningLoops(rows: LoopRow[]) {
-  const ready = rows.filter(isReadyForApproval);
-  if (ready.length === 0) return;
-
-  const ids = ready.map((loop) => loop.id);
-  const now = new Date().toISOString();
-
-  const { error } = await supabaseAdmin
-    .from("loops")
-    .update({ status: "needs_approval", updated_at: now })
-    .in("id", ids)
-    .eq("status", "planning");
-
-  if (error) throw error;
-
-  const events = ready.map((loop) => ({
-    loop_id: loop.id,
-    event_type: "loop.ready_for_approval",
-    from_status: "planning",
-    to_status: "needs_approval",
-    actor: "system:auto",
-    payload: { source: "read_model_auto_promotion", guarded: true },
-  }));
-
-  const { error: eventError } = await supabaseAdmin.from("loop_events").insert(events);
-  if (eventError) throw eventError;
-
-  for (const loop of ready) {
-    loop.status = "needs_approval";
-  }
-}
-
 function deriveNeedsMyAttention(loop: LoopRow): boolean {
   if (["needs_clarification", "needs_approval", "blocked"].includes(loop.status)) {
     return true;
   }
   return hasOpenClarifications(loop);
-}
-
-function deriveReadyForApproval(loop: LoopRow): boolean {
-  return isReadyForApproval(loop);
 }
 
 function deriveReadyToRun(loop: LoopRow): boolean {
@@ -287,7 +227,7 @@ function extractDeliverableSummary(primaryExecution: PrimaryExecutionWorkItem | 
   return null;
 }
 
-async function reconcileLoopsWithPrimaryExecution(
+function deriveLoopStatusesFromPrimaryExecution(
   rows: LoopRow[],
   primaryExecutionByLoop: Map<string, PrimaryExecutionWorkItem>
 ) {
@@ -296,14 +236,6 @@ async function reconcileLoopsWithPrimaryExecution(
     const nextStatus = getLoopStatusForPrimaryExecution(loop.status, primaryExecution?.status);
 
     if (!nextStatus) continue;
-
-    await reconcileLoopStatusWithPrimaryExecution(supabaseAdmin, {
-      loopId: loop.id,
-      loopStatus: loop.status,
-      primaryExecution,
-      actor: "system:read_model",
-      reason: "read_model_primary_execution_sync",
-    });
 
     loop.status = nextStatus;
   }
@@ -318,21 +250,6 @@ export async function listLoopGalleryCards(): Promise<LoopGalleryCard[]> {
     );
 
     const rows = normalizeRows((loopsRes.rows as LoopRow[])).filter((loop) => !isArchivedFromMainList(loop));
-    const ready = rows.filter(isReadyForApproval);
-    if (ready.length) {
-      const ids = ready.map((loop) => loop.id);
-      const now = new Date().toISOString();
-      await query(`update loops set status = 'needs_approval', updated_at = $1 where id = any($2::uuid[]) and status = 'planning'`, [now, ids]);
-      for (const loop of ready) {
-        await query(
-          `insert into loop_events (loop_id, event_type, from_status, to_status, actor, payload, created_at)
-           values ($1, 'loop.ready_for_approval', 'planning', 'needs_approval', 'system:auto', $2::jsonb, $3)`,
-          [loop.id, JSON.stringify({ source: 'read_model_auto_promotion', guarded: true }), now],
-        );
-        loop.status = 'needs_approval';
-      }
-    }
-
     const loopIds = rows.map((p) => p.id);
     const [workLinksRes, primaryExecutionByLoop] = await Promise.all([
       loopIds.length ? query<{ loop_id: string }>(`select loop_id from loop_work_items`) : Promise.resolve({ rows: [] as { loop_id: string }[] }),
@@ -348,13 +265,6 @@ export async function listLoopGalleryCards(): Promise<LoopGalleryCard[]> {
       const primaryExecution = primaryExecutionByLoop.get(loop.id) || null;
       const nextStatus = getLoopStatusForPrimaryExecution(loop.status, primaryExecution?.status);
       if (nextStatus) {
-        await reconcileLoopStatusWithPrimaryExecutionLocal(query, {
-          loopId: loop.id,
-          loopStatus: loop.status,
-          primaryExecution,
-          actor: 'system:read_model',
-          reason: 'read_model_primary_execution_sync',
-        });
         loop.status = nextStatus;
       }
     }
@@ -393,7 +303,6 @@ export async function listLoopGalleryCards(): Promise<LoopGalleryCard[]> {
   if (error) throw error;
 
   const rows = ((loops || []) as LoopRow[]).filter((loop) => !isArchivedFromMainList(loop));
-  await autoPromotePlanningLoops(rows);
   const loopIds = rows.map((p) => p.id);
 
   const [workLinks, primaryExecutionByLoop] = await Promise.all([
@@ -411,7 +320,7 @@ export async function listLoopGalleryCards(): Promise<LoopGalleryCard[]> {
 
   const workCounts = countBy(workLinks.data as Array<{ loop_id: string }>);
 
-  await reconcileLoopsWithPrimaryExecution(rows, primaryExecutionByLoop);
+  deriveLoopStatusesFromPrimaryExecution(rows, primaryExecutionByLoop);
 
   return rows.map((loop) => {
     const { progressPercent, progressLabel } = deriveProgress(loop);
@@ -451,27 +360,9 @@ export async function getLoopDetail(loopId: string): Promise<LoopDetailPayload |
     const row = loopRes.rows[0] ? normalizeRows([loopRes.rows[0] as LoopRow])[0] : null;
     if (!row) return null;
 
-    if (isReadyForApproval(row)) {
-      const now = new Date().toISOString();
-      await query(`update loops set status = 'needs_approval', updated_at = $1 where id = $2 and status = 'planning'`, [now, loopId]);
-      await query(
-        `insert into loop_events (loop_id, event_type, from_status, to_status, actor, payload, created_at)
-         values ($1, 'loop.ready_for_approval', 'planning', 'needs_approval', 'system:auto', $2::jsonb, $3)`,
-        [loopId, JSON.stringify({ source: 'read_model_auto_promotion', guarded: true }), now],
-      );
-      row.status = 'needs_approval';
-    }
-
     const primaryExecution = await getPrimaryExecutionWorkItemLocal(loopId);
     const nextStatus = getLoopStatusForPrimaryExecution(row.status, primaryExecution?.status);
     if (nextStatus) {
-      await reconcileLoopStatusWithPrimaryExecutionLocal(query, {
-        loopId,
-        loopStatus: row.status,
-        primaryExecution,
-        actor: 'system:read_model',
-        reason: 'read_model_primary_execution_sync',
-      });
       row.status = nextStatus;
     }
 
@@ -546,22 +437,10 @@ export async function getLoopDetail(loopId: string): Promise<LoopDetailPayload |
 
   const row = loop as LoopRow;
 
-  if (isReadyForApproval(row)) {
-    await autoPromotePlanningLoops([row]);
-  }
-
   const primaryExecution = await getPrimaryExecutionWorkItem(supabaseAdmin, loopId);
   const nextStatus = getLoopStatusForPrimaryExecution(row.status, primaryExecution?.status);
 
   if (nextStatus) {
-    await reconcileLoopStatusWithPrimaryExecution(supabaseAdmin, {
-      loopId,
-      loopStatus: row.status,
-      primaryExecution,
-      actor: "system:read_model",
-      reason: "read_model_primary_execution_sync",
-    });
-
     row.status = nextStatus;
   }
 
