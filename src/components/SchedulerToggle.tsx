@@ -6,6 +6,7 @@ export function SchedulerToggle() {
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [maxConcurrent, setMaxConcurrent] = useState("2");
   const [dailyBudget, setDailyBudget] = useState("50");
+  const [scheduleMinutes, setScheduleMinutes] = useState("10");
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -15,6 +16,7 @@ export function SchedulerToggle() {
         setEnabled(config.enabled !== "false");
         setMaxConcurrent(config.max_concurrent || "2");
         setDailyBudget(config.daily_budget_usd || "50");
+        setScheduleMinutes(config.schedule_minutes || "10");
       })
       .catch(() => {});
   }, []);
@@ -88,7 +90,7 @@ export function SchedulerToggle() {
         </div>
         <div className="flex items-center gap-1.5">
           <span className="text-gray-500">Every:</span>
-          <span className="text-gray-400">10 min</span>
+          <span className="text-gray-400">{scheduleMinutes} min</span>
         </div>
       </div>
     </div>

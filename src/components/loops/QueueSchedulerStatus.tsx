@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 type CronRow = {
   cron_name: string;
   schedule: string;
+  state: "paused" | "scheduled" | "degraded";
   last_run_at: string | null;
   enabled: boolean;
   last_status?: string | null;
@@ -38,13 +39,14 @@ export function QueueSchedulerStatus() {
 
     async function load() {
       try {
-        const res = await fetch("/api/crons/work-item-scheduler/config");
+        const res = await fetch("/api/scheduler/status");
         if (!res.ok) return;
         const data = await res.json();
         if (!cancelled && data?.cron_name) {
           setCron({
             cron_name: data.cron_name,
             schedule: data.schedule,
+            state: data.state,
             last_run_at: data.last_run_at,
             enabled: data.enabled,
             last_status: data.last_status,
@@ -79,17 +81,23 @@ export function QueueSchedulerStatus() {
   }
 
   if (!cron.enabled) {
-    return <div className="text-xs text-amber-300">Scheduler paused</div>;
+    return <div className="text-xs text-amber-300">Scheduler paused · {cron.schedule}</div>;
   }
 
   if (!nextRun) {
-    return <div className="text-xs text-gray-400">Scheduler active</div>;
+    return (
+      <div className={`text-xs ${cron.state === "degraded" ? "text-red-300" : "text-gray-400"}`}>
+        Scheduler {cron.state} · {cron.schedule}
+        {cron.last_status === "error" && cron.last_error ? ` · ${cron.last_error}` : ""}
+      </div>
+    );
   }
 
   const remaining = nextRun - now;
 
   return (
     <div className="space-y-0.5 text-right text-xs text-gray-400">
+      <div>Scheduler {cron.state} · {cron.schedule}</div>
       <div>
         Next scheduler check in <span className="font-medium text-white">{remaining <= 0 ? "now" : formatCountdown(remaining)}</span>
       </div>

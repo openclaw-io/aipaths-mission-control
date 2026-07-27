@@ -89,6 +89,23 @@ ALTER TABLE public.cron_health ADD COLUMN IF NOT EXISTS config jsonb NOT NULL DE
 ALTER TABLE public.cron_health ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();
 ALTER TABLE public.cron_health ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
 
+INSERT INTO public.cron_health (
+  cron_name, schedule, description, category, enabled, last_status
+)
+VALUES (
+  'work-item-scheduler',
+  'every ' || COALESCE((SELECT value FROM public.scheduler_config WHERE key = 'schedule_minutes'), '10') || ' min',
+  'DB-native Mission Control work-item scheduler (interval job)',
+  'scheduled',
+  COALESCE((SELECT value::boolean FROM public.scheduler_config WHERE key = 'enabled'), true),
+  'unknown'
+)
+ON CONFLICT (cron_name) DO UPDATE SET
+  schedule = EXCLUDED.schedule,
+  description = EXCLUDED.description,
+  category = EXCLUDED.category,
+  enabled = EXCLUDED.enabled;
+
 CREATE INDEX IF NOT EXISTS idx_cron_health_name ON public.cron_health(cron_name);
 CREATE INDEX IF NOT EXISTS idx_cron_health_enabled_category ON public.cron_health(enabled, category);
 
