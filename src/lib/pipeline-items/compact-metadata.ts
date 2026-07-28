@@ -103,17 +103,21 @@ function nestedObject(value: unknown) {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
-function compactHero(row: Record<string, unknown>, prefix: "hero_image" | "cover_image") {
+function compactHero(
+  row: Record<string, unknown>,
+  prefix: "hero_image" | "cover_image",
+  nestedImage?: Record<string, unknown> | null,
+) {
   const image: Record<string, unknown> = {};
-  assignIfPresent(image, "url", row[`${prefix}_url`]);
-  assignIfPresent(image, "media_path", row[`${prefix}_media_path`]);
-  assignIfPresent(image, "local_path", row[`${prefix}_local_path`]);
-  assignIfPresent(image, "path", row[`${prefix}_path`]);
-  assignIfPresent(image, "status", row[`${prefix}_status`]);
-  assignIfPresent(image, "aspect_ratio", row[`${prefix}_aspect_ratio`]);
+  assignIfPresent(image, "url", row[`${prefix}_url`] ?? nestedImage?.url);
+  assignIfPresent(image, "media_path", row[`${prefix}_media_path`] ?? nestedImage?.media_path);
+  assignIfPresent(image, "local_path", row[`${prefix}_local_path`] ?? nestedImage?.local_path);
+  assignIfPresent(image, "path", row[`${prefix}_path`] ?? nestedImage?.path);
+  assignIfPresent(image, "status", row[`${prefix}_status`] ?? nestedImage?.status);
+  assignIfPresent(image, "aspect_ratio", row[`${prefix}_aspect_ratio`] ?? nestedImage?.aspect_ratio);
 
-  const width = numberOrUndefined(row[`${prefix}_width`]);
-  const height = numberOrUndefined(row[`${prefix}_height`]);
+  const width = numberOrUndefined(row[`${prefix}_width`] ?? nestedImage?.width);
+  const height = numberOrUndefined(row[`${prefix}_height`] ?? nestedImage?.height);
   if (width !== undefined) image.width = width;
   if (height !== undefined) image.height = height;
 
@@ -122,24 +126,32 @@ function compactHero(row: Record<string, unknown>, prefix: "hero_image" | "cover
 
 export function compactEditorialPipelineItem<T extends Record<string, unknown>>(row: T): T & { metadata: Record<string, unknown> | null } {
   const item = { ...row } as Record<string, unknown>;
+  const sourceMetadata = nestedObject(row.metadata) || {};
+  const sourceIntel = nestedObject(sourceMetadata.intel);
+  const sourceLocalization = nestedObject(sourceMetadata.localization);
+  const sourceLocalizationEn = nestedObject(sourceLocalization?.en);
+  const sourceFinalCheck = nestedObject(sourceMetadata.final_check);
   const metadata: Record<string, unknown> = {};
 
-  if (row.intel_enriched_item_id != null) {
-    metadata.intel = { enriched_item_id: row.intel_enriched_item_id };
+  const enrichedItemId = row.intel_enriched_item_id ?? sourceIntel?.enriched_item_id;
+  if (enrichedItemId != null) {
+    metadata.intel = { enriched_item_id: enrichedItemId };
   }
-  assignIfPresent(metadata, "draft_summary", row.draft_summary);
+  assignIfPresent(metadata, "draft_summary", row.draft_summary ?? sourceMetadata.draft_summary);
 
   const localization: Record<string, unknown> = {};
-  const enReady = booleanOrUndefined(row.localization_en_ready);
+  const enReady = booleanOrUndefined(row.localization_en_ready ?? sourceLocalization?.en_ready);
   if (enReady !== undefined) localization.en_ready = enReady;
-  if (row.localization_en_slug) localization.en = { slug: row.localization_en_slug };
+  const enSlug = row.localization_en_slug ?? sourceLocalizationEn?.slug;
+  if (enSlug) localization.en = { slug: enSlug };
   if (Object.keys(localization).length > 0) metadata.localization = localization;
 
-  const heroImage = compactHero(row, "hero_image");
-  const coverImage = compactHero(row, "cover_image");
+  const heroImage = compactHero(row, "hero_image", nestedObject(sourceMetadata.hero_image));
+  const coverImage = compactHero(row, "cover_image", nestedObject(sourceMetadata.cover_image));
   if (heroImage) metadata.hero_image = heroImage;
   if (coverImage) metadata.cover_image = coverImage;
-  if (row.final_check_status) metadata.final_check = { status: row.final_check_status };
+  const finalCheckStatus = row.final_check_status ?? sourceFinalCheck?.status;
+  if (finalCheckStatus) metadata.final_check = { status: finalCheckStatus };
 
   for (const key of EDITORIAL_KEYS) delete item[key];
   item.metadata = Object.keys(metadata).length > 0 ? metadata : null;
@@ -148,21 +160,22 @@ export function compactEditorialPipelineItem<T extends Record<string, unknown>>(
 
 export function compactCommunityPipelineItem<T extends Record<string, unknown>>(row: T): T & { metadata: Record<string, unknown> | null } {
   const item = { ...row } as Record<string, unknown>;
+  const sourceMetadata = nestedObject(row.metadata) || {};
   const metadata: Record<string, unknown> = {};
 
-  assignIfPresent(metadata, "kind", row.community_kind);
-  assignIfPresent(metadata, "channel", row.community_channel);
-  assignIfPresent(metadata, "intel_destination_key", row.intel_destination_key);
-  assignIfPresent(metadata, "destination_label", row.destination_label);
+  assignIfPresent(metadata, "kind", row.community_kind ?? sourceMetadata.kind);
+  assignIfPresent(metadata, "channel", row.community_channel ?? sourceMetadata.channel);
+  assignIfPresent(metadata, "intel_destination_key", row.intel_destination_key ?? sourceMetadata.intel_destination_key);
+  assignIfPresent(metadata, "destination_label", row.destination_label ?? sourceMetadata.destination_label);
 
   const objectFields: Array<[string, unknown]> = [
-    ["target", row.community_target],
-    ["copy", row.community_copy],
-    ["source", row.community_source],
-    ["legacy", row.community_legacy],
-    ["review", row.community_review],
-    ["runtime_feedback", row.community_runtime_feedback],
-    ["intel", row.community_intel],
+    ["target", row.community_target ?? sourceMetadata.target],
+    ["copy", row.community_copy ?? sourceMetadata.copy],
+    ["source", row.community_source ?? sourceMetadata.source],
+    ["legacy", row.community_legacy ?? sourceMetadata.legacy],
+    ["review", row.community_review ?? sourceMetadata.review],
+    ["runtime_feedback", row.community_runtime_feedback ?? sourceMetadata.runtime_feedback],
+    ["intel", row.community_intel ?? sourceMetadata.intel],
   ];
   for (const [key, value] of objectFields) {
     const objectValue = nestedObject(value);
