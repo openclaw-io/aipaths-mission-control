@@ -658,6 +658,7 @@ test("materialization creates an attempt identity and notify serializes it in ev
 
   const notifier = transpileModule(resolve(repoRoot, "src/app/api/work-items/notify/route.ts"), {
     "node:child_process": { spawn: () => { throw new Error("unexpected spawn"); } },
+    "node:crypto": { randomUUID: () => "00000000-0000-4000-8000-000000000001" },
     "next/server": { NextResponse: { json: (payload, init = {}) => ({ payload, status: init.status || 200 }) } },
     "@supabase/supabase-js": { createClient: () => { throw new Error("unexpected client"); } },
     "@/lib/agent-routing": { AGENT_ROUTING: {}, isRoutedAgent: () => false },

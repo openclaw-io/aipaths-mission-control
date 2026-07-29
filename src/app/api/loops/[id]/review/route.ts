@@ -195,39 +195,60 @@ export async function POST(
           where s.plan_revision_id=$1 order by t.id,r.id,wi.id for update of wi`,
         [loop.current_plan_revision_id],
       );
-      const taskRows = await client.query<{
-        id: string; task_status: string; stage_status: string; run_count: number; consistent_run_count: number;
-      }>(
-        `select t.id,t.status task_status,s.status stage_status,count(r.id)::int run_count,
-                count(r.id) filter (where r.status='succeeded' and r.run_role='implementation'
-                  and r.quality_cycle=1 and r.work_item_id is not null and r.execution_attempt_id is not null
-                  and wi.id=r.work_item_id and wi.loop_id=$2 and wi.source_type='loop' and wi.source_id=t.id::text
-                  and wi.status='done' and wi.payload->>'execution_attempt_id'=r.execution_attempt_id::text
-                  and wi.payload->>'plan_revision_id'=$1::text and wi.payload->>'plan_hash'=$3
-                  and lwi.loop_id=$2 and lwi.work_item_id=r.work_item_id
-                  and lwi.relation_type='task_execution')::int consistent_run_count
-           from loop_tasks t join loop_stages s on s.id=t.stage_id
-           left join loop_task_runs r on r.task_id=t.id
-           left join work_items wi on wi.id=r.work_item_id
-           left join loop_work_items lwi on lwi.work_item_id=r.work_item_id and lwi.relation_type='task_execution'
-          where s.plan_revision_id=$1::uuid group by t.id,t.status,s.status order by t.id`,
-        [loop.current_plan_revision_id, id, revision.content_hash],
+      await client.query(
+        `select review.id from loop_task_reviews review join loop_tasks t on t.id=review.task_id
+          join loop_stages s on s.id=t.stage_id where s.plan_revision_id=$1 order by t.id,review.id for update of review`,
+        [loop.current_plan_revision_id],
       );
-      const mapIntegrity = await client.query<{ mapping_count: number; active_count: number; extra_count: number }>(
+      const taskRows = await client.query<{
+        id: string; task_status: string; stage_status: string; latest_cycle: number | null; valid: boolean;
+      }>(
+        `select t.id,t.status task_status,s.status stage_status,impl.quality_cycle latest_cycle,
+                (impl.id is not null and impl.status='succeeded' and impl.artifact_sha is not null
+                 and impl.server_session_id is not null and wi.status='done'
+                 and wi.payload->>'execution_attempt_id'=impl.execution_attempt_id::text
+                 and wi.payload->>'runtime_contract'='fresh_review_v1'
+                 and wi.payload->>'run_role'='implementation'
+                 and wi.payload->>'plan_revision_id'=$1::text and wi.payload->>'plan_hash'=$2
+                 and review.status='approved' and review.reviewed_sha=impl.artifact_sha
+                 and review.reviewer_session_id is not null
+                 and review.reviewer_session_id<>impl.server_session_id
+                 and rr.status='succeeded' and rr.run_role='review'
+                 and rr.quality_cycle=impl.quality_cycle and rr.target_run_id=impl.id
+                 and rr.target_sha=impl.artifact_sha and rr.server_session_id=review.reviewer_session_id
+                 and rwi.status='done') valid
+           from loop_tasks t join loop_stages s on s.id=t.stage_id
+           left join lateral (
+             select candidate.* from loop_task_runs candidate where candidate.task_id=t.id and candidate.run_role='implementation'
+             order by candidate.quality_cycle desc,candidate.created_at desc,candidate.id desc limit 1
+           ) impl on true
+           left join work_items wi on wi.id=impl.work_item_id
+           left join loop_task_reviews review on review.task_run_id=impl.id and review.quality_cycle=impl.quality_cycle
+           left join loop_task_runs rr on rr.id=review.review_run_id and rr.task_id=t.id
+           left join work_items rwi on rwi.id=rr.work_item_id
+          where s.plan_revision_id=$1::uuid order by t.id`,
+        [loop.current_plan_revision_id, revision.content_hash],
+      );
+      const mapIntegrity = await client.query<{ active_runs: number; active_items: number; extra_count: number; missing_count: number }>(
         `select
-          (select count(*)::int from loop_work_items where loop_id=$2 and relation_type='task_execution') mapping_count,
           (select count(*)::int from loop_task_runs r join loop_tasks t on t.id=r.task_id
-            join loop_stages s on s.id=t.stage_id where s.plan_revision_id=$1 and r.status in ('queued','running')) active_count,
+            join loop_stages s on s.id=t.stage_id where s.plan_revision_id=$1 and r.status in ('queued','running')) active_runs,
+          (select count(*)::int from work_items wi where wi.loop_id=$2 and wi.payload->>'runtime_contract'='fresh_review_v1'
+            and wi.status in ('ready','in_progress')) active_items,
           (select count(*)::int from loop_work_items lwi where lwi.loop_id=$2 and lwi.relation_type='task_execution'
             and not exists (select 1 from loop_task_runs r join loop_tasks t on t.id=r.task_id
-              join loop_stages s on s.id=t.stage_id where r.work_item_id=lwi.work_item_id and s.plan_revision_id=$1)) extra_count`,
+              join loop_stages s on s.id=t.stage_id where r.work_item_id=lwi.work_item_id and s.plan_revision_id=$1)) extra_count,
+          (select count(*)::int from loop_task_runs r join loop_tasks t on t.id=r.task_id join loop_stages s on s.id=t.stage_id
+            where s.plan_revision_id=$1 and (r.work_item_id is null or not exists (
+              select 1 from loop_work_items lwi where lwi.loop_id=$2 and lwi.work_item_id=r.work_item_id and lwi.relation_type='task_execution'))) missing_count`,
         [loop.current_plan_revision_id, id],
       );
       const integrity = mapIntegrity.rows[0];
       const consistent = taskRows.rows.length > 0
         && taskRows.rows.every((task) => task.task_status === "completed" && task.stage_status === "completed"
-          && task.run_count === 1 && task.consistent_run_count === 1)
-        && integrity?.mapping_count === taskRows.rows.length && integrity.active_count === 0 && integrity.extra_count === 0;
+          && task.latest_cycle !== null && task.valid === true)
+        && integrity?.active_runs === 0 && integrity.active_items === 0
+        && integrity.extra_count === 0 && integrity.missing_count === 0;
       if (!consistent) return { kind: "invalid_transition" as const, error: "v2_task_runs_inconsistent" };
 
       const response = { ok: true, id, status: "completed", decision_id: decisionId };

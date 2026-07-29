@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { NextResponse, type NextRequest } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { AGENT_ROUTING, isRoutedAgent } from "@/lib/agent-routing";
@@ -48,11 +49,13 @@ type LoopContextRow = {
 
 type WorkItemRow = {
   id: string;
+  loop_id: string | null;
   title: string;
   instruction: string | null;
   status: string;
   priority: string | null;
   owner_agent: string | null;
+  target_agent_id: string | null;
   requested_by: string | null;
   scheduled_for: string | Date | null;
   source_type: string | null;
@@ -291,7 +294,7 @@ export async function POST(request: NextRequest) {
 
   if (useLocalMode) {
     const { rows } = await query(
-      `select id, title, instruction, status, priority, owner_agent, requested_by,
+      `select id, loop_id, title, instruction, status, priority, owner_agent, target_agent_id, requested_by,
               scheduled_for, source_type, source_id, payload
          from public.work_items
         where id = $1
@@ -302,7 +305,7 @@ export async function POST(request: NextRequest) {
   } else {
     const { data, error } = await (db as ReturnType<typeof createServiceClient>)
       .from("work_items")
-      .select("id, title, instruction, status, priority, owner_agent, requested_by, scheduled_for, source_type, source_id, payload")
+      .select("id, loop_id, title, instruction, status, priority, owner_agent, target_agent_id, requested_by, scheduled_for, source_type, source_id, payload")
       .eq("id", workItemId)
       .single();
     if (error) {
@@ -314,6 +317,39 @@ export async function POST(request: NextRequest) {
   if (!item) {
     return NextResponse.json({ error: "work_item not found" }, { status: 404 });
   }
+  if (item.payload?.runtime_contract === "fresh_review_v1" && item.payload?.run_role === "review") {
+    return NextResponse.json({ error: "fresh_review_v1 requires dedicated reviewer dispatch" }, { status: 409 });
+  }
+  if (agent !== item.owner_agent && agent !== item.target_agent_id) {
+    return NextResponse.json({ error: "notify_agent_identity_mismatch" }, { status: 409 });
+  }
+
+  // fresh_review_v1 session identity is server-owned. The detached agent never
+  // supplies or chooses it; retries of the same immutable work item retain it.
+  let workPayload = { ...(item.payload || {}) } as Record<string, unknown>;
+  if (useLocalMode && workPayload.runtime_contract === "fresh_review_v1"
+      && typeof workPayload.dispatch_session_id !== "string") {
+    const dispatchSessionId = randomUUID();
+    const assigned = await query<{ payload: Record<string, unknown> }>(
+      `update public.work_items
+          set payload=jsonb_set(payload,'{dispatch_session_id}',to_jsonb($2::text),true),updated_at=now()
+        where id=$1 and status in ('ready','in_progress')
+          and payload->>'runtime_contract'='fresh_review_v1'
+          and not (payload ? 'dispatch_session_id')
+        returning payload`,
+      [item.id, dispatchSessionId],
+    );
+    if (assigned.rows[0]) {
+      workPayload = assigned.rows[0].payload;
+      item.payload = workPayload;
+    } else {
+      const refreshed = await query<{ payload: Record<string, unknown> }>(
+        "select payload from public.work_items where id=$1 limit 1", [item.id],
+      );
+      workPayload = refreshed.rows[0]?.payload || workPayload;
+      item.payload = workPayload;
+    }
+  }
 
   const actionLabels: Record<string, string> = {
     created: "📋 New work item assigned to you",
@@ -324,7 +360,13 @@ export async function POST(request: NextRequest) {
   };
 
   let loopContext = "";
-  if (item.source_type === "loop" && typeof item.source_id === "string") {
+  const sourceLoopId = item.loop_id;
+  if (workPayload.runtime_contract === "fresh_review_v1"
+      && (item.source_type !== "loop" || typeof sourceLoopId !== "string"
+        || workPayload.source_loop_id !== sourceLoopId)) {
+    return NextResponse.json({ error: "source_loop_id_mismatch" }, { status: 409 });
+  }
+  if (item.source_type === "loop" && typeof sourceLoopId === "string") {
     let loop: LoopContextRow | null = null;
     if (useLocalMode) {
       const { rows } = await query(
@@ -332,14 +374,14 @@ export async function POST(request: NextRequest) {
            from public.loops
           where id = $1
           limit 1`,
-        [item.source_id],
+        [sourceLoopId],
       );
       loop = (rows[0] as LoopContextRow | undefined) || null;
     } else {
       const { data } = await (db as ReturnType<typeof createServiceClient>)
         .from("loops")
         .select("id,name,summary,description,acceptance_criteria,clarification_questions,metadata,approval_scope")
-        .eq("id", item.source_id)
+        .eq("id", sourceLoopId)
         .maybeSingle();
       loop = data as LoopContextRow | null;
     }
@@ -357,7 +399,6 @@ export async function POST(request: NextRequest) {
   if (item.scheduled_for) message += `\nScheduled for: ${item.scheduled_for}\n`;
   if (item.source_type) message += `\nSource: ${item.source_type}\n`;
 
-  const workPayload = (item.payload || {}) as Record<string, unknown>;
   const isCommunityPost = workPayload.pipeline_type === "community_post";
   const actionName = typeof workPayload.action === "string" ? workPayload.action : "";
   const isCommunityDraft = isCommunityPost && [

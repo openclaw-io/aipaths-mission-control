@@ -5,10 +5,12 @@ import { useRef, useState } from "react";
 export function LoopReviewActions({
   loopId,
   status,
+  workflowVersion = 1,
   onDone,
 }: {
   loopId: string;
   status: string;
+  workflowVersion?: 1 | 2;
   onDone?: () => void;
 }) {
   const [feedback, setFeedback] = useState("");
@@ -71,13 +73,15 @@ export function LoopReviewActions({
             >
               {loading === "approve_deliverable" ? "Approving..." : "Approve Deliverable"}
             </button>
-            <button
-              onClick={() => runAction("request_changes")}
-              disabled={!!loading}
-              className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm font-medium text-amber-200 transition hover:bg-amber-500/20 disabled:opacity-50"
-            >
-              {loading === "request_changes" ? "Sending..." : "Request Changes"}
-            </button>
+            {workflowVersion === 1 && (
+              <button
+                onClick={() => runAction("request_changes")}
+                disabled={!!loading}
+                className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm font-medium text-amber-200 transition hover:bg-amber-500/20 disabled:opacity-50"
+              >
+                {loading === "request_changes" ? "Sending..." : "Request Changes"}
+              </button>
+            )}
           </>
         )}
       </div>

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { execFile, execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
+import { realpath } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -17,6 +19,8 @@ import {
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const pool = new pg.Pool({ connectionString: requireMissionControlTestDatabaseUrl(), max: 8 });
+const HEAD_SHA = execFileSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+const REPOSITORY_KEY = "phase4-test-worktree";
 
 function transpileModule(sourcePath, requires = {}, globals = {}) {
   const transpiled = ts.transpileModule(readFileSync(sourcePath, "utf8"), {
@@ -60,6 +64,9 @@ const localAuth = {
   getLocalMissionControlUser: () => ({ email: "v2-reviewer@example.test" }),
 };
 const executionInstruction = transpileModule(resolve(repoRoot, "src/lib/loops/execution-instruction.ts"));
+const gitArtifact = transpileModule(resolve(repoRoot, "src/lib/work-items/git-artifact.ts"), {
+  "node:child_process": { execFile }, "node:fs/promises": { realpath },
+});
 const createRoute = transpileModule(resolve(repoRoot, "src/app/api/loops/project/create/route.ts"), {
   "node:crypto": { createHash, randomUUID }, "next/server": nextServer,
   "@/lib/auth/local": localAuth, "@/lib/db/postgres": { withTransaction: postgresTransaction },
@@ -77,6 +84,7 @@ const materializeRoute = transpileModule(resolve(repoRoot, "src/app/api/loops/ma
     isExecutionWindowOpenNow: () => ({ open: true, source: "test", mode: "open" }),
   },
   "@/lib/loops/execution-instruction": executionInstruction,
+  "@/lib/work-items/git-artifact": gitArtifact,
   "@/lib/loops/lifecycle-local": {
     getPrimaryExecutionWorkItemLocal: async () => null,
     isPrimaryExecutionOpen: () => false,
@@ -93,6 +101,7 @@ const reviewRoute = transpileModule(resolve(repoRoot, "src/app/api/loops/[id]/re
 const youtubePipeline = transpileModule(resolve(repoRoot, "src/lib/youtube-pipeline.ts"));
 const completion = transpileModule(resolve(repoRoot, "src/lib/work-items/completion-orchestration.ts"), {
   "@/lib/youtube-pipeline": youtubePipeline,
+  "@/lib/work-items/git-artifact": gitArtifact,
 });
 const agentCompletion = transpileModule(resolve(repoRoot, "src/lib/work-items/agent-completion-local.ts"), {
   "@/lib/content/live-verification": { verifyPublishedContent: async () => { throw new Error("unexpected verification"); } },
@@ -100,8 +109,16 @@ const agentCompletion = transpileModule(resolve(repoRoot, "src/lib/work-items/ag
   "@/lib/db/postgres": { query: (sql, params) => pool.query(sql, params), withTransaction: postgresTransaction },
   "@/lib/work-items/completion-orchestration": completion,
 });
+const reviewCompletion = transpileModule(resolve(repoRoot, "src/lib/reviewer/review-completion.ts"), {
+  "node:crypto": { randomUUID },
+});
 
-before(async () => pool.query("select 1 from public.loop_task_runs limit 1"));
+before(async () => {
+  const identity = await gitArtifact.inspectRepositoryRegistration(repoRoot);
+  await pool.query(`insert into review_repositories(key,canonical_root,git_common_dir,object_format)
+    values ($1,$2,$3,$4) on conflict (canonical_root) do update set enabled=true`,
+    [REPOSITORY_KEY, identity.canonicalRoot, identity.gitCommonDir, identity.objectFormat]);
+});
 after(async () => pool.end());
 
 function chainPayload(overrides = {}) {
@@ -110,6 +127,7 @@ function chainPayload(overrides = {}) {
     title: "Ship serial V2 runtime",
     input: "Build the approved project without broadening scope.",
     owner_agent: "systems",
+    repository: REPOSITORY_KEY,
     acceptance_criteria: ["Each task is completed in order", "Final review remains manual"],
     approval_scope: {
       allowed_actions: ["edit_repository", "run_tests"],
@@ -146,10 +164,47 @@ async function invokeReview(loopId, body) {
     { params: Promise.resolve({ id: loopId }) });
 }
 async function rowsFor(loopId) {
-  return pool.query(`select t.key,t.status,r.status as run_status,r.work_item_id,wi.status as work_status,wi.instruction,wi.payload
+  return pool.query(`select t.key,t.status,r.status as run_status,r.work_item_id,r.repository_id,r.base_sha,
+      wi.status as work_status,wi.instruction,wi.payload
     from loop_tasks t join loop_stages s on s.id=t.stage_id join loop_plan_revisions p on p.id=s.plan_revision_id
     left join loop_task_runs r on r.task_id=t.id left join work_items wi on wi.id=r.work_item_id
     where p.loop_id=$1 order by s.position,t.position`, [loopId]);
+}
+async function activeFreshWork(loopId) {
+  return (await pool.query(`select wi.id,wi.status,wi.payload,r.id run_id,r.run_role,r.quality_cycle,t.id task_id,t.key
+    from work_items wi join loop_task_runs r on r.work_item_id=wi.id join loop_tasks t on t.id=r.task_id
+    join loop_stages s on s.id=t.stage_id join loop_plan_revisions p on p.id=s.plan_revision_id
+    where p.loop_id=$1 and wi.status in ('ready','in_progress') order by r.created_at desc,r.id desc limit 1`, [loopId])).rows[0];
+}
+async function assignDispatch(workItemId, sessionId = randomUUID()) {
+  await pool.query("update work_items set status='in_progress',payload=payload||jsonb_build_object('dispatch_session_id',$2::text) where id=$1 and status in ('ready','in_progress')", [workItemId, sessionId]);
+  return sessionId;
+}
+async function completeImplementationAndApprove(loopId, implementation, sha = HEAD_SHA) {
+  const implementationId = implementation.work_item_id || implementation.id;
+  const implementerSession = await assignDispatch(implementationId);
+  await agentCompletion.patchAgentWorkItemWithCompletion(implementationId, {
+    status: "done", execution_attempt_id: implementation.payload.execution_attempt_id,
+    output: { head_sha: sha, repository_path: repoRoot },
+  });
+  const review = await activeFreshWork(loopId);
+  assert.equal(review.run_role, "review");
+  let reviewerSession = randomUUID();
+  while (reviewerSession === implementerSession) reviewerSession = randomUUID();
+  await assignDispatch(review.id, reviewerSession);
+  await postgresTransaction(async (client) => {
+    await client.query("update loop_task_runs set status='running',started_at=now(),updated_at=now() where id=$1 and status='queued'", [review.run_id]);
+    const execution = (await client.query(`select 'running'::text status,'in_progress'::text work_status,r.id review_run_id,r.work_item_id,r.execution_attempt_id,
+      r.repository_id,r.base_sha,r.target_sha,r.task_id,r.quality_cycle,r.target_run_id implementation_run_id,
+      impl.server_session_id implementer_session_id,t.status task_status,t.title task_title,s.id stage_id,
+      s.plan_revision_id,p.content_hash plan_hash,l.id loop_id,l.status loop_status,l.priority,l.owner_agent
+      from loop_task_runs r join loop_task_runs impl on impl.id=r.target_run_id join loop_tasks t on t.id=r.task_id
+      join loop_stages s on s.id=t.stage_id join loop_plan_revisions p on p.id=s.plan_revision_id
+      join loops l on l.id=p.loop_id where r.id=$1 for update of r,t,l`, [review.run_id])).rows[0];
+    await reviewCompletion.applyReviewerResult(client, execution,
+      { verdict: "approved", feedback: null, findings: [] }, reviewerSession);
+  });
+  return review;
 }
 async function cleanup(loopId) {
   // Approved graphs are intentionally immutable and the harness database is
@@ -488,7 +543,16 @@ test("three-task chain serializes concurrent materializers, unblocks on completi
   try {
     assert.equal((await invokeApprove(loopId)).payload.status, "queued");
     const concurrent = await Promise.all([invokeMaterialize(), invokeMaterialize()]);
-    assert.equal(concurrent.reduce((sum, response) => sum + response.payload.materialized, 0), 1);
+    const responses = [...concurrent];
+    let materializedCount = responses.flatMap((response) => response.payload.details)
+      .filter((entry) => entry.loopId === loopId && entry.action === "materialized").length;
+    for (let attempt = 0; attempt < 10 && (await rowsFor(loopId)).rows.every((row) => !row.work_item_id); attempt += 1) {
+      const response = await invokeMaterialize();
+      responses.push(response);
+      materializedCount += response.payload.details
+        .filter((entry) => entry.loopId === loopId && entry.action === "materialized").length;
+    }
+    assert.equal(materializedCount, 1);
     let rows = (await rowsFor(loopId)).rows;
     assert.deepEqual(rows.map((row) => [row.key, row.status]), [["one", "in_progress"], ["two", "pending"], ["three", "pending"]]);
     assert.equal(rows.filter((row) => row.work_item_id).length, 1);
@@ -497,23 +561,25 @@ test("three-task chain serializes concurrent materializers, unblocks on completi
     assert.match(rows[0].instruction, /Do not touch live services/);
 
     const first = rows[0];
-    await agentCompletion.patchAgentWorkItemWithCompletion(first.work_item_id, { status: "done", execution_attempt_id: first.payload.execution_attempt_id, output: { summary: "one done" } });
-    const eventCount = (await pool.query("select count(*)::int count from loop_events where loop_id=$1 and event_type='loop.task_completed'", [loopId])).rows[0].count;
+    await completeImplementationAndApprove(loopId, first);
+    const eventCount = (await pool.query("select count(*)::int count from loop_events where loop_id=$1 and event_type='loop.task_review_approved'", [loopId])).rows[0].count;
     const replay = await agentCompletion.patchAgentWorkItemWithCompletion(first.work_item_id, { status: "done", execution_attempt_id: first.payload.execution_attempt_id });
     assert.equal(replay.status, "done");
-    assert.equal((await pool.query("select count(*)::int count from loop_events where loop_id=$1 and event_type='loop.task_completed'", [loopId])).rows[0].count, eventCount);
+    assert.equal((await pool.query("select count(*)::int count from loop_events where loop_id=$1 and event_type='loop.task_review_approved'", [loopId])).rows[0].count, eventCount);
     await assert.rejects(() => agentCompletion.patchAgentWorkItemWithCompletion(first.work_item_id, { status: "done", execution_attempt_id: randomUUID() }), /stale_execution_attempt/);
 
     for (const expectedKey of ["two", "three"]) {
       const materialized = await invokeMaterialize();
-      assert.equal(materialized.payload.materialized, 1);
-      rows = (await rowsFor(loopId)).rows;
-      const current = rows.find((row) => row.key === expectedKey);
-      assert.equal(current.status, "in_progress");
-      await agentCompletion.patchAgentWorkItemWithCompletion(current.work_item_id, { status: "done", execution_attempt_id: current.payload.execution_attempt_id, output: { summary: `${expectedKey} done` } });
+      assert.equal(materialized.payload.details
+        .filter((entry) => entry.loopId === loopId && entry.action === "materialized").length, 1);
+      const current = await activeFreshWork(loopId);
+      assert.equal(current.key, expectedKey);
+      await completeImplementationAndApprove(loopId, current);
     }
-    rows = (await rowsFor(loopId)).rows;
-    assert.deepEqual(rows.map((row) => [row.status, row.run_status, row.work_status]), Array(3).fill(["completed", "succeeded", "done"]));
+    const finalTasks = (await pool.query(`select t.status from loop_tasks t join loop_stages s on s.id=t.stage_id
+      join loop_plan_revisions p on p.id=s.plan_revision_id where p.loop_id=$1 order by s.position,t.position`, [loopId])).rows;
+    assert.deepEqual(finalTasks.map((row) => row.status), Array(3).fill("completed"));
+    assert.equal((await pool.query("select count(*)::int count from loop_task_runs r join loop_tasks t on t.id=r.task_id join loop_stages s on s.id=t.stage_id join loop_plan_revisions p on p.id=s.plan_revision_id where p.loop_id=$1 and r.status='succeeded'", [loopId])).rows[0].count, 6);
     assert.equal((await pool.query("select status from loops where id=$1", [loopId])).rows[0].status, "in_review");
 
     const unsupported = await invokeReview(loopId, { action: "request_changes", feedback: "redo" });
@@ -537,9 +603,7 @@ test("V2 final review completes against the historical local loops shape without
     await invokeApprove(loopId);
     await invokeMaterialize();
     const task = (await rowsFor(loopId)).rows[0];
-    await agentCompletion.patchAgentWorkItemWithCompletion(task.work_item_id, {
-      status: "done", execution_attempt_id: task.payload.execution_attempt_id,
-    });
+    await completeImplementationAndApprove(loopId, task);
     assert.equal((await pool.query("select status from loops where id=$1", [loopId])).rows[0].status, "in_review");
 
     await pool.query("alter table loops drop column last_completed_at");
@@ -683,8 +747,8 @@ test("V2 completion rejects cross-loop/fake mappings, primary_execution, and map
       join loop_plan_revisions p on p.id=s.plan_revision_id where p.loop_id=$1`, [targetLoopId])).rows[0].id;
 
     await assert.rejects(
-      () => pool.query(`insert into loop_task_runs(task_id,work_item_id,execution_attempt_id,status)
-        values ($1,$2,$3,'queued')`, [targetTaskId, source.work_item_id, randomUUID()]),
+      () => pool.query(`insert into loop_task_runs(task_id,work_item_id,execution_attempt_id,status,repository_id,base_sha)
+        values ($1,$2,$3,'queued',$4,$5)`, [targetTaskId, source.work_item_id, randomUUID(), source.repository_id, source.base_sha]),
       (error) => error.code === "23505" && /uq_loop_task_runs_work_item/.test(error.constraint),
     );
 
@@ -708,6 +772,7 @@ test("V2 completion rejects cross-loop/fake mappings, primary_execution, and map
       () => agentCompletion.patchAgentWorkItemWithCompletion(primaryWork.id, { status: "done" }),
       /primary_execution_requires_v1/,
     );
+    await pool.query("update work_items set status='canceled' where id=$1", [primaryWork.id]);
 
     const fakeAttempt = randomUUID();
     const fakeTaskWork = (await pool.query(`insert into work_items(loop_id,kind,source_type,source_id,title,status,payload)
@@ -739,9 +804,7 @@ test("final V2 review rejects an extra fake/cross-loop task work-item mapping", 
     await invokeApprove(loopId);
     await invokeMaterialize();
     const real = (await rowsFor(loopId)).rows[0];
-    await agentCompletion.patchAgentWorkItemWithCompletion(real.work_item_id, {
-      status: "done", execution_attempt_id: real.payload.execution_attempt_id,
-    });
+    await completeImplementationAndApprove(loopId, real);
     const fake = (await pool.query(`insert into work_items(loop_id,kind,source_type,source_id,title,status,payload)
       values ($1,'task','loop',$2,'fake final mapping','done','{}'::jsonb) returning id`, [loopId, loopId])).rows[0];
     await pool.query("insert into loop_work_items(loop_id,work_item_id,relation_type) values ($1,$2,'task_execution')", [loopId, fake.id]);

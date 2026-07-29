@@ -171,11 +171,15 @@ test("V2 detail DTO and SQL do not leak unused history payloads and history read
   const detail = await getLoopDetail("loop-v2");
   const serialized = JSON.stringify(detail);
   assert.doesNotMatch(serialized, /SECRET_|"(?:output|error|feedback|content|uri|metadata)"/i);
-  for (const table of ["loop_task_runs", "loop_task_reviews", "loop_evidence"]) {
+  for (const table of ["loop_task_runs", "loop_task_reviews"]) {
     const sql = calls.find((call) => new RegExp(`from ${table}`, "i").test(call.sql))?.sql || "";
-    assert.match(sql, /limit\s+\$\d+/i, `${table} history must have a parameterized limit`);
-    assert.doesNotMatch(sql, /\b(?:output|error|feedback|content|uri|metadata)\b/i);
+    assert.match(sql, /task_id\s*=\s*any\(\$1::uuid\[\]\)/i, `${table} quality history must be scoped to current tasks`);
+    assert.doesNotMatch(sql, /limit\s+\$\d+/i, `${table} quality state must not depend on a global history limit`);
+    assert.doesNotMatch(sql, /\b(?:output|error|feedback|content|uri|metadata|server_session_id|repository)\b/i);
   }
+  const evidenceSql = calls.find((call) => /from loop_evidence/i.test(call.sql))?.sql || "";
+  assert.match(evidenceSql, /limit\s+\$\d+/i);
+  assert.doesNotMatch(evidenceSql, /\b(?:output|error|feedback|content|uri|metadata|server_session_id|repository)\b/i);
 });
 
 test("V2 bounded detail keeps old run references valid and exposes exact per-task counts", async () => {
