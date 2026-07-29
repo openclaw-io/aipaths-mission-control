@@ -80,6 +80,146 @@ function completePlan(plan: unknown) {
   ));
 }
 
+async function reconcileV2TaskExecution(
+  client: CompletionQueryClient,
+  workItem: WorkItemRow,
+  body: JsonRecord,
+) {
+  const linked = await client.query<{
+    loop_id: string; loop_status: string; workflow_version: number; current_plan_revision_id: string;
+    approval_scope: Record<string, unknown>; revision_status: string; content_hash: string | null;
+    task_id: string; task_status: string; stage_id: string; plan_revision_id: string;
+    run_id: string; run_status: string; execution_attempt_id: string | null;
+  }>(
+    `select l.id loop_id,l.status loop_status,l.workflow_version,l.current_plan_revision_id,l.approval_scope,
+            pr.status revision_status,pr.content_hash,t.id task_id,t.status task_status,s.id stage_id,s.plan_revision_id,
+            r.id run_id,r.status run_status,r.execution_attempt_id
+       from loop_work_items lwi join loops l on l.id=lwi.loop_id
+       join loop_task_runs r on r.work_item_id=lwi.work_item_id
+       join loop_tasks t on t.id=r.task_id join loop_stages s on s.id=t.stage_id
+       join loop_plan_revisions pr on pr.id=s.plan_revision_id and pr.loop_id=l.id
+      where lwi.work_item_id=$1 and lwi.relation_type='task_execution'
+      order by l.id,t.id,r.id`,
+    [workItem.id],
+  );
+  if (linked.rows.length > 1) throw new Error("v2_task_execution_mapping_cardinality");
+  const item = linked.rows[0];
+  if (!item) {
+    const taskMapping = await client.query<{ present: number }>(
+      "select 1 present from loop_work_items where work_item_id=$1 and relation_type='task_execution' limit 1",
+      [workItem.id],
+    );
+    if (taskMapping.rows[0]) throw new Error("v2_task_execution_identity_mismatch");
+    return null;
+  }
+  if (item.workflow_version !== 2 || item.current_plan_revision_id !== item.plan_revision_id) {
+    throw new Error("v2_task_execution_revision_mismatch");
+  }
+  const scope = asRecord(item.approval_scope);
+  const payload = asRecord(workItem.payload);
+  if (item.revision_status !== "approved" || !item.content_hash
+    || scope.approved !== true || scope.can_execute_unattended !== true
+    || scope.approved_plan_revision_id !== item.plan_revision_id
+    || scope.approved_plan_hash !== item.content_hash
+    || payload.plan_revision_id !== item.plan_revision_id || payload.plan_hash !== item.content_hash) {
+    throw new Error("v2_task_execution_approval_mismatch");
+  }
+  if (!item.execution_attempt_id || payload.execution_attempt_id !== item.execution_attempt_id
+    || readString(body.execution_attempt_id) !== item.execution_attempt_id
+    || workItem.source_type !== "loop" || workItem.source_id !== item.task_id
+    || payload.source_loop_id !== item.loop_id || payload.loop_task_id !== item.task_id) {
+    throw new Error("v2_task_execution_identity_mismatch");
+  }
+  const now = new Date().toISOString();
+  const actor = readString(workItem.owner_agent) || "work-item-completion";
+
+  if (body.status === "in_progress") {
+    if (item.loop_status !== "in_progress" || item.task_status !== "in_progress" || item.run_status !== "queued") {
+      throw new Error("v2_task_start_state_conflict");
+    }
+    await client.query(
+      "update loop_task_runs set status='running',started_at=coalesce(started_at,$2),updated_at=$2 where id=$1 and status='queued'",
+      [item.run_id, now],
+    );
+    return { applied: true, effect: "loop_task_started", loopId: item.loop_id };
+  }
+
+  if (body.status === "failed" || body.status === "canceled") {
+    const runStatus = body.status === "canceled" ? "cancelled" : "failed";
+    if (item.loop_status !== "in_progress" || item.task_status !== "in_progress"
+      || !["queued", "running"].includes(item.run_status)) {
+      throw new Error("v2_task_terminal_state_conflict");
+    }
+    await client.query(
+      `update loop_task_runs set status=$2,started_at=coalesce(started_at,$3),finished_at=$3,
+              error=$4,output=$5::jsonb,updated_at=$3 where id=$1 and status in ('queued','running')`,
+      [item.run_id, runStatus, now, readString(body.result), JSON.stringify(asRecord(body.output))],
+    );
+    await client.query("update loop_tasks set status='blocked',updated_at=$2 where id=$1 and status='in_progress'", [item.task_id, now]);
+    await client.query("update loop_stages set status='blocked',updated_at=$2 where id=$1", [item.stage_id, now]);
+    await client.query("update loops set status='blocked',updated_at=$2,row_version=row_version+1 where id=$1 and status='in_progress'", [item.loop_id, now]);
+    await client.query(
+      `insert into loop_events(loop_id,event_type,from_status,to_status,actor,payload,created_at)
+       values ($1,$2,$3,'blocked',$4,$5::jsonb,$6)`,
+      [item.loop_id, `loop.task_${body.status}`, item.loop_status, actor,
+        JSON.stringify({ task_id: item.task_id, task_run_id: item.run_id, work_item_id: workItem.id,
+          execution_attempt_id: item.execution_attempt_id, work_item_status: body.status }), now],
+    );
+    return { applied: true, effect: `loop_task_${body.status}`, loopId: item.loop_id };
+  }
+
+  if (body.status !== "done") throw new Error("v2_task_status_transition_conflict");
+  if (item.loop_status !== "in_progress" || item.task_status !== "in_progress"
+    || !["queued", "running"].includes(item.run_status)) throw new Error("v2_task_completion_state_conflict");
+  const output = { ...asRecord(body.output), ...(body.result !== undefined ? { result: body.result } : {}) };
+  await client.query(
+    `update loop_task_runs set status='succeeded',started_at=coalesce(started_at,$2),finished_at=$2,
+            error=null,output=$3::jsonb,updated_at=$2 where id=$1 and status in ('queued','running')`,
+    [item.run_id, now, JSON.stringify(output)],
+  );
+  await client.query("update loop_tasks set status='completed',updated_at=$2 where id=$1 and status='in_progress'", [item.task_id, now]);
+  const stageAggregate = await client.query<{ complete: boolean }>(
+    `select bool_and(status in ('completed','skipped')) complete from loop_tasks where stage_id=$1`,
+    [item.stage_id],
+  );
+  await client.query("update loop_stages set status=$2,updated_at=$3 where id=$1", [
+    item.stage_id, stageAggregate.rows[0]?.complete ? "completed" : "in_progress", now,
+  ]);
+  await client.query(
+    `update loop_tasks candidate set status='ready',updated_at=$2
+      from loop_stages stage
+     where candidate.stage_id=stage.id and stage.plan_revision_id=$1 and candidate.status='pending'
+       and not exists (
+         select 1 from loop_task_dependencies d join loop_tasks dependency on dependency.id=d.depends_on_task_id
+         where d.task_id=candidate.id and d.dependency_type='hard' and dependency.status <> 'completed'
+       )`,
+    [item.plan_revision_id, now],
+  );
+  const projectAggregate = await client.query<{ complete: boolean; active_runs: number; extra_runs: number }>(
+    `select bool_and(t.status in ('completed','skipped')) complete,
+            count(r.id) filter (where r.status in ('queued','running'))::int active_runs,
+            (count(r.id)-count(distinct t.id) filter (where t.status='completed'))::int extra_runs
+       from loop_tasks t join loop_stages s on s.id=t.stage_id
+       left join loop_task_runs r on r.task_id=t.id where s.plan_revision_id=$1`,
+    [item.plan_revision_id],
+  );
+  const aggregate = projectAggregate.rows[0];
+  const nextStatus = aggregate?.complete && aggregate.active_runs === 0 && aggregate.extra_runs === 0
+    ? "in_review" : "in_progress";
+  await client.query(
+    "update loops set status=$2,updated_at=$3,row_version=row_version+1 where id=$1 and status='in_progress'",
+    [item.loop_id, nextStatus, now],
+  );
+  await client.query(
+    `insert into loop_events(loop_id,event_type,from_status,to_status,actor,payload,created_at)
+     values ($1,'loop.task_completed',$2,$3,$4,$5::jsonb,$6)`,
+    [item.loop_id, item.loop_status, nextStatus, actor,
+      JSON.stringify({ task_id: item.task_id, task_run_id: item.run_id, work_item_id: workItem.id,
+        execution_attempt_id: item.execution_attempt_id }), now],
+  );
+  return { applied: true, effect: "loop_task_completed", loopId: item.loop_id };
+}
+
 async function reconcilePrimaryLoopCompletion(
   client: CompletionQueryClient,
   workItem: WorkItemRow,
@@ -91,7 +231,7 @@ async function reconcilePrimaryLoopCompletion(
   }>(
     `SELECT l.id, l.status, l.plan
        FROM public.loop_work_items lwi
-       INNER JOIN public.loops l ON l.id = lwi.loop_id
+       INNER JOIN public.loops l ON l.id = lwi.loop_id AND l.workflow_version = 1
       WHERE lwi.work_item_id = $1
         AND lwi.relation_type = 'primary_execution'
       LIMIT 1
@@ -142,14 +282,15 @@ async function reconcilePrimaryLoopCompletion(
   return { applied: true, effect: "loop_primary_execution_completed", loopId: loop.id };
 }
 
-async function reconcilePrimaryLoopCancellation(
+async function reconcilePrimaryLoopNeedsAttention(
   client: CompletionQueryClient,
   workItem: WorkItemRow,
+  terminalStatus: "failed" | "canceled",
 ) {
   const linkedLoop = await client.query<{ id: string; status: string }>(
     `SELECT l.id, l.status
        FROM public.loop_work_items lwi
-       INNER JOIN public.loops l ON l.id = lwi.loop_id
+       INNER JOIN public.loops l ON l.id = lwi.loop_id AND l.workflow_version = 1
       WHERE lwi.work_item_id = $1
         AND lwi.relation_type = 'primary_execution'
       LIMIT 1
@@ -160,6 +301,8 @@ async function reconcilePrimaryLoopCancellation(
   if (!loop) return { applied: false, reason: "not_loop_primary_execution" };
 
   const now = new Date().toISOString();
+  const eventType = `loop.primary_execution_${terminalStatus}`;
+  const reason = `primary_execution_${terminalStatus}_needs_attention`;
   await client.query(
     `UPDATE public.loops
         SET status = 'blocked', updated_at = $2::timestamptz
@@ -169,22 +312,23 @@ async function reconcilePrimaryLoopCancellation(
   await client.query(
     `INSERT INTO public.loop_events
        (loop_id, event_type, from_status, to_status, actor, payload, created_at)
-     VALUES ($1, 'loop.primary_execution_canceled', $2, 'blocked', $3, $4::jsonb, $5::timestamptz)`,
+     VALUES ($1, $2, $3, 'blocked', $4, $5::jsonb, $6::timestamptz)`,
     [
       loop.id,
+      eventType,
       loop.status,
       readString(workItem.owner_agent) || "work-item-completion",
       JSON.stringify({
-        reason: "primary_execution_canceled_needs_attention",
+        reason,
         work_item_id: workItem.id,
         relation_type: "primary_execution",
-        work_item_status: "canceled",
+        work_item_status: terminalStatus,
         dispatch_state: readString(asRecord(workItem.payload).dispatch_state),
       }),
       now,
     ],
   );
-  return { applied: true, effect: "loop_primary_execution_canceled", loopId: loop.id };
+  return { applied: true, effect: `loop_primary_execution_${terminalStatus}`, loopId: loop.id };
 }
 
 function resolvePipelineAction(workItem: WorkItemRow, pipelineItem: JsonRecord) {
@@ -530,8 +674,15 @@ export async function orchestrateWorkItemCompletion(
   input: CompletionOrchestrationInput,
 ) {
   const { existing, updated, body, publicationVerification } = input;
+  const v2TaskExecution = await reconcileV2TaskExecution(client, updated, body);
+  if (v2TaskExecution) return v2TaskExecution;
+
+  // V1 primary_execution orchestration is intentionally unchanged below.
   if (body.status === "canceled" && existing.status !== "canceled") {
-    return reconcilePrimaryLoopCancellation(client, updated);
+    return reconcilePrimaryLoopNeedsAttention(client, updated, "canceled");
+  }
+  if (body.status === "failed" && existing.status !== "failed") {
+    return reconcilePrimaryLoopNeedsAttention(client, updated, "failed");
   }
   if (body.status !== "done" || existing.status === "done") return { applied: false, reason: "not_a_new_completion" };
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 export function ApproveForQueueButton({
   loopId,
@@ -12,14 +12,17 @@ export function ApproveForQueueButton({
   onDone?: () => void;
 }) {
   const [loading, setLoading] = useState(false);
+  const pendingDecisionId = useRef<string | null>(null);
 
   async function handleApprove() {
+    const decisionId = pendingDecisionId.current || crypto.randomUUID();
+    pendingDecisionId.current = decisionId;
     setLoading(true);
     try {
       const res = await fetch(`/api/loops/${loopId}/approve`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ queue: true }),
+        body: JSON.stringify({ decision_id: decisionId, action: "approve", queue: true }),
       });
 
       if (!res.ok) {
@@ -27,6 +30,7 @@ export function ApproveForQueueButton({
         throw new Error(data.error || "Failed to approve loop");
       }
 
+      pendingDecisionId.current = null;
       onDone?.();
     } catch (err) {
       console.error(err);

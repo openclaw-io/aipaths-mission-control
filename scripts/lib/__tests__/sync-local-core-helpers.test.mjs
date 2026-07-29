@@ -88,6 +88,43 @@ test("sync preflight is lossless, schema-drift loud, and Loop-FK safe", () => {
   );
 });
 
+test("sync semantic preflight rejects malformed V2 state and graph relationships", () => {
+  const rowsByTable = new Map([
+    ["loops", [
+      { id: "loop-1", workflow_version: 1, mode: "dag", current_plan_revision_id: null },
+      { id: "loop-2", workflow_version: 2, mode: "dag", current_plan_revision_id: "rev-foreign" },
+    ]],
+    ["loop_plan_revisions", [
+      { id: "rev-1", loop_id: "loop-1" },
+      { id: "rev-foreign", loop_id: "loop-1" },
+      { id: "rev-2", loop_id: "loop-2" },
+    ]],
+    ["loop_stages", [
+      { id: "stage-1", plan_revision_id: "rev-1" },
+      { id: "stage-2", plan_revision_id: "rev-2" },
+    ]],
+    ["loop_tasks", [
+      { id: "task-1", stage_id: "stage-1" },
+      { id: "task-2", stage_id: "stage-2" },
+    ]],
+    ["loop_task_dependencies", [
+      { task_id: "task-1", depends_on_task_id: "task-2" },
+      { task_id: "task-2", depends_on_task_id: "task-1" },
+    ]],
+    ["loop_task_runs", [{ id: "run-2", task_id: "task-2" }]],
+    ["loop_task_reviews", [{ id: "review-1", task_id: "task-1", task_run_id: "run-2" }]],
+    ["loop_evidence", [{ id: "evidence-1", task_id: "task-1", task_run_id: "run-2" }]],
+  ]);
+
+  const errors = findSemanticImportErrors(rowsByTable).join("\n");
+  assert.match(errors, /loop-1.*V1.*linear/i);
+  assert.match(errors, /loop-2.*current plan revision.*same Loop/i);
+  assert.match(errors, /dependency.*same plan revision/i);
+  assert.match(errors, /dependency graph.*cycle/i);
+  assert.match(errors, /review-1.*run-2.*same task/i);
+  assert.match(errors, /evidence-1.*run-2.*same task/i);
+});
+
 test("work-item self references are split into insert and restore phases", () => {
   const rows = [
     { id: "parent", parent_id: null },

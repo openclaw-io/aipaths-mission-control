@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { after, before, test } from "node:test";
@@ -83,6 +83,7 @@ const youtubePipeline = transpileModule(resolve(repoRoot, "src/lib/youtube-pipel
 
 function loadRoute(relativePath, extra = {}) {
   return transpileModule(resolve(repoRoot, relativePath), {
+    "node:crypto": { createHash, randomUUID },
     "next/server": nextServer,
     "@/lib/auth/local": auth,
     "@/lib/db/postgres": postgres,
@@ -190,7 +191,7 @@ test("Loop create real handler atomically persists entity+event and deduplicates
 for (const config of [
   { label: "submit", route: submitLoopRoute, initial: "planning", body: {}, target: "needs_approval", event: "loop.ready_for_approval" },
   { label: "clarify", route: clarifyLoopRoute, initial: "needs_clarification", body: { response: "Use the safe option" }, target: "needs_approval", event: "loop.ready_for_approval" },
-  { label: "approve", route: approveLoopRoute, initial: "needs_approval", body: { action: "approve", queue: true }, target: "queued", event: "loop.queued" },
+  { label: "approve", route: approveLoopRoute, initial: "needs_approval", body: { decision_id: randomUUID(), action: "approve", queue: true }, target: "queued", event: "loop.queued" },
 ]) {
   test(`Loop ${config.label} real handler locks state, rolls back event failure, and replays once`, async () => {
     const id = randomUUID();

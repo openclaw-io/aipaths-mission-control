@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 export function LoopReviewActions({
   loopId,
@@ -13,14 +13,19 @@ export function LoopReviewActions({
 }) {
   const [feedback, setFeedback] = useState("");
   const [loading, setLoading] = useState<string | null>(null);
+  const decisionIds = useRef(new Map<string, string>());
 
   async function runAction(action: string) {
+    const decisionPayload = { action, feedback: feedback.trim() || null };
+    const fingerprint = JSON.stringify(decisionPayload);
+    const decisionId = decisionIds.current.get(fingerprint) || crypto.randomUUID();
+    decisionIds.current.set(fingerprint, decisionId);
     setLoading(action);
     try {
       const res = await fetch(`/api/loops/${loopId}/review`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action, feedback: feedback.trim() || null }),
+        body: JSON.stringify({ decision_id: decisionId, ...decisionPayload }),
       });
 
       if (!res.ok) {
@@ -28,6 +33,7 @@ export function LoopReviewActions({
         throw new Error(data.error || "Failed to update review state");
       }
 
+      decisionIds.current.delete(fingerprint);
       setFeedback("");
       onDone?.();
     } catch (error) {
@@ -43,7 +49,7 @@ export function LoopReviewActions({
       <div className="mb-3">
         <h3 className="text-sm font-semibold text-white">Review Flow</h3>
         <p className="mt-1 text-xs text-gray-500">
-          Move the loop into review, approve the deliverable, or request changes with context.
+          Completion moves the loop into review. Approve the deliverable or request changes with context.
         </p>
       </div>
 

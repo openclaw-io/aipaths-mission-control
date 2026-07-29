@@ -85,6 +85,63 @@ function buildGenericPlan(summary: string): PlanStep[] {
   ];
 }
 
+function pendingPlanReworkContext(metadata: JsonObject) {
+  const context = metadata.plan_rework_context;
+  if (!context || typeof context !== "object" || Array.isArray(context)) return null;
+  return context.status === "pending" ? context as JsonObject : null;
+}
+
+type PlanReworkOperation = {
+  type: "append_step";
+  step_id: string;
+  title: string;
+  notes: string | null;
+};
+
+function parsePlanReworkOperations(plan: PlanStep[], value: JsonValue | undefined): PlanReworkOperation[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  const existingIds = new Set(plan.map((step) => step.id));
+  let suffix = plan.length + 1;
+  const operations: PlanReworkOperation[] = [];
+  for (const candidate of value) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return null;
+    if (candidate.type !== "append_step") return null;
+    const title = typeof candidate.title === "string" ? candidate.title.trim() : "";
+    if (!title) return null;
+    if (candidate.notes !== undefined && candidate.notes !== null && typeof candidate.notes !== "string") return null;
+    while (existingIds.has(`plan-rework-${suffix}`)) suffix += 1;
+    const stepId = `plan-rework-${suffix}`;
+    existingIds.add(stepId);
+    suffix += 1;
+    operations.push({
+      type: "append_step",
+      step_id: stepId,
+      title,
+      notes: typeof candidate.notes === "string" && candidate.notes.trim() ? candidate.notes.trim() : null,
+    });
+  }
+  return operations;
+}
+
+function revisePlanForOperations(plan: PlanStep[], operations: PlanReworkOperation[]): PlanStep[] {
+  return [
+    ...plan.map((step) => ({ ...step, status: "pending" })),
+    ...operations.map((operation) => ({
+      id: operation.step_id,
+      title: operation.title,
+      status: "pending",
+      notes: operation.notes,
+    })),
+  ];
+}
+
+function planContainsAppliedOperations(plan: PlanStep[], operations: PlanReworkOperation[]) {
+  return operations.every((operation) => plan.some((step) => step.id === operation.step_id
+    && step.title === operation.title
+    && step.notes === operation.notes
+    && step.status === "pending"));
+}
+
 function classifyIntent(input: string) {
   const lowered = input.toLowerCase();
 
@@ -209,26 +266,131 @@ export async function POST(request: NextRequest) {
     const hasMeaningfulSummary = cleanText(loop.summary).length > 0;
 
     if (alreadyNormalized && hasMeaningfulPlan) {
-      const clarificationHistory = Array.isArray(metadata.clarification_history)
-        ? metadata.clarification_history
-        : [];
-      const latestClarification = clarificationHistory.at(-1);
-      const latestResponse = latestClarification && typeof latestClarification === "object" && !Array.isArray(latestClarification)
-        ? cleanText(String((latestClarification as JsonObject).response || "")).toLowerCase()
-        : "";
-      const explicitlyNotReady = Boolean(
-        metadata.normalization_invalidated_at
-        || metadata.manual_triage_reason
-        || /desestim|cancel|descart|viejo|old/.test(latestResponse)
-      );
-      if (explicitlyNotReady) {
-        details.push({ loopId: loop.id, action: "already_normalized_not_ready" });
-        continue;
-      }
-
-      const now = new Date().toISOString();
       try {
-        const updated = await withTransaction(async (client) => {
+        const outcome = await withTransaction(async (client) => {
+          // Re-read and lock before interpreting feedback. Every plan and metadata
+          // decision below is derived from this locked snapshot, preventing two
+          // planner invocations from consuming stale context or losing updates.
+          const lockedResult = await client.query<LoopRow>(`
+            SELECT id, status, key, name, summary, description, priority, metadata, plan, clarification_questions
+              FROM public.loops
+             WHERE id = $1
+             LIMIT 1
+             FOR UPDATE
+          `, [loop.id]);
+          const lockedLoop = lockedResult.rows[0];
+          if (!lockedLoop || lockedLoop.status !== "planning") return { kind: "status_changed" as const };
+
+          const lockedMetadata = (lockedLoop.metadata || {}) as JsonObject;
+          const lockedAlreadyNormalized = typeof lockedMetadata.normalized_at === "string"
+            || typeof lockedMetadata.interpreted_title === "string";
+          const lockedPlan = Array.isArray(lockedLoop.plan) ? lockedLoop.plan : [];
+          if (!lockedAlreadyNormalized || lockedPlan.length === 0) return { kind: "stale_outer_snapshot" as const };
+
+          const clarificationHistory = Array.isArray(lockedMetadata.clarification_history)
+            ? lockedMetadata.clarification_history
+            : [];
+          const latestClarification = clarificationHistory.at(-1);
+          const latestResponse = latestClarification && typeof latestClarification === "object" && !Array.isArray(latestClarification)
+            ? cleanText(String((latestClarification as JsonObject).response || "")).toLowerCase()
+            : "";
+          const explicitlyNotReady = Boolean(
+            lockedMetadata.normalization_invalidated_at
+            || lockedMetadata.manual_triage_reason
+            || /desestim|cancel|descart|viejo|old/.test(latestResponse)
+          );
+          if (explicitlyNotReady) return { kind: "not_ready" as const };
+
+          const now = new Date().toISOString();
+          const storedPlanReworkContext = lockedMetadata.plan_rework_context;
+          const planReworkContext = pendingPlanReworkContext(lockedMetadata);
+          const malformedStoredContext = storedPlanReworkContext
+            && typeof storedPlanReworkContext === "object"
+            && !Array.isArray(storedPlanReworkContext)
+            && (storedPlanReworkContext.status === "pending" || storedPlanReworkContext.status === "needs_attention")
+            ? storedPlanReworkContext as JsonObject
+            : null;
+          if (malformedStoredContext) {
+            const feedback = typeof malformedStoredContext.feedback === "string"
+              ? cleanText(malformedStoredContext.feedback)
+              : "";
+            const operations = parsePlanReworkOperations(lockedPlan, malformedStoredContext.plan_operations);
+            if (!operations) {
+              // Old prose-only requests are made visible at the approval gate.
+              // Do not leave a planning Loop in a metadata-only attention state.
+              const rejectedMetadata = {
+                ...lockedMetadata,
+                plan_rework_context: {
+                  ...malformedStoredContext,
+                  status: "rejected",
+                  rejected_at: now,
+                  rejection_reason: "unsupported_plan_operations",
+                  planner_revision_contract: "structured-plan-operations-v1",
+                },
+              };
+              const restored = await client.query(`
+                UPDATE public.loops
+                   SET status = $1,
+                       metadata = $2::jsonb,
+                       updated_at = $3::timestamptz
+                 WHERE id = $4
+                   AND status = 'planning'
+                 RETURNING id
+              `, ["needs_approval", JSON.stringify(rejectedMetadata), now, loop.id]);
+              if (!restored.rows[0]) throw new Error("malformed_plan_rework_restore_failed");
+              await client.query(`
+                INSERT INTO public.loop_events
+                  (loop_id, event_type, from_status, to_status, actor, payload, created_at)
+                VALUES
+                  ($1, 'loop.plan_rework_rejected', 'planning', 'needs_approval', 'loop-planner', $2::jsonb, $3::timestamptz)
+              `, [loop.id, JSON.stringify({
+                source: "plan_rework_revision",
+                reason: "unsupported_plan_operations",
+                feedback: feedback || null,
+              }), now]);
+              return { kind: "malformed_rework_restored" as const };
+            }
+
+            const revisedPlan = revisePlanForOperations(lockedPlan, operations);
+            if (!planContainsAppliedOperations(revisedPlan, operations)) {
+              throw new Error("plan_rework_operation_verification_failed");
+            }
+            const revisedMetadata = {
+              ...lockedMetadata,
+              plan_rework_context: {
+                ...planReworkContext,
+                status: "consumed",
+                consumed_at: now,
+                consumed_by: "loop-planner",
+                planner_revision_contract: "structured-plan-operations-v1",
+                applied_operations: operations,
+              },
+            };
+            const updateResult = await client.query(`
+              UPDATE public.loops
+                 SET status = 'needs_approval',
+                     plan = $1::jsonb,
+                     metadata = $2::jsonb,
+                     updated_at = $3::timestamptz
+               WHERE id = $4
+                 AND status = 'planning'
+               RETURNING id
+            `, [JSON.stringify(revisedPlan), JSON.stringify(revisedMetadata), now, loop.id]);
+            if (!updateResult.rows[0]) throw new Error("locked_plan_rework_update_failed");
+            await client.query(`
+              INSERT INTO public.loop_events
+                (loop_id, event_type, from_status, to_status, actor, payload, created_at)
+              VALUES
+                ($1, 'loop.ready_for_approval', 'planning', 'needs_approval', 'loop-planner', $2::jsonb, $3::timestamptz)
+            `, [loop.id, JSON.stringify({
+              source: "plan_rework_revision",
+              guarded: true,
+              feedback: feedback || null,
+              applied_operations: operations,
+            }), now]);
+            return { kind: "promoted_rework" as const };
+          }
+
           const updateResult = await client.query(`
             UPDATE public.loops
                SET status = 'needs_approval',
@@ -237,24 +399,28 @@ export async function POST(request: NextRequest) {
                AND status = 'planning'
              RETURNING id
           `, [now, loop.id]);
-          if (!updateResult.rows[0]) return false;
-
+          if (!updateResult.rows[0]) throw new Error("locked_plan_promotion_failed");
           await client.query(`
             INSERT INTO public.loop_events
               (loop_id, event_type, from_status, to_status, actor, payload, created_at)
             VALUES
               ($1, 'loop.ready_for_approval', 'planning', 'needs_approval', 'loop-planner', $2::jsonb, $3::timestamptz)
-          `, [
-            loop.id,
-            JSON.stringify({ source: "explicit_plan_pending_promotion", guarded: true }),
-            now,
-          ]);
-          return true;
+          `, [loop.id, JSON.stringify({ source: "explicit_plan_pending_promotion", guarded: true }), now]);
+          return { kind: "promoted_existing" as const };
         });
 
-        if (updated) {
+        if (outcome.kind === "promoted_rework" || outcome.kind === "promoted_existing") {
           promoted++;
-          details.push({ loopId: loop.id, action: "already_planned_and_promoted" });
+          details.push({
+            loopId: loop.id,
+            action: outcome.kind === "promoted_rework"
+              ? "plan_rework_consumed_and_promoted"
+              : "already_planned_and_promoted",
+          });
+        } else if (outcome.kind === "malformed_rework_restored") {
+          details.push({ loopId: loop.id, action: "malformed_plan_rework_restored_for_approval" });
+        } else if (outcome.kind === "not_ready") {
+          details.push({ loopId: loop.id, action: "already_normalized_not_ready" });
         } else {
           details.push({ loopId: loop.id, action: "skipped_status_changed" });
         }

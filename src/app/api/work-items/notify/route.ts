@@ -33,6 +33,7 @@ type LoopContextRow = {
   name: string | null;
   summary: string | null;
   description: string | null;
+  acceptance_criteria: string[] | null;
   clarification_questions: ClarificationQuestion[] | null;
   metadata: {
     original_input?: string | null;
@@ -327,7 +328,7 @@ export async function POST(request: NextRequest) {
     let loop: LoopContextRow | null = null;
     if (useLocalMode) {
       const { rows } = await query(
-        `select id, name, summary, description, clarification_questions, metadata, approval_scope
+        `select id, name, summary, description, acceptance_criteria, clarification_questions, metadata, approval_scope
            from public.loops
           where id = $1
           limit 1`,
@@ -337,7 +338,7 @@ export async function POST(request: NextRequest) {
     } else {
       const { data } = await (db as ReturnType<typeof createServiceClient>)
         .from("loops")
-        .select("id,name,summary,description,clarification_questions,metadata,approval_scope")
+        .select("id,name,summary,description,acceptance_criteria,clarification_questions,metadata,approval_scope")
         .eq("id", item.source_id)
         .maybeSingle();
       loop = data as LoopContextRow | null;

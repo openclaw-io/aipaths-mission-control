@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { CreateLoopModal } from "./CreateLoopModal";
 import { LoopCard } from "./LoopCard";
 import { LoopDetail } from "./LoopDetail";
@@ -10,14 +11,20 @@ import type { LoopDetailPayload, LoopGalleryCard } from "@/lib/loops/read-model"
 
 export function LoopsClient({
   loops,
-  loopDetails,
+  selectedLoopId,
+  selectedLoopDetail,
+  detailError,
 }: {
   loops: LoopGalleryCard[];
-  loopDetails: Record<string, LoopDetailPayload>;
+  selectedLoopId: string | null;
+  selectedLoopDetail: LoopDetailPayload | null;
+  detailError: string | null;
 }) {
+  const router = useRouter();
   const [showCreate, setShowCreate] = useState(false);
-  const [expandedLoop, setExpandedLoop] = useState<string | null>(null);
   const [showCompleted, setShowCompleted] = useState(false);
+  const openLoop = (loopId: string) => router.push(`/loops?loop=${encodeURIComponent(loopId)}`, { scroll: false });
+  const closeLoop = () => router.push("/loops", { scroll: false });
 
   const completedCount = loops.filter((p) => p.status === "completed").length;
   const priorityOrder = { high: 0, medium: 1, low: 2 };
@@ -94,7 +101,7 @@ export function LoopsClient({
             {humanQueue.map((loop) => (
               <button
                 key={loop.id}
-                onClick={() => setExpandedLoop(loop.id)}
+                onClick={() => openLoop(loop.id)}
                 className="rounded-lg border border-gray-800 bg-[#0d0d14] px-3 py-3 text-left transition hover:border-gray-700"
               >
                 <div className="truncate text-sm font-medium text-white">{loop.title}</div>
@@ -122,7 +129,7 @@ export function LoopsClient({
             {executionQueue.map((loop, index) => (
               <button
                 key={loop.id}
-                onClick={() => setExpandedLoop(loop.id)}
+                onClick={() => openLoop(loop.id)}
                 className="rounded-lg border border-gray-800 bg-[#0d0d14] px-3 py-3 text-left transition hover:border-gray-700"
               >
                 <div className="flex items-center gap-2">
@@ -146,15 +153,29 @@ export function LoopsClient({
         <div className="space-y-6">
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
             {sorted.map((loop) => (
-              <LoopCard key={loop.id} loop={loop} onOpen={() => setExpandedLoop(loop.id)} />
+              <LoopCard key={loop.id} loop={loop} onOpen={() => openLoop(loop.id)} />
             ))}
           </div>
           <WorkflowLegendDemo />
         </div>
       )}
 
-      {expandedLoop && loopDetails[expandedLoop] && (
-        <LoopDetail loop={loopDetails[expandedLoop]} onClose={() => setExpandedLoop(null)} />
+      {selectedLoopId && selectedLoopDetail && (
+        <LoopDetail loop={selectedLoopDetail} onClose={closeLoop} />
+      )}
+
+      {selectedLoopId && !selectedLoopDetail && detailError && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="w-full max-w-lg rounded-xl border border-red-900/60 bg-[#0d0d14] p-6 shadow-2xl">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h2 className="text-lg font-semibold text-white">Loop detail unavailable</h2>
+                <p className="mt-2 text-sm text-gray-400">{detailError}</p>
+              </div>
+              <button onClick={closeLoop} className="rounded p-1 text-gray-500 transition hover:text-white">✕</button>
+            </div>
+          </div>
+        </div>
       )}
 
       {showCreate && <CreateLoopModal onClose={() => setShowCreate(false)} />}

@@ -7,6 +7,52 @@ import { buildLoopReworkInstruction } from "@/lib/loops/execution-instruction";
 
 export const dynamic = "force-dynamic";
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+type DecisionLedgerEntry = {
+  decision_id?: unknown;
+  decision_type?: unknown;
+  request?: unknown;
+  response?: unknown;
+};
+
+function parseDecisionId(value: unknown) {
+  return typeof value === "string" && UUID_PATTERN.test(value) ? value.toLowerCase() : null;
+}
+
+function asDecisionLedger(metadata: Record<string, unknown>) {
+  return Array.isArray(metadata.decision_ledger)
+    ? metadata.decision_ledger.filter((entry): entry is DecisionLedgerEntry => Boolean(entry && typeof entry === "object" && !Array.isArray(entry)))
+    : [];
+}
+
+function canonicalJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, child]) => [key, canonicalJson(child)]),
+    );
+  }
+  return value;
+}
+
+function samePayload(left: unknown, right: unknown) {
+  return JSON.stringify(canonicalJson(left)) === JSON.stringify(canonicalJson(right));
+}
+
+function reopenV1PlanWithoutDeliverableMapping(
+  plan: Array<{ title?: string | null; status?: string | null; notes?: string | null }> | null,
+) {
+  if (!Array.isArray(plan)) return [];
+  return plan.map((step) => (
+    typeof step?.title === "string" && step.title.trim()
+      ? { ...step, status: "pending" }
+      : step
+  ));
+}
+
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -31,7 +77,6 @@ export async function POST(
   const feedback = typeof body?.feedback === "string" ? body.feedback.trim() : "";
 
   const transitions: Record<string, { nextStatus: string; eventType: string }> = {
-    request_review: { nextStatus: "in_review", eventType: "loop.review_requested" },
     approve_deliverable: { nextStatus: "completed", eventType: "loop.review_approved" },
     request_changes: { nextStatus: "in_progress", eventType: "loop.review_changes_requested" },
   };
@@ -40,6 +85,18 @@ export async function POST(
   if (!transition) {
     return NextResponse.json({ error: "Invalid review action" }, { status: 400 });
   }
+  const decisionId = parseDecisionId(body?.decision_id);
+  if (!decisionId) {
+    return NextResponse.json({ error: "decision_id_must_be_uuid" }, { status: 400 });
+  }
+
+  const decisionRequest = {
+    decision_type: "deliverable_review",
+    loop_id: id,
+    action,
+    feedback: feedback || null,
+    acted_by: actorIdentity,
+  };
 
   // A Loop review transition can update the Loop, event history and primary
   // execution together. Supabase REST calls cannot make those writes atomic,
@@ -50,203 +107,311 @@ export async function POST(
   }
 
   const now = new Date().toISOString();
+  type LocalLoop = {
+    id: string;
+    status: string;
+    name: string | null;
+    summary: string | null;
+    description: string | null;
+    target_outcome: string | null;
+    acceptance_criteria: string[] | null;
+    plan: Array<{ title?: string | null; status?: string | null; notes?: string | null }> | null;
+    metadata: Record<string, unknown> | null;
+    approval_scope: {
+      approved?: boolean;
+      can_execute_unattended?: boolean;
+      approved_plan_revision_id?: string | null;
+      approved_plan_hash?: string | null;
+      allowed_actions?: string[] | null;
+      forbidden_actions?: string[] | null;
+      notes?: string | null;
+    } | null;
+    owner_agent: string | null;
+    workflow_version: number;
+    current_plan_revision_id: string | null;
+  };
+  type LocalPrimaryExecution = {
+    work_item_id: string;
+    status: string | null;
+    payload: Record<string, unknown> | null;
+  };
 
-  if (useLocalMode) {
-    type LocalLoop = {
-      id: string;
-      status: string;
-      name: string | null;
-      summary: string | null;
-      description: string | null;
-      target_outcome: string | null;
-      plan: Array<{ title?: string | null; status?: string | null; notes?: string | null }> | null;
-      metadata: Record<string, unknown> | null;
-      approval_scope: {
-        allowed_actions?: string[] | null;
-        forbidden_actions?: string[] | null;
-        notes?: string | null;
-      } | null;
-      owner_agent: string | null;
-    };
-    type LocalPrimaryExecution = {
-      work_item_id: string;
-      status: string | null;
-      payload: Record<string, unknown> | null;
-    };
+  const localResult = await withTransaction(async (client) => {
+    const loopRes = await client.query<LocalLoop>(
+      `select id, status, name, summary, description, target_outcome, acceptance_criteria, plan, metadata, approval_scope, owner_agent,
+              workflow_version, current_plan_revision_id
+         from loops
+        where id = $1
+        limit 1
+        for update`,
+      [id],
+    );
+    const loop = loopRes.rows[0];
+    if (!loop) return { kind: "not_found" as const };
 
-    const localResult = await withTransaction(async (client) => {
-      const loopRes = await client.query<LocalLoop>(
-        `select id, status, name, summary, description, target_outcome, plan, metadata, approval_scope, owner_agent
-           from loops
-          where id = $1
-          limit 1
-          for update`,
-        [id],
-      );
-      const loop = loopRes.rows[0];
-      if (!loop) return { kind: "not_found" as const };
-
-      const primaryRes = await client.query<LocalPrimaryExecution>(
-        `select lwi.work_item_id, wi.status, wi.payload
-           from loop_work_items lwi
-           join work_items wi on wi.id = lwi.work_item_id
-          where lwi.loop_id = $1
-            and lwi.relation_type = 'primary_execution'
-          order by wi.updated_at desc nulls last, wi.created_at desc
-          limit 1
-          for update of wi`,
-        [id],
-      );
-      const primaryExecution = primaryRes.rows[0] || null;
-
-      const loopMetadata = (loop.metadata || {}) as Record<string, unknown>;
-      const reviewHistory = Array.isArray(loopMetadata.review_history)
-        ? loopMetadata.review_history
-        : [];
-      const latestReview = reviewHistory.at(-1);
-      const latestReviewRecord = latestReview && typeof latestReview === "object" && !Array.isArray(latestReview)
-        ? latestReview as Record<string, unknown>
-        : null;
-      const isReplay = loop.status === transition.nextStatus
-        && latestReviewRecord !== null
-        && latestReviewRecord.action === action
-        && latestReviewRecord.feedback === (feedback || null)
-        && latestReviewRecord.acted_by === actorIdentity;
-
-      if (isReplay) {
-        return { kind: "success" as const, workItemId: null, ownerAgent: loop.owner_agent };
+    const loopMetadata = (loop.metadata || {}) as Record<string, unknown>;
+    const decisionLedger = asDecisionLedger(loopMetadata);
+    const persisted = decisionLedger.find((entry) => entry.decision_id === decisionId);
+    if (persisted) {
+      if (persisted.decision_type !== "deliverable_review" || !samePayload(persisted.request, decisionRequest)) {
+        return { kind: "idempotency_conflict" as const };
       }
+      return {
+        kind: "replay" as const,
+        response: persisted.response as Record<string, unknown>,
+      };
+    }
 
-      // Exact review replays are valid after the first request has already
-      // changed both source rows. Any genuinely new action must still satisfy
-      // the source-state matrix below.
-      if (action === "approve_deliverable" || action === "request_changes") {
-        if (loop.status !== "in_review") {
-          return { kind: "invalid_transition" as const, error: "invalid_review_state" };
-        }
-        if (!primaryExecution) {
-          return { kind: "invalid_transition" as const, error: "primary_execution_missing" };
-        }
-        if (primaryExecution.status !== "done") {
-          return {
-            kind: "invalid_transition" as const,
-            error: "primary_execution_not_done",
-            workItemId: primaryExecution.work_item_id,
-            workItemStatus: primaryExecution.status,
-          };
-        }
+    if (loop.workflow_version === 2) {
+      if (action === "request_changes") return { kind: "v2_changes_unsupported" as const };
+      if (loop.status !== "in_review" || !loop.current_plan_revision_id) {
+        return { kind: "invalid_transition" as const, error: "invalid_review_state" };
       }
+      const revisionResult = await client.query<{ status: string; content_hash: string | null; plan_snapshot: unknown }>(
+        "select status,content_hash,plan_snapshot from loop_plan_revisions where id=$1 and loop_id=$2 for update",
+        [loop.current_plan_revision_id, id],
+      );
+      const revision = revisionResult.rows[0];
+      const scope = loop.approval_scope || {};
+      if (revision?.status !== "approved" || !revision.content_hash || !revision.plan_snapshot
+        || scope.approved !== true || scope.can_execute_unattended !== true
+        || scope.approved_plan_revision_id !== loop.current_plan_revision_id
+        || scope.approved_plan_hash !== revision.content_hash) {
+        return { kind: "invalid_transition" as const, error: "v2_approved_revision_mismatch" };
+      }
+      await client.query(
+        `select t.id from loop_tasks t join loop_stages s on s.id=t.stage_id
+          where s.plan_revision_id=$1 order by s.position,s.id,t.position,t.id for update of t,s`,
+        [loop.current_plan_revision_id],
+      );
+      await client.query(
+        `select r.id from loop_task_runs r join loop_tasks t on t.id=r.task_id
+          join loop_stages s on s.id=t.stage_id where s.plan_revision_id=$1 order by t.id,r.id for update of r`,
+        [loop.current_plan_revision_id],
+      );
+      await client.query(
+        `select wi.id from work_items wi join loop_task_runs r on r.work_item_id=wi.id
+          join loop_tasks t on t.id=r.task_id join loop_stages s on s.id=t.stage_id
+          where s.plan_revision_id=$1 order by t.id,r.id,wi.id for update of wi`,
+        [loop.current_plan_revision_id],
+      );
+      const taskRows = await client.query<{
+        id: string; task_status: string; stage_status: string; run_count: number; consistent_run_count: number;
+      }>(
+        `select t.id,t.status task_status,s.status stage_status,count(r.id)::int run_count,
+                count(r.id) filter (where r.status='succeeded' and r.run_role='implementation'
+                  and r.quality_cycle=1 and r.work_item_id is not null and r.execution_attempt_id is not null
+                  and wi.id=r.work_item_id and wi.loop_id=$2 and wi.source_type='loop' and wi.source_id=t.id::text
+                  and wi.status='done' and wi.payload->>'execution_attempt_id'=r.execution_attempt_id::text
+                  and wi.payload->>'plan_revision_id'=$1::text and wi.payload->>'plan_hash'=$3
+                  and lwi.loop_id=$2 and lwi.work_item_id=r.work_item_id
+                  and lwi.relation_type='task_execution')::int consistent_run_count
+           from loop_tasks t join loop_stages s on s.id=t.stage_id
+           left join loop_task_runs r on r.task_id=t.id
+           left join work_items wi on wi.id=r.work_item_id
+           left join loop_work_items lwi on lwi.work_item_id=r.work_item_id and lwi.relation_type='task_execution'
+          where s.plan_revision_id=$1::uuid group by t.id,t.status,s.status order by t.id`,
+        [loop.current_plan_revision_id, id, revision.content_hash],
+      );
+      const mapIntegrity = await client.query<{ mapping_count: number; active_count: number; extra_count: number }>(
+        `select
+          (select count(*)::int from loop_work_items where loop_id=$2 and relation_type='task_execution') mapping_count,
+          (select count(*)::int from loop_task_runs r join loop_tasks t on t.id=r.task_id
+            join loop_stages s on s.id=t.stage_id where s.plan_revision_id=$1 and r.status in ('queued','running')) active_count,
+          (select count(*)::int from loop_work_items lwi where lwi.loop_id=$2 and lwi.relation_type='task_execution'
+            and not exists (select 1 from loop_task_runs r join loop_tasks t on t.id=r.task_id
+              join loop_stages s on s.id=t.stage_id where r.work_item_id=lwi.work_item_id and s.plan_revision_id=$1)) extra_count`,
+        [loop.current_plan_revision_id, id],
+      );
+      const integrity = mapIntegrity.rows[0];
+      const consistent = taskRows.rows.length > 0
+        && taskRows.rows.every((task) => task.task_status === "completed" && task.stage_status === "completed"
+          && task.run_count === 1 && task.consistent_run_count === 1)
+        && integrity?.mapping_count === taskRows.rows.length && integrity.active_count === 0 && integrity.extra_count === 0;
+      if (!consistent) return { kind: "invalid_transition" as const, error: "v2_task_runs_inconsistent" };
 
+      const response = { ok: true, id, status: "completed", decision_id: decisionId };
+      const reviewHistory = Array.isArray(loopMetadata.review_history) ? loopMetadata.review_history : [];
       const metadata = {
         ...loopMetadata,
-        review_history: [
-          ...reviewHistory,
-          { action, feedback: feedback || null, acted_at: now, acted_by: actorIdentity },
-        ],
+        review_history: [...reviewHistory, { decision_id: decisionId, action, feedback: feedback || null, acted_at: now, acted_by: actorIdentity }],
+        decision_ledger: [...decisionLedger, {
+          decision_id: decisionId, decision_type: "deliverable_review", request: decisionRequest,
+          response, created_at: now,
+        }],
       };
+      await client.query(
+        `update loops set status='completed',metadata=$1::jsonb,last_completed_at=$2,
+                updated_at=$2,row_version=row_version+1
+          where id=$3 and status='in_review' and current_plan_revision_id=$4`,
+        [JSON.stringify(metadata), now, id, loop.current_plan_revision_id],
+      );
+      await client.query(
+        `insert into loop_events(loop_id,event_type,from_status,to_status,actor,payload,created_at)
+         values ($1,'loop.review_approved','in_review','completed',$2,$3::jsonb,$4)`,
+        [id, actorIdentity, JSON.stringify({ decision_id: decisionId, action, feedback: feedback || null, workflow_version: 2 }), now],
+      );
+      return { kind: "success" as const, response };
+    }
 
+    // Explicit V1 branch retains primary_execution deliverable semantics.
+    const primaryRes = await client.query<LocalPrimaryExecution>(
+      `select lwi.work_item_id, wi.status, wi.payload
+         from loop_work_items lwi
+         join work_items wi on wi.id = lwi.work_item_id
+        where lwi.loop_id = $1
+          and lwi.relation_type = 'primary_execution'
+        order by wi.updated_at desc nulls last, wi.created_at desc
+        limit 1
+        for update of wi`,
+      [id],
+    );
+    const primaryExecution = primaryRes.rows[0] || null;
+
+    if (loop.status !== "in_review") {
+      return { kind: "invalid_transition" as const, error: "invalid_review_state" };
+    }
+    if (!primaryExecution) {
+      return { kind: "invalid_transition" as const, error: "primary_execution_missing" };
+    }
+    if (primaryExecution.status !== "done") {
+      return {
+        kind: "invalid_transition" as const,
+        error: "primary_execution_not_done",
+        workItemId: primaryExecution.work_item_id,
+        workItemStatus: primaryExecution.status,
+      };
+    }
+
+    const reviewHistory = Array.isArray(loopMetadata.review_history)
+      ? loopMetadata.review_history
+      : [];
+    const reopenedPlan = action === "request_changes"
+      ? reopenV1PlanWithoutDeliverableMapping(loop.plan)
+      : null;
+    const reopenedPlanSteps = reopenedPlan
+      ? reopenedPlan.filter((step, index) => step?.status === "pending" && loop.plan?.[index]?.status !== "pending").length
+      : 0;
+
+    const workItemId = action === "request_changes" ? primaryExecution.work_item_id : null;
+    const response = { ok: true, id, status: transition.nextStatus, decision_id: decisionId };
+    const metadata = {
+      ...loopMetadata,
+      review_history: [
+        ...reviewHistory,
+        { decision_id: decisionId, action, feedback: feedback || null, acted_at: now, acted_by: actorIdentity },
+      ],
+      decision_ledger: [
+        ...decisionLedger,
+        {
+          decision_id: decisionId,
+          decision_type: "deliverable_review",
+          request: decisionRequest,
+          response,
+          created_at: now,
+        },
+      ],
+    };
+
+    if (reopenedPlan) {
+      await client.query(
+        `update loops set status = $1, metadata = $2::jsonb, plan = $3::jsonb, updated_at = $4 where id = $5`,
+        [transition.nextStatus, JSON.stringify(metadata), JSON.stringify(reopenedPlan), now, id],
+      );
+    } else {
       await client.query(
         `update loops set status = $1, metadata = $2::jsonb, updated_at = $3 where id = $4`,
         [transition.nextStatus, JSON.stringify(metadata), now, id],
       );
+    }
+    await client.query(
+      `insert into loop_events (loop_id, event_type, from_status, to_status, actor, payload, created_at)
+       values ($1, $2, $3, $4, $5, $6::jsonb, $7)`,
+      [id, transition.eventType, loop.status, transition.nextStatus, actorIdentity, JSON.stringify({
+        decision_id: decisionId,
+        action,
+        feedback: feedback || null,
+        ...(action === "request_changes" ? {
+          plan_reopen_policy: "all_non_empty_steps_v1_no_mapping",
+          reopened_plan_steps: reopenedPlanSteps,
+        } : {}),
+      }), now],
+    );
+
+    if (action === "request_changes") {
+      const reviewInstruction = buildLoopReworkInstruction(loop, feedback, id);
+      const existingWorkPayload = (primaryExecution.payload || {}) as Record<string, unknown>;
+      const loopFeedbackHistory = Array.isArray(loopMetadata.latest_deliverable_feedback_history)
+        ? loopMetadata.latest_deliverable_feedback_history
+        : [];
+      const priorReviewFeedback = Array.isArray(existingWorkPayload.prior_review_feedback)
+        ? existingWorkPayload.prior_review_feedback
+        : loopFeedbackHistory;
+      const workPayload: Record<string, unknown> = { ...existingWorkPayload };
+      for (const key of [
+        "dispatch_session_id",
+        "dispatch_session_key",
+        "dispatch_session_started_at",
+        "dispatch_wake_mode",
+        "dispatch_cron_job_id",
+        "dispatch_cron_run_id",
+        "dispatch_completed_at",
+        "dispatch_failure_reason",
+        "dispatch_retry_scheduled_for",
+        "dispatch_escalation",
+        "claimed_at",
+        "claimed_by",
+        "error",
+      ]) {
+        delete workPayload[key];
+      }
+      const currentGeneration = Number(existingWorkPayload.execution_generation);
+      Object.assign(workPayload, {
+        review_feedback: feedback || null,
+        rework_requested_at: now,
+        rework_requested_by: actorIdentity,
+        rework_decision_id: decisionId,
+        prior_review_feedback: priorReviewFeedback,
+        execution_attempt_id: randomUUID(),
+        execution_generation: Number.isInteger(currentGeneration) && currentGeneration >= 0
+          ? currentGeneration + 1
+          : 1,
+        dispatch_state: "ready_for_rework",
+        dispatch_attempts: 0,
+        wake_failure_count: 0,
+      });
+
       await client.query(
-        `insert into loop_events (loop_id, event_type, from_status, to_status, actor, payload, created_at)
-         values ($1, $2, $3, $4, $5, $6::jsonb, $7)`,
-        [id, transition.eventType, loop.status, transition.nextStatus, actorIdentity, JSON.stringify({ action, feedback: feedback || null }), now],
-      );
-
-      let workItemId: string | null = null;
-      if (action === "request_changes" && primaryExecution) {
-        workItemId = primaryExecution.work_item_id;
-        const reviewInstruction = buildLoopReworkInstruction(loop, feedback, id);
-        const existingWorkPayload = (primaryExecution.payload || {}) as Record<string, unknown>;
-        const loopFeedbackHistory = Array.isArray(loopMetadata.latest_deliverable_feedback_history)
-          ? loopMetadata.latest_deliverable_feedback_history
-          : [];
-        const priorReviewFeedback = Array.isArray(existingWorkPayload.prior_review_feedback)
-          ? existingWorkPayload.prior_review_feedback
-          : loopFeedbackHistory;
-        const workPayload: Record<string, unknown> = { ...existingWorkPayload };
-        for (const key of [
-          "dispatch_session_id",
-          "dispatch_session_key",
-          "dispatch_session_started_at",
-          "dispatch_wake_mode",
-          "dispatch_cron_job_id",
-          "dispatch_cron_run_id",
-          "dispatch_completed_at",
-          "dispatch_failure_reason",
-          "dispatch_retry_scheduled_for",
-          "dispatch_escalation",
-          "claimed_at",
-          "claimed_by",
-          "error",
-        ]) {
-          delete workPayload[key];
-        }
-        const currentGeneration = Number(existingWorkPayload.execution_generation);
-        Object.assign(workPayload, {
-          review_feedback: feedback || null,
-          rework_requested_at: now,
-          rework_requested_by: actorIdentity,
-          prior_review_feedback: priorReviewFeedback,
-          execution_attempt_id: randomUUID(),
-          execution_generation: Number.isInteger(currentGeneration) && currentGeneration >= 0
-            ? currentGeneration + 1
-            : 1,
-          dispatch_state: "ready_for_rework",
-          dispatch_attempts: 0,
-          wake_failure_count: 0,
-        });
-
-        await client.query(
-          `update work_items
-              set status = 'ready', updated_at = $1, started_at = null, completed_at = null, instruction = $2, payload = $3::jsonb
-            where id = $4`,
-          [now, reviewInstruction, JSON.stringify(workPayload), workItemId],
-        );
-      }
-
-      return { kind: "success" as const, workItemId, ownerAgent: loop.owner_agent };
-    });
-
-    if (localResult.kind === "not_found") {
-      return NextResponse.json({ error: "Loop not found" }, { status: 404 });
-    }
-    if (localResult.kind === "invalid_transition") {
-      return NextResponse.json(
-        {
-          error: localResult.error,
-          ...("workItemId" in localResult
-            ? { workItemId: localResult.workItemId, workItemStatus: localResult.workItemStatus }
-            : {}),
-        },
-        { status: 409 },
+        `update work_items
+            set status = 'ready', updated_at = $1, started_at = null, completed_at = null, instruction = $2, payload = $3::jsonb
+          where id = $4`,
+        [now, reviewInstruction, JSON.stringify(workPayload), workItemId],
       );
     }
 
-    if (localResult.workItemId) {
-      try {
-        const notification = await fetch("http://127.0.0.1:3001/api/work-items/notify", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${process.env.AGENT_API_KEY}`,
-          },
-          body: JSON.stringify({ workItemId: localResult.workItemId, agent: localResult.ownerAgent, action: "unblocked" }),
-        });
-        if (!notification.ok) {
-          console.error(`[loop-review] notify on request_changes failed with HTTP ${notification.status}`);
-        }
-      } catch (error) {
-        console.error("[loop-review] notify on request_changes failed:", error);
-      }
-    }
+    return { kind: "success" as const, response };
+  });
 
-    return NextResponse.json({ ok: true, id, status: transition.nextStatus });
+  if (localResult.kind === "not_found") {
+    return NextResponse.json({ error: "Loop not found" }, { status: 404 });
+  }
+  if (localResult.kind === "idempotency_conflict") {
+    return NextResponse.json({ error: "decision_id_payload_conflict" }, { status: 409 });
+  }
+  if (localResult.kind === "v2_changes_unsupported") {
+    return NextResponse.json({ error: "v2_deliverable_changes_not_implemented" }, { status: 501 });
+  }
+  if (localResult.kind === "invalid_transition") {
+    return NextResponse.json(
+      {
+        error: localResult.error,
+        ...("workItemId" in localResult
+          ? { workItemId: localResult.workItemId, workItemStatus: localResult.workItemStatus }
+          : {}),
+      },
+      { status: 409 },
+    );
   }
 
-  // Unreachable because cloud mode returned fail-closed above. Keep a final
-  // defensive response if the local-mode predicate ever stops being stable.
-  return NextResponse.json({ error: "cloud_loop_review_writes_not_supported" }, { status: 503 });
+  return NextResponse.json(localResult.response);
 }
