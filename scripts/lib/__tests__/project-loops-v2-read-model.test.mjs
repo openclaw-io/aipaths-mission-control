@@ -79,9 +79,12 @@ test("V1 is projected as one synthetic stage with stable synthetic tasks and par
         status: "completed",
         synthetic: true,
         dependencies: [],
-        runs: [],
-        reviews: [],
-        evidence: [],
+        runCount: 0,
+        runStatuses: [],
+        reviewCount: 0,
+        reviewStatuses: [],
+        evidenceCount: 0,
+        evidenceKinds: [],
       },
       {
         id: "synthetic:loop-v1:task:1",
@@ -92,9 +95,12 @@ test("V1 is projected as one synthetic stage with stable synthetic tasks and par
         status: "pending",
         synthetic: true,
         dependencies: ["synthetic:loop-v1:task:discover"],
-        runs: [],
-        reviews: [],
-        evidence: [],
+        runCount: 0,
+        runStatuses: [],
+        reviewCount: 0,
+        reviewStatuses: [],
+        evidenceCount: 0,
+        evidenceKinds: [],
       },
     ],
   }]);
@@ -135,13 +141,17 @@ test("V2 renders only the current real revision and attaches normalized history 
 
   assert.equal(projected.source, "v2_normalized");
   assert.equal(projected.workflowVersion, 2);
-  assert.equal(projected.historyCompleteness, "complete");
+  assert.equal(projected.historyCompleteness, "bounded");
   assert.equal(projected.planRevision.id, "rev-2");
+  assert.equal(projected.planRevision.revisionNumber, 2);
   assert.deepEqual(Array.from(projected.stages, (stage) => stage.id), ["stage-1", "stage-2"]);
   assert.deepEqual(Array.from(projected.stages[1].tasks[0].dependencies), ["task-design"]);
-  assert.equal(projected.stages[1].tasks[0].runs[0].id, "run-1");
-  assert.equal(projected.stages[1].tasks[0].reviews[0].id, "review-1");
-  assert.equal(projected.stages[1].tasks[0].evidence[0].id, "evidence-1");
+  assert.equal(projected.stages[1].tasks[0].runCount, 1);
+  assert.deepEqual(Array.from(projected.stages[1].tasks[0].runStatuses), ["running"]);
+  assert.equal(projected.stages[1].tasks[0].reviewCount, 1);
+  assert.deepEqual(Array.from(projected.stages[1].tasks[0].reviewStatuses), ["pending"]);
+  assert.equal(projected.stages[1].tasks[0].evidenceCount, 1);
+  assert.deepEqual(Array.from(projected.stages[1].tasks[0].evidenceKinds), ["artifact"]);
   assert.equal(projected.stages.some((stage) => stage.id === "stage-old"), false);
 });
 

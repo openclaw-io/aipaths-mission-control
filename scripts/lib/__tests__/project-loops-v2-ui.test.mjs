@@ -40,12 +40,15 @@ function loadProjection() {
   return transpileModule(resolve(repoRoot, "src/lib/loops/read-model-v2-shadow.ts"), {});
 }
 
-function loadReadModel({ query, local = true, primary = null, primaryByLoop = new Map() }) {
+function loadReadModel({ query, local = true, primary = null, primaryByLoop = new Map(), supabaseAdmin = {} }) {
   return transpileModule(resolve(repoRoot, "src/lib/loops/read-model.ts"), {
     "@/lib/auth/local": { isLocalAuthDisabled: () => local },
     "@/lib/db/mission-control": { normalizeRows: (rows) => rows },
-    "@/lib/db/postgres": { query },
-    "@/lib/supabase/admin": { supabaseAdmin: {} },
+    "@/lib/db/postgres": {
+      query,
+      withTransaction: async (fn) => fn({ query }),
+    },
+    "@/lib/supabase/admin": { supabaseAdmin },
     "@/lib/loops/lifecycle": {
       getLoopStatusForPrimaryExecution: () => null,
       getPrimaryExecutionWorkItem: async () => primary,
@@ -102,7 +105,8 @@ function workflowRows({ malformedDependency = false } = {}) {
 function detailQuery(rows, calls) {
   return async (sql, params = []) => {
     calls.push({ sql, params });
-    if (/from loops[\s\S]*where id = \$1/i.test(sql)) return { rows: [baseLoop] };
+    if (/set transaction isolation level repeatable read/i.test(sql)) return { rows: [] };
+    if (/from loops[\s\S]*where id = \$1/i.test(sql)) return { rows: [{ ...baseLoop, row_version: 7 }] };
     if (/from loop_plan_revisions/i.test(sql)) return { rows: [rows.revision] };
     if (/from loop_stages/i.test(sql) && !/join loop_stages/i.test(sql)) return { rows: rows.stages };
     if (/from loop_tasks/i.test(sql) && /join loop_stages/i.test(sql)) return { rows: rows.tasks };
@@ -128,9 +132,11 @@ test("getLoopDetail local builds a V2 workflow from revision-scoped read-only qu
   assert.equal(detail.workflow.source, "v2_normalized");
   assert.deepEqual(Array.from(detail.workflow.stages, (stage) => stage.id), ["stage-design", "stage-build"]);
   assert.deepEqual(Array.from(detail.workflow.stages[1].tasks[0].dependencies), ["task-design"]);
-  assert.equal(detail.workflow.stages[1].tasks[0].runs.length, 1);
-  assert.equal(detail.workflow.stages[1].tasks[0].reviews.length, 1);
-  assert.equal(detail.workflow.stages[1].tasks[0].evidence.length, 1);
+  assert.equal(detail.workflow.stages[1].tasks[0].runCount, 1);
+  assert.deepEqual(Array.from(detail.workflow.stages[1].tasks[0].runStatuses), ["running"]);
+  assert.equal(detail.workflow.stages[1].tasks[0].reviewCount, 1);
+  assert.deepEqual(Array.from(detail.workflow.stages[1].tasks[0].reviewStatuses), ["pending"]);
+  assert.equal(detail.workflow.stages[1].tasks[0].evidenceCount, 1);
 
   const revisionCall = calls.find(({ sql }) => /from loop_plan_revisions/i.test(sql));
   assert.deepEqual(Array.from(revisionCall.params), ["rev-2", "loop-v2"]);
@@ -144,6 +150,61 @@ test("getLoopDetail local builds a V2 workflow from revision-scoped read-only qu
     assert.deepEqual(Array.from(call.params[0]).sort(), ["task-build", "task-design"]);
   }
   assert.doesNotMatch(calls.map(({ sql }) => sql).join("\n"), /\b(?:insert|update|delete)\b/i);
+  assert.match(calls[0].sql, /repeatable read/i);
+  assert.match(calls.at(-1).sql, /row_version/i);
+});
+
+test("V2 detail DTO and SQL do not leak unused history payloads and history reads are bounded", async () => {
+  const calls = [];
+  const rows = workflowRows();
+  rows.runs[0] = { ...rows.runs[0], error: "SECRET_ERROR", output: { secret: "SECRET_OUTPUT" } };
+  rows.reviews[0] = { ...rows.reviews[0], feedback: "SECRET_FEEDBACK" };
+  rows.evidence[0] = { ...rows.evidence[0], uri: "SECRET_URI", content: "SECRET_CONTENT", metadata: { secret: true } };
+  const { getLoopDetail } = loadReadModel({ query: detailQuery(rows, calls) });
+
+  const detail = await getLoopDetail("loop-v2");
+  const serialized = JSON.stringify(detail);
+  assert.doesNotMatch(serialized, /SECRET_|"(?:output|error|feedback|content|uri|metadata)"/i);
+  for (const table of ["loop_task_runs", "loop_task_reviews", "loop_evidence"]) {
+    const sql = calls.find((call) => new RegExp(`from ${table}`, "i").test(call.sql))?.sql || "";
+    assert.match(sql, /limit\s+\$\d+/i, `${table} history must have a parameterized limit`);
+    assert.doesNotMatch(sql, /\b(?:output|error|feedback|content|uri|metadata)\b/i);
+  }
+});
+
+test("V2 detail rejects a snapshot whose row version or current revision changes at final validation", async () => {
+  const calls = [];
+  const rows = workflowRows();
+  let loopReads = 0;
+  const baseQuery = detailQuery(rows, calls);
+  const query = async (sql, params = []) => {
+    if (/from loops[\s\S]*where id = \$1/i.test(sql)) {
+      loopReads += 1;
+      calls.push({ sql, params });
+      return { rows: [{ ...baseLoop, row_version: loopReads === 1 ? 7 : 8 }] };
+    }
+    return baseQuery(sql, params);
+  };
+  const { getLoopDetail } = loadReadModel({ query });
+  await assert.rejects(() => getLoopDetail("loop-v2"), /snapshot.*changed|inconsistent/i);
+});
+
+test("cloud V2 detail fails closed explicitly instead of returning a legacy plan", async () => {
+  const loopBuilder = {
+    select() { return this; },
+    eq() { return this; },
+    async maybeSingle() { return { data: { ...baseLoop, row_version: 7 }, error: null }; },
+  };
+  const supabaseAdmin = { from(table) {
+    assert.equal(table, "loops", "cloud V2 must fail before querying detail adjunct tables");
+    return loopBuilder;
+  } };
+  const { getLoopDetail } = loadReadModel({
+    query: async () => { throw new Error("local query must not run"); },
+    local: false,
+    supabaseAdmin,
+  });
+  await assert.rejects(() => getLoopDetail("loop-v2"), /V2.*cloud.*unavailable|fail.*closed/i);
 });
 
 test("getLoopDetail fails closed when the bounded V2 snapshot contains an external dependency", async () => {
@@ -164,9 +225,9 @@ test("gallery uses normalized V2 tasks for progress and preserves legacy V1 plan
     if (/from loops[\s\S]*order by updated_at desc/i.test(sql)) return { rows: loops };
     if (/from loop_work_items/i.test(sql)) return { rows: [] };
     if (/loop_tasks/i.test(sql) && /loop_id/i.test(sql)) return { rows: [
-      { loop_id: "loop-v2", status: "completed" },
-      { loop_id: "loop-v2", status: "in_progress" },
-      { loop_id: "loop-v2", status: "pending" },
+      { loop_id: "loop-v2", revision_id: "rev-2", status: "completed" },
+      { loop_id: "loop-v2", revision_id: "rev-2", status: "in_progress" },
+      { loop_id: "loop-v2", revision_id: "rev-2", status: "pending" },
     ] };
     throw new Error(`Unexpected query: ${sql}`);
   };
@@ -179,7 +240,62 @@ test("gallery uses normalized V2 tasks for progress and preserves legacy V1 plan
   assert.equal(v2.progressPercent, 33);
   assert.equal(v1.progressLabel, "1/2 steps");
   assert.equal(v1.progressPercent, 50);
-  assert.ok(calls.some(({ sql }) => /workflow_version\s*=\s*2/i.test(sql) && /current_plan_revision_id/i.test(sql)));
+  const progressCall = calls.find(({ sql }) => /from loop_plan_revisions/i.test(sql) && /loop_tasks/i.test(sql));
+  assert.deepEqual(Array.from(progressCall.params[0]), ["rev-2"]);
+  assert.doesNotMatch(progressCall.sql, /selected_loop\.current_plan_revision_id/i);
+});
+
+test("gallery V2 progress handles zero tasks and counts skipped/cancelled as terminal from captured revisions", async () => {
+  const loops = [
+    baseLoop,
+    { ...baseLoop, id: "loop-zero", name: "Zero", current_plan_revision_id: "rev-zero" },
+  ];
+  const query = async (sql) => {
+    if (/from loops[\s\S]*order by updated_at desc/i.test(sql)) return { rows: loops };
+    if (/from loop_work_items/i.test(sql)) return { rows: [] };
+    if (/from loop_plan_revisions/i.test(sql)) return { rows: [
+      { loop_id: "loop-v2", revision_id: "rev-2", status: "skipped" },
+      { loop_id: "loop-v2", revision_id: "rev-2", status: "cancelled" },
+    ] };
+    throw new Error(`Unexpected query: ${sql}`);
+  };
+  const { listLoopGalleryCards } = loadReadModel({ query });
+  const cards = await listLoopGalleryCards();
+  assert.equal(cards.find((card) => card.id === "loop-v2").progressLabel, "2/2 tasks");
+  assert.equal(cards.find((card) => card.id === "loop-v2").progressPercent, 100);
+  assert.equal(cards.find((card) => card.id === "loop-zero").progressLabel, "0/0 tasks");
+  assert.equal(cards.find((card) => card.id === "loop-zero").progressPercent, 0);
+});
+
+test("/loops initial render has constant reads and only loads one query-param-selected detail", async () => {
+  const pageSource = readFileSync(resolve(repoRoot, "src/app/loops/page.tsx"), "utf8");
+  assert.doesNotMatch(pageSource, /loops\.map\([\s\S]*getLoopDetail/i);
+  assert.match(pageSource, /searchParams/i);
+  assert.match(pageSource, /selectedLoopId[\s\S]*getLoopDetail\(selectedLoopId\)/i);
+
+  let galleryReads = 0;
+  let detailReads = 0;
+  const pageModule = transpileModule(resolve(repoRoot, "src/app/loops/page.tsx"), {
+    "react/jsx-runtime": awaitableJsxRuntime,
+    "@/components/loops/LoopsClient": { LoopsClient: () => null },
+    "@/lib/loops/read-model": {
+      listLoopGalleryCards: async () => {
+        galleryReads += 1;
+        return Array.from({ length: 500 }, (_, index) => ({ id: `loop-${index}` }));
+      },
+      getLoopDetail: async (id) => {
+        detailReads += 1;
+        return { id };
+      },
+    },
+  });
+
+  await pageModule.default({ searchParams: Promise.resolve({}) });
+  assert.equal(galleryReads, 1);
+  assert.equal(detailReads, 0, "initial detail query count must stay zero regardless of gallery size");
+  await pageModule.default({ searchParams: Promise.resolve({ loop: "loop-499" }) });
+  assert.equal(galleryReads, 2);
+  assert.equal(detailReads, 1, "selected navigation may load exactly one detail");
 });
 
 function baseDetail(overrides = {}) {

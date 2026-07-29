@@ -60,13 +60,7 @@ export type ShadowDependencyRow = {
 export type ShadowRunRow = {
   id: string;
   task_id: string;
-  attempt_number: number;
   status: string;
-  started_at: string | null;
-  finished_at: string | null;
-  error: string | null;
-  output: Record<string, unknown>;
-  created_at?: string;
 };
 
 export type ShadowReviewRow = {
@@ -74,10 +68,6 @@ export type ShadowReviewRow = {
   task_id: string;
   task_run_id: string | null;
   status: string;
-  reviewer: string | null;
-  feedback: string | null;
-  decided_at: string | null;
-  created_at: string;
 };
 
 export type ShadowEvidenceRow = {
@@ -85,10 +75,6 @@ export type ShadowEvidenceRow = {
   task_id: string;
   task_run_id: string | null;
   kind: string;
-  uri: string | null;
-  content: string | null;
-  metadata: Record<string, unknown>;
-  created_at: string;
 };
 
 export type LoopWorkflowShadowInput = {
@@ -111,9 +97,12 @@ export type ShadowTask = {
   status: WorkflowItemStatus;
   synthetic: boolean;
   dependencies: string[];
-  runs: ShadowRunRow[];
-  reviews: ShadowReviewRow[];
-  evidence: ShadowEvidenceRow[];
+  runCount: number;
+  runStatuses: string[];
+  reviewCount: number;
+  reviewStatuses: string[];
+  evidenceCount: number;
+  evidenceKinds: string[];
 };
 
 export type ShadowStage = {
@@ -132,8 +121,12 @@ export type LoopWorkflowShadow = {
   workflowVersion: 1 | 2;
   mode: WorkflowMode;
   source: "v1_synthetic" | "v2_normalized";
-  historyCompleteness: "partial" | "complete";
-  planRevision: ShadowPlanRevisionRow | null;
+  historyCompleteness: "partial" | "bounded";
+  planRevision: {
+    id: string;
+    revisionNumber: number;
+    status: string;
+  } | null;
   stages: ShadowStage[];
 };
 
@@ -189,9 +182,12 @@ function projectV1(loop: ShadowLoopRow): LoopWorkflowShadow {
           ? sourceSteps[position - 1].id
           : String(position - 1)
       }`],
-      runs: [],
-      reviews: [],
-      evidence: [],
+      runCount: 0,
+      runStatuses: [],
+      reviewCount: 0,
+      reviewStatuses: [],
+      evidenceCount: 0,
+      evidenceKinds: [],
     };
   });
 
@@ -300,18 +296,12 @@ function projectV2(input: LoopWorkflowShadowInput): LoopWorkflowShadow {
           .filter((dependency) => dependency.task_id === task.id && selectedTaskIds.has(dependency.depends_on_task_id))
           .map((dependency) => dependency.depends_on_task_id)
           .sort(),
-        runs: input.runs
-          .filter((run) => run.task_id === task.id)
-          .slice()
-          .sort((left, right) => left.attempt_number - right.attempt_number || left.id.localeCompare(right.id)),
-        reviews: input.reviews
-          .filter((review) => review.task_id === task.id)
-          .slice()
-          .sort((left, right) => left.created_at.localeCompare(right.created_at) || left.id.localeCompare(right.id)),
-        evidence: input.evidence
-          .filter((item) => item.task_id === task.id)
-          .slice()
-          .sort((left, right) => left.created_at.localeCompare(right.created_at) || left.id.localeCompare(right.id)),
+        runCount: input.runs.filter((run) => run.task_id === task.id).length,
+        runStatuses: input.runs.filter((run) => run.task_id === task.id).map((run) => run.status),
+        reviewCount: input.reviews.filter((review) => review.task_id === task.id).length,
+        reviewStatuses: input.reviews.filter((review) => review.task_id === task.id).map((review) => review.status),
+        evidenceCount: input.evidence.filter((item) => item.task_id === task.id).length,
+        evidenceKinds: input.evidence.filter((item) => item.task_id === task.id).map((item) => item.kind),
       })),
   }));
 
@@ -320,8 +310,12 @@ function projectV2(input: LoopWorkflowShadowInput): LoopWorkflowShadow {
     workflowVersion: 2,
     mode: loop.mode,
     source: "v2_normalized",
-    historyCompleteness: "complete",
-    planRevision: { ...revision },
+    historyCompleteness: "bounded",
+    planRevision: {
+      id: revision.id,
+      revisionNumber: revision.revision_number,
+      status: revision.status,
+    },
     stages,
   };
 }

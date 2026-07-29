@@ -1,6 +1,7 @@
 import { isLocalAuthDisabled } from "@/lib/auth/local";
 import { normalizeRows } from "@/lib/db/mission-control";
-import { query } from "@/lib/db/postgres";
+import { query, withTransaction } from "@/lib/db/postgres";
+import type { PoolClient } from "pg";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import {
   getLoopStatusForPrimaryExecution,
@@ -90,11 +91,18 @@ export type LoopDeliverable = {
   dispatchState: string | null;
 };
 
-export type LoopDetailPayload = {
+type LoopDetailBase = {
   id: string;
   title: string;
   summary: string;
   status: string;
+  needsMyAttention: boolean;
+  workflowVersion: 1 | 2;
+  mode: WorkflowMode;
+};
+
+export type LoopDetailV1Payload = LoopDetailBase & {
+  workflowVersion: 1;
   priority: "high" | "medium" | "low";
   ownerAgent: string | null;
   targetOutcome: string | null;
@@ -106,15 +114,11 @@ export type LoopDetailPayload = {
   metadata: Record<string, unknown>;
   clarificationHistory: ClarificationHistoryEntry[];
   deliverable: LoopDeliverable | null;
-  needsMyAttention: boolean;
   readyToRun: boolean;
   nextActionLabel: string | null;
   blockedReason: string | null;
   deferredUntil: string | null;
   linkedWorkItems: Array<{ id: string; relationType: string }>;
-  workflowVersion: 1 | 2;
-  mode: WorkflowMode;
-  workflow?: LoopWorkflowShadow;
   recentEvents: Array<{
     id: string;
     eventType: string;
@@ -125,6 +129,13 @@ export type LoopDetailPayload = {
     createdAt: string;
   }>;
 };
+
+export type LoopDetailV2Payload = LoopDetailBase & {
+  workflowVersion: 2;
+  workflow: LoopWorkflowShadow;
+};
+
+export type LoopDetailPayload = LoopDetailV1Payload | LoopDetailV2Payload;
 
 type LoopRow = {
   id: string;
@@ -147,10 +158,12 @@ type LoopRow = {
   workflow_version: 1 | 2;
   mode: WorkflowMode;
   current_plan_revision_id: string | null;
+  row_version: string | number;
 };
 
 type V2TaskProgressRow = {
   loop_id: string;
+  revision_id: string;
   status: string;
 };
 
@@ -294,28 +307,36 @@ function aggregateV2TaskProgress(
       throw new Error(`V2 gallery task snapshot references unexpected Loop ${task.loop_id}`);
     }
     item.total += 1;
-    if (task.status === "completed" || task.status === "skipped") item.completed += 1;
+    if (["completed", "skipped", "cancelled", "canceled"].includes(task.status)) item.completed += 1;
   }
   return progress;
 }
 
 async function loadV2TaskProgressLocal(rows: LoopRow[]): Promise<Map<string, V2TaskProgress>> {
-  const loopIds = rows.filter((loop) => (loop.workflow_version ?? 1) === 2).map((loop) => loop.id);
-  if (loopIds.length === 0) return new Map();
+  const v2Loops = rows.filter((loop) => (loop.workflow_version ?? 1) === 2);
+  const loopIds = v2Loops.map((loop) => loop.id);
+  if (v2Loops.length === 0) return new Map();
+  if (v2Loops.some((loop) => !loop.current_plan_revision_id)) {
+    throw new Error("V2 gallery snapshot has a Loop without a current plan revision");
+  }
+  const revisionIds = v2Loops.map((loop) => loop.current_plan_revision_id as string);
+  const revisionToLoop = new Map(v2Loops.map((loop) => [loop.current_plan_revision_id as string, loop.id]));
 
   const result = await query<V2TaskProgressRow>(
-    `select selected_loop.id as loop_id, task.status
-     from loops as selected_loop
-     join loop_plan_revisions as revision
-       on revision.id = selected_loop.current_plan_revision_id
-      and revision.loop_id = selected_loop.id
+    `select revision.loop_id, revision.id as revision_id, task.status
+     from loop_plan_revisions as revision
      join loop_stages as stage on stage.plan_revision_id = revision.id
      join loop_tasks as task on task.stage_id = stage.id
-     where selected_loop.workflow_version = 2
-       and selected_loop.id = any($1::uuid[])`,
-    [loopIds],
+     where revision.id = any($1::uuid[])`,
+    [revisionIds],
   );
-  return aggregateV2TaskProgress(loopIds, normalizeRows(result.rows || []));
+  const taskRows = normalizeRows(result.rows || []);
+  for (const task of taskRows) {
+    if (revisionToLoop.get(task.revision_id) !== task.loop_id) {
+      throw new Error(`V2 gallery revision ${task.revision_id} changed ownership during the snapshot`);
+    }
+  }
+  return aggregateV2TaskProgress(loopIds, taskRows);
 }
 
 async function loadV2TaskProgressCloud(rows: LoopRow[]): Promise<Map<string, V2TaskProgress>> {
@@ -351,20 +372,26 @@ async function loadV2TaskProgressCloud(rows: LoopRow[]): Promise<Map<string, V2T
   const taskRows = (tasks || []).map((task) => {
     const loopId = stageToLoop.get(task.stage_id);
     if (!loopId) throw new Error(`V2 gallery task references unexpected stage ${task.stage_id}`);
-    return { loop_id: loopId, status: task.status };
+    return { loop_id: loopId, revision_id: revisionIds.find((revisionId) => revisionToLoop.get(revisionId) === loopId) as string, status: task.status };
   });
   return aggregateV2TaskProgress(v2Loops.map((loop) => loop.id), taskRows);
 }
 
+const V2_HISTORY_LIMIT = 100;
+type DetailQueryable = Pick<PoolClient, "query">;
+
 /** Loads and validates the normalized current revision used by the local V2 detail UI. */
-export async function buildLoopWorkflowShadow(loop: LoopRow): Promise<LoopWorkflowShadow | undefined> {
+export async function buildLoopWorkflowShadow(
+  loop: LoopRow,
+  db: DetailQueryable,
+): Promise<LoopWorkflowShadow | undefined> {
   if ((loop.workflow_version ?? 1) !== 2) return undefined;
   if (!loop.current_plan_revision_id) {
     throw new Error(`V2 Loop ${loop.id} has no current plan revision`);
   }
 
   const revisionId = loop.current_plan_revision_id;
-  const revisionResult = await query<ShadowPlanRevisionRow>(
+  const revisionResult = await db.query<ShadowPlanRevisionRow>(
     `select id, loop_id, revision_number, status, summary, created_at, updated_at
      from loop_plan_revisions
      where id = $1 and loop_id = $2`,
@@ -375,7 +402,7 @@ export async function buildLoopWorkflowShadow(loop: LoopRow): Promise<LoopWorkfl
     throw new Error(`V2 Loop ${loop.id} has an inconsistent current plan revision snapshot`);
   }
 
-  const stagesResult = await query<ShadowStageRow>(
+  const stagesResult = await db.query<ShadowStageRow>(
     `select id, plan_revision_id, key, title, description, position, status
      from loop_stages
      where plan_revision_id = $1
@@ -387,7 +414,7 @@ export async function buildLoopWorkflowShadow(loop: LoopRow): Promise<LoopWorkfl
     throw new Error(`V2 Loop ${loop.id} has an inconsistent stage snapshot`);
   }
 
-  const tasksResult = await query<ShadowTaskRow>(
+  const tasksResult = await db.query<ShadowTaskRow>(
     `select task.id, task.stage_id, task.key, task.title, task.description, task.position, task.status
      from loop_tasks as task
      join loop_stages as stage on stage.id = task.stage_id
@@ -404,32 +431,35 @@ export async function buildLoopWorkflowShadow(loop: LoopRow): Promise<LoopWorkfl
   const taskIds = tasks.map((task) => task.id);
   const [dependenciesResult, runsResult, reviewsResult, evidenceResult] = taskIds.length > 0
     ? await Promise.all([
-        query<ShadowDependencyRow>(
+        db.query<ShadowDependencyRow>(
           `select task_id, depends_on_task_id, dependency_type
            from loop_task_dependencies
            where task_id = any($1::uuid[]) or depends_on_task_id = any($1::uuid[])`,
           [taskIds],
         ),
-        query<ShadowRunRow>(
-          `select id, task_id, attempt_number, status, started_at, finished_at, error, output, created_at
+        db.query<ShadowRunRow>(
+          `select id, task_id, status
            from loop_task_runs
            where task_id = any($1::uuid[])
-           order by task_id, attempt_number, id`,
-          [taskIds],
+           order by created_at desc, id desc
+           limit $2`,
+          [taskIds, V2_HISTORY_LIMIT],
         ),
-        query<ShadowReviewRow>(
-          `select id, task_id, task_run_id, status, reviewer, feedback, decided_at, created_at
+        db.query<ShadowReviewRow>(
+          `select id, task_id, task_run_id, status
            from loop_task_reviews
            where task_id = any($1::uuid[])
-           order by task_id, created_at, id`,
-          [taskIds],
+           order by created_at desc, id desc
+           limit $2`,
+          [taskIds, V2_HISTORY_LIMIT],
         ),
-        query<ShadowEvidenceRow>(
-          `select id, task_id, task_run_id, kind, uri, content, metadata, created_at
+        db.query<ShadowEvidenceRow>(
+          `select id, task_id, task_run_id, kind
            from loop_evidence
            where task_id = any($1::uuid[])
-           order by task_id, created_at, id`,
-          [taskIds],
+           order by created_at desc, id desc
+           limit $2`,
+          [taskIds, V2_HISTORY_LIMIT],
         ),
       ])
     : [
@@ -581,97 +611,153 @@ export async function listLoopGalleryCards(): Promise<LoopGalleryCard[]> {
 
 export async function getLoopDetail(loopId: string): Promise<LoopDetailPayload | null> {
   if (isLocalAuthDisabled()) {
-    const loopRes = await query<LoopRow>(
-      `select id, name, description, summary, status, priority, owner_agent, deferred_until, target_outcome, acceptance_criteria, plan, clarification_questions, approval_scope, notes, metadata, updated_at,
-              workflow_version, mode, current_plan_revision_id
-       from loops
-       where id = $1
-       limit 1`,
-      [loopId],
-    );
-    const row = loopRes.rows[0] ? normalizeRows([loopRes.rows[0] as LoopRow])[0] : null;
-    if (!row) return null;
-
-    const [primaryExecution, workflow] = await Promise.all([
-      getPrimaryExecutionWorkItemLocal(loopId),
-      buildLoopWorkflowShadow(row),
-    ]);
-    const nextStatus = getLoopStatusForPrimaryExecution(row.status, primaryExecution?.status);
-    if (nextStatus) {
-      row.status = nextStatus;
-    }
-
-    const [workLinksRes, eventsRes] = await Promise.all([
-      query<{ work_item_id: string; relation_type: string }>(`select work_item_id, relation_type from loop_work_items where loop_id = $1`, [loopId]),
-      query<{ id: string; event_type: string; from_status: string | null; to_status: string | null; actor: string | null; payload: LoopEventPayload; created_at: string }>(
-        `select id, event_type, from_status, to_status, actor, payload, created_at
-         from loop_events
-         where loop_id = $1
-         order by created_at desc
-         limit 20`,
+    return withTransaction(async (client) => {
+      await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      const loopRes = await client.query<LoopRow>(
+        `select id, name, description, summary, status, clarification_questions,
+                workflow_version, mode, current_plan_revision_id, row_version
+         from loops
+         where id = $1
+         limit 1`,
         [loopId],
-      ),
-    ]);
+      );
+      let row = loopRes.rows[0] ? normalizeRows([loopRes.rows[0] as LoopRow])[0] : null;
+      if (!row) return null;
 
-    return {
-      id: row.id,
-      title: toTitle(row),
-      summary: toSummary(row),
-      status: row.status,
-      priority: row.priority || 'medium',
-      ownerAgent: row.owner_agent,
-      targetOutcome: row.target_outcome || null,
-      acceptanceCriteria: row.acceptance_criteria || [],
-      plan: row.plan || [],
-      clarificationQuestions: row.clarification_questions || [],
-      approvalScope: row.approval_scope || {},
-      notes: row.notes || null,
-      metadata: row.metadata || {},
-      clarificationHistory: Array.isArray((row.metadata || {}).clarification_history)
-        ? ((row.metadata || {}).clarification_history as ClarificationHistoryEntry[])
-        : [],
-      deliverable: primaryExecution
-        ? {
-            workItemId: primaryExecution.workItemId,
-            title: primaryExecution.title,
-            status: primaryExecution.status,
-            instruction: primaryExecution.instruction,
-            summary: extractDeliverableSummary(primaryExecution as unknown as PrimaryExecutionWorkItem),
-            startedAt: primaryExecution.startedAt,
-            completedAt: primaryExecution.completedAt,
-            updatedAt: primaryExecution.updatedAt,
-            dispatchState: typeof primaryExecution.payload?.dispatch_state === 'string' ? String(primaryExecution.payload?.dispatch_state) : null,
-          }
-        : null,
-      needsMyAttention: deriveNeedsMyAttention(row),
-      readyToRun: deriveReadyToRun(row),
-      nextActionLabel: deriveNextActionLabel(row),
-      blockedReason: row.status === 'blocked' ? deriveNextActionLabel(row) : null,
-      deferredUntil: row.deferred_until,
-      linkedWorkItems: (workLinksRes.rows || []).map((r) => ({ id: r.work_item_id, relationType: r.relation_type })),
-      workflowVersion: row.workflow_version ?? 1,
-      mode: row.mode ?? "linear",
-      ...(workflow ? { workflow } : {}),
-      recentEvents: (eventsRes.rows || []).map((e) => ({
-        id: e.id,
-        eventType: e.event_type,
-        fromStatus: e.from_status,
-        toStatus: e.to_status,
-        actor: e.actor,
-        payload: (e.payload || {}) as LoopEventPayload,
-        createdAt: e.created_at,
-      })),
-    };
+      if ((row.workflow_version ?? 1) === 2) {
+        const workflow = await buildLoopWorkflowShadow(row, client);
+        if (!workflow) throw new Error(`V2 Loop ${row.id} workflow projection is unavailable`);
+        const finalSnapshot = await client.query<Pick<LoopRow, "row_version" | "current_plan_revision_id" | "workflow_version">>(
+          `select row_version, current_plan_revision_id, workflow_version
+           from loops
+           where id = $1
+           limit 1`,
+          [loopId],
+        );
+        const finalRow = finalSnapshot.rows[0];
+        if (
+          !finalRow
+          || String(finalRow.row_version) !== String(row.row_version)
+          || finalRow.current_plan_revision_id !== row.current_plan_revision_id
+          || finalRow.workflow_version !== 2
+        ) {
+          throw new Error(`V2 Loop ${row.id} snapshot changed while loading detail`);
+        }
+        return {
+          id: row.id,
+          title: toTitle(row),
+          summary: toSummary(row),
+          status: row.status,
+          needsMyAttention: deriveNeedsMyAttention(row),
+          workflowVersion: 2,
+          mode: row.mode,
+          workflow,
+        } satisfies LoopDetailV2Payload;
+      }
+
+      const legacyResult = await client.query<LoopRow>(
+        `select id, name, description, summary, status, priority, owner_agent, deferred_until, target_outcome, acceptance_criteria, plan, clarification_questions, approval_scope, notes, metadata, updated_at,
+                workflow_version, mode, current_plan_revision_id, row_version
+         from loops
+         where id = $1 and workflow_version = 1
+         limit 1`,
+        [loopId],
+      );
+      row = legacyResult.rows[0] ? normalizeRows([legacyResult.rows[0]])[0] : null;
+      if (!row) throw new Error(`Legacy Loop ${loopId} changed while loading detail`);
+      const primaryExecution = await getPrimaryExecutionWorkItemLocal(loopId, client);
+      const nextStatus = getLoopStatusForPrimaryExecution(row.status, primaryExecution?.status);
+      if (nextStatus) row.status = nextStatus;
+
+      const [workLinksRes, eventsRes] = await Promise.all([
+        client.query<{ work_item_id: string; relation_type: string }>(
+          `select work_item_id, relation_type from loop_work_items where loop_id = $1`,
+          [loopId],
+        ),
+        client.query<{ id: string; event_type: string; from_status: string | null; to_status: string | null; actor: string | null; payload: LoopEventPayload; created_at: string }>(
+          `select id, event_type, from_status, to_status, actor, payload, created_at
+           from loop_events
+           where loop_id = $1
+           order by created_at desc
+           limit 20`,
+          [loopId],
+        ),
+      ]);
+
+      return {
+        id: row.id,
+        title: toTitle(row),
+        summary: toSummary(row),
+        status: row.status,
+        priority: row.priority || "medium",
+        ownerAgent: row.owner_agent,
+        targetOutcome: row.target_outcome || null,
+        acceptanceCriteria: row.acceptance_criteria || [],
+        plan: row.plan || [],
+        clarificationQuestions: row.clarification_questions || [],
+        approvalScope: row.approval_scope || {},
+        notes: row.notes || null,
+        metadata: row.metadata || {},
+        clarificationHistory: Array.isArray((row.metadata || {}).clarification_history)
+          ? ((row.metadata || {}).clarification_history as ClarificationHistoryEntry[])
+          : [],
+        deliverable: primaryExecution
+          ? {
+              workItemId: primaryExecution.workItemId,
+              title: primaryExecution.title,
+              status: primaryExecution.status,
+              instruction: primaryExecution.instruction,
+              summary: extractDeliverableSummary(primaryExecution as unknown as PrimaryExecutionWorkItem),
+              startedAt: primaryExecution.startedAt,
+              completedAt: primaryExecution.completedAt,
+              updatedAt: primaryExecution.updatedAt,
+              dispatchState: typeof primaryExecution.payload?.dispatch_state === "string" ? String(primaryExecution.payload.dispatch_state) : null,
+            }
+          : null,
+        needsMyAttention: deriveNeedsMyAttention(row),
+        readyToRun: deriveReadyToRun(row),
+        nextActionLabel: deriveNextActionLabel(row),
+        blockedReason: row.status === "blocked" ? deriveNextActionLabel(row) : null,
+        deferredUntil: row.deferred_until,
+        linkedWorkItems: (workLinksRes.rows || []).map((link) => ({ id: link.work_item_id, relationType: link.relation_type })),
+        workflowVersion: 1,
+        mode: "linear",
+        recentEvents: (eventsRes.rows || []).map((event) => ({
+          id: event.id,
+          eventType: event.event_type,
+          fromStatus: event.from_status,
+          toStatus: event.to_status,
+          actor: event.actor,
+          payload: (event.payload || {}) as LoopEventPayload,
+          createdAt: event.created_at,
+        })),
+      } satisfies LoopDetailV1Payload;
+    });
+  }
+
+  const { data: loopVersion, error: versionError } = await supabaseAdmin
+    .from("loops")
+    .select("id,workflow_version")
+    .eq("id", loopId)
+    .maybeSingle();
+
+  if (versionError) throw versionError;
+  if (!loopVersion) return null;
+  if (loopVersion.workflow_version === 2) {
+    throw new Error(`V2 cloud detail is unavailable; refusing to fall back to the legacy plan for Loop ${loopVersion.id}`);
+  }
+  if (loopVersion.workflow_version !== 1) {
+    throw new Error(`Unsupported cloud Loop workflow version: ${String(loopVersion.workflow_version)}`);
   }
 
   const { data: loop, error } = await supabaseAdmin
     .from("loops")
-    .select("id,name,description,summary,status,priority,owner_agent,deferred_until,target_outcome,acceptance_criteria,plan,clarification_questions,approval_scope,notes,metadata,updated_at,workflow_version,mode,current_plan_revision_id")
+    .select("id,name,description,summary,status,priority,owner_agent,deferred_until,target_outcome,acceptance_criteria,plan,clarification_questions,approval_scope,notes,metadata,updated_at,workflow_version,mode,current_plan_revision_id,row_version")
     .eq("id", loopId)
+    .eq("workflow_version", 1)
     .maybeSingle();
-
   if (error) throw error;
-  if (!loop) return null;
+  if (!loop) throw new Error(`Legacy cloud Loop ${loopId} changed while loading detail`);
 
   const row = loop as LoopRow;
 
@@ -728,8 +814,8 @@ export async function getLoopDetail(loopId: string): Promise<LoopDetailPayload |
     blockedReason: row.status === "blocked" ? deriveNextActionLabel(row) : null,
     deferredUntil: row.deferred_until,
     linkedWorkItems: (workLinks.data || []).map((r) => ({ id: r.work_item_id, relationType: r.relation_type })),
-    workflowVersion: row.workflow_version ?? 1,
-    mode: row.mode ?? "linear",
+    workflowVersion: 1,
+    mode: "linear",
     recentEvents: (events.data || []).map((e) => ({
       id: e.id,
       eventType: e.event_type,
@@ -739,5 +825,5 @@ export async function getLoopDetail(loopId: string): Promise<LoopDetailPayload |
       payload: (e.payload || {}) as LoopEventPayload,
       createdAt: e.created_at,
     })),
-  };
+  } satisfies LoopDetailV1Payload;
 }

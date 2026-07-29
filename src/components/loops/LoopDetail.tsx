@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import type { ClarificationQuestion, PlanStep, LoopDetailPayload } from "@/lib/loops/read-model";
+import type { ClarificationQuestion, PlanStep, LoopDetailPayload, LoopDetailV2Payload } from "@/lib/loops/read-model";
 import { ApprovalDecisionBox } from "./ApprovalDecisionBox";
 import { SubmitClarificationBox } from "./SubmitClarificationBox";
 import { LoopReviewActions } from "./LoopReviewActions";
@@ -43,7 +43,7 @@ function formatTimestamp(value: string | null | undefined) {
   }
 }
 
-function V2WorkflowPanel({ workflow }: { workflow: NonNullable<LoopDetailPayload["workflow"]> }) {
+function V2WorkflowPanel({ workflow }: { workflow: LoopDetailV2Payload["workflow"] }) {
   const tasksById = new Map(
     workflow.stages.flatMap((stage) => stage.tasks).map((task) => [task.id, task]),
   );
@@ -52,7 +52,7 @@ function V2WorkflowPanel({ workflow }: { workflow: NonNullable<LoopDetailPayload
     <Section title="Proyecto">
       <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-gray-400">
         <span className="rounded-full border border-blue-900/60 bg-blue-950/20 px-2 py-0.5 text-blue-200">
-          Revisión {workflow.planRevision?.revision_number ?? "actual"}
+          Revisión {workflow.planRevision?.revisionNumber ?? "actual"}
         </span>
         <span className="rounded-full border border-gray-700 px-2 py-0.5 uppercase text-gray-300">
           {workflow.mode}
@@ -96,8 +96,9 @@ function V2WorkflowPanel({ workflow }: { workflow: NonNullable<LoopDetailPayload
                           </span>
                         </div>
                         <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-gray-500">
-                          <span>{task.runs.length} {task.runs.length === 1 ? "intento" : "intentos"}</span>
-                          <span>{task.evidence.length} {task.evidence.length === 1 ? "evidencia" : "evidencias"}</span>
+                          <span>{task.runCount} {task.runCount === 1 ? "intento" : "intentos"}</span>
+                          <span>{task.reviewCount} {task.reviewCount === 1 ? "revisión" : "revisiones"}</span>
+                          <span>{task.evidenceCount} {task.evidenceCount === 1 ? "evidencia" : "evidencias"}</span>
                           {dependencyNames.length > 0 && (
                             <span>Depende de: {dependencyNames.join(", ")}</span>
                           )}
@@ -125,7 +126,7 @@ export function LoopDetail({
   const router = useRouter();
   const activeStep = deriveWorkflowStep(loop.status);
   const dotClass = deriveDotClass(loop.status, loop.needsMyAttention);
-  const isV2Project = loop.workflowVersion === 2 && Boolean(loop.workflow);
+
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
@@ -162,6 +163,10 @@ export function LoopDetail({
         <div className="space-y-4 px-6 py-4">
           {loop.status === "queued" && <QueuedExecutionHint />}
 
+          {loop.workflowVersion === 2 ? (
+            <V2WorkflowPanel workflow={loop.workflow} />
+          ) : (
+            <>
           <Section title="Clarification">
             {loop.clarificationQuestions.length === 0 && loop.clarificationHistory.length === 0 ? (
               <p className="text-sm text-gray-500">No clarification activity yet.</p>
@@ -186,7 +191,7 @@ export function LoopDetail({
                     <p className="whitespace-pre-wrap"><span className="font-medium text-emerald-300">A:</span> {entry.response}</p>
                   </div>
                 ))}
-                {loop.workflowVersion !== 2 && loop.status === "needs_clarification" && (
+                {loop.status === "needs_clarification" && (
                   <SubmitClarificationBox
                     loopId={loop.id}
                     onDone={() => {
@@ -226,10 +231,7 @@ export function LoopDetail({
             </Section>
           )}
 
-          {isV2Project && loop.workflow ? (
-            <V2WorkflowPanel workflow={loop.workflow} />
-          ) : (
-            <Section title="Compact Plan">
+          <Section title="Compact Plan">
               {loop.plan.length === 0 ? (
                 <p className="text-sm text-gray-500">No plan steps yet.</p>
               ) : (
@@ -245,10 +247,9 @@ export function LoopDetail({
                   ))}
                 </div>
               )}
-            </Section>
-          )}
+          </Section>
 
-          {loop.workflowVersion !== 2 && loop.status === "needs_approval" && (
+          {loop.status === "needs_approval" && (
             <section className="rounded-lg border border-gray-800 bg-[#111118] p-4">
               <p className="text-sm text-gray-300">This loop is waiting for your approval before it can move into queue.</p>
               <div className="mt-4">
@@ -274,7 +275,7 @@ export function LoopDetail({
             </section>
           )}
 
-          {loop.workflowVersion !== 2 && (loop.status === "in_progress" || loop.status === "in_review") && (
+          {(loop.status === "in_progress" || loop.status === "in_review") && (
             <LoopReviewActions
               loopId={loop.id}
               status={loop.status}
@@ -283,6 +284,8 @@ export function LoopDetail({
                 onClose();
               }}
             />
+          )}
+            </>
           )}
         </div>
       </div>
