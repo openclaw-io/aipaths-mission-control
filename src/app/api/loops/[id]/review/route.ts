@@ -9,21 +9,11 @@ export const dynamic = "force-dynamic";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-type DecisionNotification = {
-  status?: "pending" | "failed" | "succeeded";
-  attempts?: number;
-  work_item_id?: string | null;
-  owner_agent?: string | null;
-  last_attempt_at?: string | null;
-  last_error?: string | null;
-};
-
 type DecisionLedgerEntry = {
   decision_id?: unknown;
   decision_type?: unknown;
   request?: unknown;
   response?: unknown;
-  notification?: DecisionNotification;
 };
 
 function parseDecisionId(value: unknown) {
@@ -61,85 +51,6 @@ function reopenV1PlanWithoutDeliverableMapping(
       ? { ...step, status: "pending" }
       : step
   ));
-}
-
-async function recordNotificationResult(
-  loopId: string,
-  decisionId: string,
-  result: { ok: boolean; error: string | null },
-) {
-  const attemptedAt = new Date().toISOString();
-  await withTransaction(async (client) => {
-    const loopResult = await client.query<{ metadata: Record<string, unknown> | null }>(
-      `select metadata from loops where id = $1 limit 1 for update`,
-      [loopId],
-    );
-    const metadata = loopResult.rows[0]?.metadata || {};
-    const ledger = asDecisionLedger(metadata);
-    let changed = false;
-    const nextLedger = ledger.map((entry) => {
-      if (entry.decision_id !== decisionId || entry.decision_type !== "deliverable_review") return entry;
-      if (entry.notification?.status === "succeeded") return entry;
-      changed = true;
-      return {
-        ...entry,
-        notification: {
-          ...(entry.notification || {}),
-          status: result.ok ? "succeeded" : "failed",
-          attempts: Number(entry.notification?.attempts || 0) + 1,
-          last_attempt_at: attemptedAt,
-          last_error: result.error,
-        },
-      };
-    });
-    if (!changed) return;
-    await client.query(
-      `update loops set metadata = $1::jsonb where id = $2`,
-      [JSON.stringify({ ...metadata, decision_ledger: nextLedger }), loopId],
-    );
-  });
-}
-
-async function notifyRework(
-  loopId: string,
-  decisionId: string,
-  workItemId: string,
-  ownerAgent: string | null,
-) {
-  let ok = false;
-  let error: string | null = null;
-  try {
-    const notification = await fetch("http://127.0.0.1:3001/api/work-items/notify", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.AGENT_API_KEY}`,
-      },
-      body: JSON.stringify({
-        workItemId,
-        agent: ownerAgent,
-        action: "unblocked",
-        decisionId,
-        idempotencyKey: decisionId,
-      }),
-    });
-    ok = notification.ok;
-    if (!notification.ok) {
-      error = `http_${notification.status}`;
-      console.error(`[loop-review] notify on request_changes failed with HTTP ${notification.status}`);
-    }
-  } catch (notifyError) {
-    error = notifyError instanceof Error ? notifyError.message : String(notifyError);
-    console.error("[loop-review] notify on request_changes failed:", notifyError);
-  }
-
-  try {
-    await recordNotificationResult(loopId, decisionId, { ok, error });
-  } catch (recordError) {
-    // The decision remains pending, so an exact replay can safely retry using
-    // the same execution attempt/session identity and idempotency key.
-    console.error("[loop-review] failed to persist notify result:", recordError);
-  }
 }
 
 export async function POST(
@@ -241,7 +152,6 @@ export async function POST(
       return {
         kind: "replay" as const,
         response: persisted.response as Record<string, unknown>,
-        notification: persisted.notification || null,
       };
     }
 
@@ -283,19 +193,7 @@ export async function POST(
       ? reopenedPlan.filter((step, index) => step?.status === "pending" && loop.plan?.[index]?.status !== "pending").length
       : 0;
 
-    let workItemId: string | null = null;
-    let notification: DecisionNotification | null = null;
-    if (action === "request_changes") {
-      workItemId = primaryExecution.work_item_id;
-      notification = {
-        status: "pending",
-        attempts: 0,
-        work_item_id: workItemId,
-        owner_agent: loop.owner_agent,
-        last_attempt_at: null,
-        last_error: null,
-      };
-    }
+    const workItemId = action === "request_changes" ? primaryExecution.work_item_id : null;
     const response = { ok: true, id, status: transition.nextStatus, decision_id: decisionId };
     const metadata = {
       ...loopMetadata,
@@ -311,7 +209,6 @@ export async function POST(
           request: decisionRequest,
           response,
           created_at: now,
-          ...(notification ? { notification } : {}),
         },
       ],
     };
@@ -392,7 +289,7 @@ export async function POST(
       );
     }
 
-    return { kind: "success" as const, response, notification };
+    return { kind: "success" as const, response };
   });
 
   if (localResult.kind === "not_found") {
@@ -410,18 +307,6 @@ export async function POST(
           : {}),
       },
       { status: 409 },
-    );
-  }
-
-  const notification = localResult.notification;
-  if (notification
-    && notification.status !== "succeeded"
-    && typeof notification.work_item_id === "string") {
-    await notifyRework(
-      id,
-      decisionId,
-      notification.work_item_id,
-      typeof notification.owner_agent === "string" ? notification.owner_agent : null,
     );
   }
 

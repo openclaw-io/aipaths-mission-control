@@ -149,7 +149,7 @@ test("createPipelineWorkItemLocal is replay-safe after taking its transaction-sc
   assert.equal(harness.durable.events.length, 1);
 });
 
-function makeReviewHarness({ failEvent = false, failWork = false, notifyError = null } = {}) {
+function makeReviewHarness({ failEvent = false, failWork = false } = {}) {
   const executionInstruction = transpileModule(executionInstructionSource, {});
   let state = {
     loop: {
@@ -205,17 +205,9 @@ function makeReviewHarness({ failEvent = false, failWork = false, notifyError = 
             assert.match(normalized, /for update$/);
             return { rows: pending.loop ? [pending.loop] : [] };
           }
-          if (normalized.startsWith("select metadata from loops")) {
-            assert.match(normalized, /for update$/);
-            return { rows: pending.loop ? [{ metadata: pending.loop.metadata }] : [] };
-          }
           if (normalized.includes("from loop_work_items lwi") && normalized.includes("join work_items wi")) {
             assert.match(normalized, /for update of wi$/);
             return { rows: pending.workItem ? [pending.workItem] : [] };
-          }
-          if (normalized.startsWith("update loops set metadata")) {
-            pending.loop.metadata = JSON.parse(params[0]);
-            return { rows: [{ id: pending.loop.id }] };
           }
           if (normalized.startsWith("update loops")) {
             pending.loop.status = params[0];
@@ -258,8 +250,7 @@ function makeReviewHarness({ failEvent = false, failWork = false, notifyError = 
   const fetch = async () => {
     notifyCalls += 1;
     log.push("notify");
-    if (notifyError) throw notifyError;
-    return { ok: true, status: 200 };
+    throw new Error("Loop review must leave dispatch to the durable scheduler");
   };
 
   const route = transpileModule(reviewRouteSource, {
@@ -303,8 +294,8 @@ async function postReview(harness) {
   return harness.route.POST(harness.request, { params: Promise.resolve({ id: "loop-1" }) });
 }
 
-test("local Loop review commits loop, event and work reset before best-effort notification while preserving payload", async () => {
-  const harness = makeReviewHarness({ notifyError: new Error("notify unavailable") });
+test("local Loop review atomically leaves rework ready for the durable scheduler without direct notification", async () => {
+  const harness = makeReviewHarness();
 
   const response = await postReview(harness);
 
@@ -325,8 +316,9 @@ test("local Loop review commits loop, event and work reset before best-effort no
   assert.equal(harness.state.workItem.payload.dispatch_session_id, undefined);
   assert.match(harness.state.workItem.instruction, /No modificar archivos ni servicios/);
   assert.match(harness.state.workItem.instruction, /Forbidden actions:\n- modify_files\n- restart_services/);
-  assert.ok(harness.log.indexOf("commit") < harness.log.indexOf("notify"));
-  assert.equal(harness.notifyCalls, 1);
+  assert.equal(harness.notifyCalls, 0);
+  const decision = harness.state.loop.metadata.decision_ledger[0];
+  assert.equal(decision.notification, undefined);
 });
 
 test("local Loop review rolls every database change back when event persistence fails", async () => {
@@ -351,7 +343,7 @@ test("local Loop review rolls loop and event changes back when the work reset fa
   assert.equal(harness.notifyCalls, 0);
 });
 
-test("replaying the same local review action does not duplicate history, event, reset or notification", async () => {
+test("replaying the same local review action does not duplicate history, event or reset and never notifies directly", async () => {
   const harness = makeReviewHarness();
 
   await postReview(harness);
@@ -361,5 +353,5 @@ test("replaying the same local review action does not duplicate history, event, 
   assert.deepEqual(harness.state, once);
   assert.equal(harness.state.loop.metadata.review_history.length, 1);
   assert.equal(harness.state.events.length, 1);
-  assert.equal(harness.notifyCalls, 1);
+  assert.equal(harness.notifyCalls, 0);
 });
