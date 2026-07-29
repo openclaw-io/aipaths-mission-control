@@ -55,11 +55,11 @@ test("fresh schema exposes the additive Project Loops V2 core contract", async (
   assert.match(loopColumns.row_version.column_default, /1/);
 
   const requiredColumns = {
-    loop_plan_revisions: ["id", "loop_id", "revision_number", "status", "summary", "created_by", "approved_by", "approved_at", "created_at", "updated_at"],
+    loop_plan_revisions: ["id", "loop_id", "revision_number", "status", "summary", "content_hash", "plan_snapshot", "created_by", "approved_by", "approved_at", "created_at", "updated_at"],
     loop_stages: ["id", "plan_revision_id", "key", "title", "description", "position", "status", "created_at", "updated_at"],
     loop_tasks: ["id", "stage_id", "key", "title", "description", "position", "status", "assignee_agent", "metadata", "created_at", "updated_at"],
     loop_task_dependencies: ["task_id", "depends_on_task_id", "dependency_type", "created_at"],
-    loop_task_runs: ["id", "task_id", "attempt_number", "status", "started_at", "finished_at", "error", "output", "created_at", "updated_at"],
+    loop_task_runs: ["id", "task_id", "work_item_id", "execution_attempt_id", "run_role", "quality_cycle", "attempt_number", "status", "started_at", "finished_at", "error", "output", "created_at", "updated_at"],
     loop_task_reviews: ["id", "task_id", "task_run_id", "status", "reviewer", "feedback", "decided_at", "created_at", "updated_at"],
     loop_evidence: ["id", "task_id", "task_run_id", "kind", "uri", "content", "metadata", "created_at"],
   };
@@ -97,6 +97,7 @@ test("V2 foreign keys, checks, and query indexes enforce the minimum safe graph"
     ["loop_task_dependencies_task_id_fkey", ["loop_task_dependencies", "loop_tasks", "c"]],
     ["loop_task_dependencies_depends_on_task_id_fkey", ["loop_task_dependencies", "loop_tasks", "c"]],
     ["loop_task_runs_task_id_fkey", ["loop_task_runs", "loop_tasks", "c"]],
+    ["loop_task_runs_work_item_id_fkey", ["loop_task_runs", "work_items", "r"]],
     ["loop_task_reviews_task_id_fkey", ["loop_task_reviews", "loop_tasks", "c"]],
     ["loop_task_reviews_task_run_id_fkey", ["loop_task_reviews", "loop_task_runs", "n"]],
     ["loop_evidence_task_id_fkey", ["loop_evidence", "loop_tasks", "c"]],
@@ -119,6 +120,8 @@ test("V2 foreign keys, checks, and query indexes enforce the minimum safe graph"
     "loop_tasks_status_check",
     "loop_task_dependencies_not_self_check",
     "loop_task_runs_status_check",
+    "loop_task_runs_run_role_check",
+    "loop_task_runs_quality_cycle_check",
     "loop_task_reviews_status_check",
     "loop_evidence_payload_check",
   ]) assert.equal(byName.get(check)?.contype, "c", `${check} is missing`);
@@ -136,11 +139,12 @@ test("V2 foreign keys, checks, and query indexes enforce the minimum safe graph"
     "idx_loop_tasks_status",
     "idx_loop_task_dependencies_depends_on",
     "uq_loop_task_runs_task_attempt",
+    "uq_loop_task_runs_work_item",
     "idx_loop_task_runs_task_created",
     "idx_loop_task_reviews_task_created",
     "idx_loop_evidence_task_created",
   ]]);
-  assert.equal(indexes.rowCount, 12);
+  assert.equal(indexes.rowCount, 13);
 
   const forbidden = await pool.query(`
     select table_name from information_schema.tables
@@ -174,15 +178,15 @@ test("legacy inserts remain V1/linear while the circular current revision FK is 
       [v2Id, `phase1-v2-${v2Id}`, revisionId],
     );
     await client.query(
-      `insert into public.loop_plan_revisions (id, loop_id, revision_number, status)
-       values ($1, $2, 1, 'approved')`,
-      [revisionId, v2Id],
+      `insert into public.loop_plan_revisions (id, loop_id, revision_number, status, content_hash, plan_snapshot)
+       values ($1, $2, 1, 'approved', $3, '{}'::jsonb)`,
+      [revisionId, v2Id, "0".repeat(64)],
     );
     await client.query("set constraints loops_current_plan_revision_id_fkey immediate");
     await client.query("savepoint delete_current_revision");
     await assert.rejects(
       () => client.query("delete from public.loop_plan_revisions where id=$1", [revisionId]),
-      (error) => error.code === "23503",
+      (error) => error.code === "23514" && /approved loop plan revision is immutable/i.test(error.message),
       "deleting the selected revision must fail rather than violate loops_workflow_state_check",
     );
     await client.query("rollback to savepoint delete_current_revision");

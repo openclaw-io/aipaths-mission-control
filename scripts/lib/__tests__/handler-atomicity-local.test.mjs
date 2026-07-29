@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { after, before, test } from "node:test";
@@ -83,6 +83,7 @@ const youtubePipeline = transpileModule(resolve(repoRoot, "src/lib/youtube-pipel
 
 function loadRoute(relativePath, extra = {}) {
   return transpileModule(resolve(repoRoot, relativePath), {
+    "node:crypto": { createHash, randomUUID },
     "next/server": nextServer,
     "@/lib/auth/local": auth,
     "@/lib/db/postgres": postgres,

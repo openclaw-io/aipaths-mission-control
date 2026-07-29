@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { NextResponse, type NextRequest } from "next/server";
 import { getLocalMissionControlUser, isLocalAuthDisabled } from "@/lib/auth/local";
 import { withTransaction } from "@/lib/db/postgres";
@@ -64,6 +65,14 @@ function samePayload(left: unknown, right: unknown) {
   return JSON.stringify(canonicalJson(left)) === JSON.stringify(canonicalJson(right));
 }
 
+function sha256(value: unknown) {
+  return createHash("sha256").update(JSON.stringify(canonicalJson(value))).digest("hex");
+}
+
+function asRecord(value: unknown) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -97,6 +106,10 @@ export async function POST(
 
   const action: ApprovalAction = body.action;
   const queue = body.queue;
+  const requestedPlanRevisionId = parseDecisionId(body?.plan_revision_id);
+  const requestedPlanHash = typeof body?.plan_hash === "string" && /^[0-9a-f]{64}$/.test(body.plan_hash)
+    ? body.plan_hash
+    : null;
   if (action === "rework" && queue) {
     return NextResponse.json({ error: "rework_cannot_be_queued" }, { status: 400 });
   }
@@ -113,7 +126,7 @@ export async function POST(
 
   const now = new Date().toISOString();
   const nextStatus = action === "rework" ? "planning" : queue ? "queued" : "approved";
-  const decisionRequest = {
+  const baseDecisionRequest = {
     decision_type: "plan_approval",
     loop_id: id,
     action,
@@ -132,12 +145,14 @@ export async function POST(
     type LoopDecisionRow = {
       id: string;
       status: string;
+      workflow_version: number;
+      current_plan_revision_id: string | null;
       approval_scope: Record<string, unknown> | null;
       metadata: Record<string, unknown> | null;
       last_approved_at: string | Date | null;
     };
     const loopRows = await client.query<LoopDecisionRow>(
-      `select id, status, approval_scope, metadata, last_approved_at
+      `select id, status, workflow_version, current_plan_revision_id, approval_scope, metadata, last_approved_at
          from loops
         where id = $1
         limit 1
@@ -146,6 +161,9 @@ export async function POST(
     );
     const loop = loopRows.rows[0];
     if (!loop) return { kind: "missing" as const };
+    const decisionRequest = loop.workflow_version === 2
+      ? { ...baseDecisionRequest, plan_revision_id: requestedPlanRevisionId, plan_hash: requestedPlanHash }
+      : baseDecisionRequest;
 
     const loopMetadata = loop.metadata || {};
     const decisionLedger = asDecisionLedger(loopMetadata);
@@ -155,6 +173,107 @@ export async function POST(
         return { kind: "idempotency_conflict" as const };
       }
       return { kind: "replay" as const, response: persisted.response as Record<string, unknown> };
+    }
+
+    if (loop.workflow_version === 2) {
+      // The serial V2 runtime has no plan revision editor yet. Return without a
+      // write so rework can never leave a half-mutated revision/Loop pair.
+      if (action === "rework") return { kind: "v2_rework_unsupported" as const };
+      if (!queue) return { kind: "v2_queue_required" as const };
+      if (loop.status !== "needs_approval" || !loop.current_plan_revision_id) {
+        return { kind: "transition_conflict" as const, status: loop.status };
+      }
+      if (!requestedPlanRevisionId || !requestedPlanHash) return { kind: "v2_exact_plan_required" as const };
+      if (requestedPlanRevisionId !== loop.current_plan_revision_id) {
+        return { kind: "v2_revision_conflict" as const, status: "stale_revision" };
+      }
+      const revisionResult = await client.query<{
+        id: string; status: string; content_hash: string | null; plan_snapshot: Record<string, unknown> | null;
+      }>(
+        `select id,status,content_hash,plan_snapshot from loop_plan_revisions
+          where id=$1 and loop_id=$2
+          limit 1 for update`,
+        [loop.current_plan_revision_id, id],
+      );
+      const revision = revisionResult.rows[0];
+      if (!revision || revision.status !== "pending_approval") {
+        return { kind: "v2_revision_conflict" as const, status: revision?.status || "missing" };
+      }
+      if (!revision.plan_snapshot || revision.content_hash !== requestedPlanHash
+        || sha256(revision.plan_snapshot) !== revision.content_hash) {
+        return { kind: "v2_plan_integrity_conflict" as const };
+      }
+      const graphRows = await client.query<{
+        stage_key: string; stage_title: string; stage_description: string | null; stage_position: number;
+        task_key: string; task_title: string; task_description: string | null; task_position: number;
+        assignee_agent: string | null; dependencies: Array<{ key: string; type: string }>;
+      }>(
+        `select s.key stage_key,s.title stage_title,s.description stage_description,s.position stage_position,
+                t.key task_key,t.title task_title,t.description task_description,t.position task_position,t.assignee_agent,
+                coalesce(jsonb_agg(jsonb_build_object('key',dt.key,'type',d.dependency_type)
+                  order by dt.key,d.dependency_type) filter (where d.task_id is not null),'[]'::jsonb) dependencies
+           from loop_stages s join loop_tasks t on t.stage_id=s.id
+           left join loop_task_dependencies d on d.task_id=t.id
+           left join loop_tasks dt on dt.id=d.depends_on_task_id
+          where s.plan_revision_id=$1
+          group by s.id,t.id order by s.position,s.id,t.position,t.id`,
+        [revision.id],
+      );
+      const stages: Array<Record<string, unknown>> = [];
+      for (const row of graphRows.rows) {
+        let stage = stages.find((candidate) => candidate.key === row.stage_key) as Record<string, unknown> | undefined;
+        if (!stage) {
+          stage = { key: row.stage_key, title: row.stage_title, description: row.stage_description,
+            position: row.stage_position, tasks: [] };
+          stages.push(stage);
+        }
+        (stage.tasks as Array<unknown>).push({ key: row.task_key, title: row.task_title,
+          description: row.task_description, assignee_agent: row.assignee_agent, position: row.task_position,
+          dependencies: row.dependencies });
+      }
+      if (!samePayload(stages, asRecord(revision.plan_snapshot).stages)) {
+        return { kind: "v2_plan_integrity_conflict" as const };
+      }
+      const approvedPolicy = asRecord(asRecord(revision.plan_snapshot).approval_policy);
+      const approvalScope = {
+        ...approvedPolicy, approved: true, approved_by: actorIdentity,
+        approved_at: now, can_execute_unattended: true,
+        approved_plan_revision_id: revision.id, approved_plan_hash: revision.content_hash,
+      };
+      const response = { ok: true, id, status: "queued", decision_id: decisionId,
+        plan_revision_id: revision.id, plan_hash: revision.content_hash };
+      const decisionIdentity = {
+        decision_id: decisionId, action, queue: true, comment, plan_operations: [],
+        acted_at: now, acted_by: actorIdentity, from_status: loop.status,
+        to_status: "queued", plan_revision_id: revision.id, plan_hash: revision.content_hash,
+      };
+      const metadata = {
+        ...loopMetadata,
+        last_plan_decision: decisionIdentity,
+        decision_ledger: [...decisionLedger, {
+          decision_id: decisionId, decision_type: "plan_approval", request: decisionRequest,
+          response, created_at: now,
+        }],
+      };
+      await client.query(
+        `update loop_plan_revisions
+            set status='approved', approved_by=$1, approved_at=$2, updated_at=$2
+          where id=$3 and loop_id=$4 and status='pending_approval'`,
+        [actorIdentity, now, revision.id, id],
+      );
+      await client.query(
+        `update loops
+            set status='queued', approval_scope=$1::jsonb, metadata=$2::jsonb,
+                last_approved_at=$3, updated_at=$3, row_version=row_version+1
+          where id=$4 and status='needs_approval' and current_plan_revision_id=$5`,
+        [JSON.stringify(approvalScope), JSON.stringify(metadata), now, id, revision.id],
+      );
+      await client.query(
+        `insert into loop_events (loop_id,event_type,from_status,to_status,actor,payload,created_at)
+         values ($1,'loop.queued','needs_approval','queued',$2,$3::jsonb,$4)`,
+        [id, actorIdentity, JSON.stringify({ mode: "manual", workflow_version: 2, ...decisionIdentity }), now],
+      );
+      return { kind: "success" as const, response };
     }
 
     const allowed = action === "rework"
@@ -236,6 +355,21 @@ export async function POST(
   if (result.kind === "missing") return NextResponse.json({ error: "Loop not found" }, { status: 404 });
   if (result.kind === "idempotency_conflict") {
     return NextResponse.json({ error: "decision_id_payload_conflict" }, { status: 409 });
+  }
+  if (result.kind === "v2_rework_unsupported") {
+    return NextResponse.json({ error: "v2_plan_rework_not_implemented" }, { status: 501 });
+  }
+  if (result.kind === "v2_queue_required") {
+    return NextResponse.json({ error: "v2_approval_must_queue" }, { status: 400 });
+  }
+  if (result.kind === "v2_exact_plan_required") {
+    return NextResponse.json({ error: "v2_exact_plan_revision_and_hash_required" }, { status: 400 });
+  }
+  if (result.kind === "v2_plan_integrity_conflict") {
+    return NextResponse.json({ error: "v2_plan_snapshot_integrity_conflict" }, { status: 409 });
+  }
+  if (result.kind === "v2_revision_conflict") {
+    return NextResponse.json({ error: "v2_plan_revision_approval_conflict", revisionStatus: result.status }, { status: 409 });
   }
   if (result.kind === "transition_conflict") {
     return NextResponse.json({ error: "approval_transition_conflict", currentStatus: result.status }, { status: 409 });

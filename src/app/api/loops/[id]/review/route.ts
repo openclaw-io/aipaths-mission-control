@@ -118,11 +118,17 @@ export async function POST(
     plan: Array<{ title?: string | null; status?: string | null; notes?: string | null }> | null;
     metadata: Record<string, unknown> | null;
     approval_scope: {
+      approved?: boolean;
+      can_execute_unattended?: boolean;
+      approved_plan_revision_id?: string | null;
+      approved_plan_hash?: string | null;
       allowed_actions?: string[] | null;
       forbidden_actions?: string[] | null;
       notes?: string | null;
     } | null;
     owner_agent: string | null;
+    workflow_version: number;
+    current_plan_revision_id: string | null;
   };
   type LocalPrimaryExecution = {
     work_item_id: string;
@@ -132,7 +138,8 @@ export async function POST(
 
   const localResult = await withTransaction(async (client) => {
     const loopRes = await client.query<LocalLoop>(
-      `select id, status, name, summary, description, target_outcome, acceptance_criteria, plan, metadata, approval_scope, owner_agent
+      `select id, status, name, summary, description, target_outcome, acceptance_criteria, plan, metadata, approval_scope, owner_agent,
+              workflow_version, current_plan_revision_id
          from loops
         where id = $1
         limit 1
@@ -155,6 +162,99 @@ export async function POST(
       };
     }
 
+    if (loop.workflow_version === 2) {
+      if (action === "request_changes") return { kind: "v2_changes_unsupported" as const };
+      if (loop.status !== "in_review" || !loop.current_plan_revision_id) {
+        return { kind: "invalid_transition" as const, error: "invalid_review_state" };
+      }
+      const revisionResult = await client.query<{ status: string; content_hash: string | null; plan_snapshot: unknown }>(
+        "select status,content_hash,plan_snapshot from loop_plan_revisions where id=$1 and loop_id=$2 for update",
+        [loop.current_plan_revision_id, id],
+      );
+      const revision = revisionResult.rows[0];
+      const scope = loop.approval_scope || {};
+      if (revision?.status !== "approved" || !revision.content_hash || !revision.plan_snapshot
+        || scope.approved !== true || scope.can_execute_unattended !== true
+        || scope.approved_plan_revision_id !== loop.current_plan_revision_id
+        || scope.approved_plan_hash !== revision.content_hash) {
+        return { kind: "invalid_transition" as const, error: "v2_approved_revision_mismatch" };
+      }
+      await client.query(
+        `select t.id from loop_tasks t join loop_stages s on s.id=t.stage_id
+          where s.plan_revision_id=$1 order by s.position,s.id,t.position,t.id for update of t,s`,
+        [loop.current_plan_revision_id],
+      );
+      await client.query(
+        `select r.id from loop_task_runs r join loop_tasks t on t.id=r.task_id
+          join loop_stages s on s.id=t.stage_id where s.plan_revision_id=$1 order by t.id,r.id for update of r`,
+        [loop.current_plan_revision_id],
+      );
+      await client.query(
+        `select wi.id from work_items wi join loop_task_runs r on r.work_item_id=wi.id
+          join loop_tasks t on t.id=r.task_id join loop_stages s on s.id=t.stage_id
+          where s.plan_revision_id=$1 order by t.id,r.id,wi.id for update of wi`,
+        [loop.current_plan_revision_id],
+      );
+      const taskRows = await client.query<{
+        id: string; task_status: string; stage_status: string; run_count: number; consistent_run_count: number;
+      }>(
+        `select t.id,t.status task_status,s.status stage_status,count(r.id)::int run_count,
+                count(r.id) filter (where r.status='succeeded' and r.run_role='implementation'
+                  and r.quality_cycle=1 and r.work_item_id is not null and r.execution_attempt_id is not null
+                  and wi.id=r.work_item_id and wi.loop_id=$2 and wi.source_type='loop' and wi.source_id=t.id::text
+                  and wi.status='done' and wi.payload->>'execution_attempt_id'=r.execution_attempt_id::text
+                  and wi.payload->>'plan_revision_id'=$1::text and wi.payload->>'plan_hash'=$3
+                  and lwi.loop_id=$2 and lwi.work_item_id=r.work_item_id
+                  and lwi.relation_type='task_execution')::int consistent_run_count
+           from loop_tasks t join loop_stages s on s.id=t.stage_id
+           left join loop_task_runs r on r.task_id=t.id
+           left join work_items wi on wi.id=r.work_item_id
+           left join loop_work_items lwi on lwi.work_item_id=r.work_item_id and lwi.relation_type='task_execution'
+          where s.plan_revision_id=$1::uuid group by t.id,t.status,s.status order by t.id`,
+        [loop.current_plan_revision_id, id, revision.content_hash],
+      );
+      const mapIntegrity = await client.query<{ mapping_count: number; active_count: number; extra_count: number }>(
+        `select
+          (select count(*)::int from loop_work_items where loop_id=$2 and relation_type='task_execution') mapping_count,
+          (select count(*)::int from loop_task_runs r join loop_tasks t on t.id=r.task_id
+            join loop_stages s on s.id=t.stage_id where s.plan_revision_id=$1 and r.status in ('queued','running')) active_count,
+          (select count(*)::int from loop_work_items lwi where lwi.loop_id=$2 and lwi.relation_type='task_execution'
+            and not exists (select 1 from loop_task_runs r join loop_tasks t on t.id=r.task_id
+              join loop_stages s on s.id=t.stage_id where r.work_item_id=lwi.work_item_id and s.plan_revision_id=$1)) extra_count`,
+        [loop.current_plan_revision_id, id],
+      );
+      const integrity = mapIntegrity.rows[0];
+      const consistent = taskRows.rows.length > 0
+        && taskRows.rows.every((task) => task.task_status === "completed" && task.stage_status === "completed"
+          && task.run_count === 1 && task.consistent_run_count === 1)
+        && integrity?.mapping_count === taskRows.rows.length && integrity.active_count === 0 && integrity.extra_count === 0;
+      if (!consistent) return { kind: "invalid_transition" as const, error: "v2_task_runs_inconsistent" };
+
+      const response = { ok: true, id, status: "completed", decision_id: decisionId };
+      const reviewHistory = Array.isArray(loopMetadata.review_history) ? loopMetadata.review_history : [];
+      const metadata = {
+        ...loopMetadata,
+        review_history: [...reviewHistory, { decision_id: decisionId, action, feedback: feedback || null, acted_at: now, acted_by: actorIdentity }],
+        decision_ledger: [...decisionLedger, {
+          decision_id: decisionId, decision_type: "deliverable_review", request: decisionRequest,
+          response, created_at: now,
+        }],
+      };
+      await client.query(
+        `update loops set status='completed',metadata=$1::jsonb,last_completed_at=$2,
+                updated_at=$2,row_version=row_version+1
+          where id=$3 and status='in_review' and current_plan_revision_id=$4`,
+        [JSON.stringify(metadata), now, id, loop.current_plan_revision_id],
+      );
+      await client.query(
+        `insert into loop_events(loop_id,event_type,from_status,to_status,actor,payload,created_at)
+         values ($1,'loop.review_approved','in_review','completed',$2,$3::jsonb,$4)`,
+        [id, actorIdentity, JSON.stringify({ decision_id: decisionId, action, feedback: feedback || null, workflow_version: 2 }), now],
+      );
+      return { kind: "success" as const, response };
+    }
+
+    // Explicit V1 branch retains primary_execution deliverable semantics.
     const primaryRes = await client.query<LocalPrimaryExecution>(
       `select lwi.work_item_id, wi.status, wi.payload
          from loop_work_items lwi
@@ -297,6 +397,9 @@ export async function POST(
   }
   if (localResult.kind === "idempotency_conflict") {
     return NextResponse.json({ error: "decision_id_payload_conflict" }, { status: 409 });
+  }
+  if (localResult.kind === "v2_changes_unsupported") {
+    return NextResponse.json({ error: "v2_deliverable_changes_not_implemented" }, { status: 501 });
   }
   if (localResult.kind === "invalid_transition") {
     return NextResponse.json(

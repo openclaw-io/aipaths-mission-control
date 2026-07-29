@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { test } from "node:test";
@@ -24,6 +25,7 @@ function transpileModule(sourcePath, requires = {}, globals = {}) {
     exports: cjsModule.exports,
     require(specifier) {
       if (specifier in requires) return requires[specifier];
+      if (specifier === "node:crypto") return { createHash };
       throw new Error(`Unexpected require from ${sourcePath}: ${specifier}`);
     },
     Date,

@@ -485,6 +485,9 @@ CREATE INDEX IF NOT EXISTS idx_loop_work_items_relation ON public.loop_work_item
 CREATE UNIQUE INDEX IF NOT EXISTS uq_loop_work_items_primary_execution
   ON public.loop_work_items(loop_id)
   WHERE relation_type = 'primary_execution';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_loop_work_items_task_execution_work_item
+  ON public.loop_work_items(work_item_id)
+  WHERE relation_type = 'task_execution';
 
 -- Project Loops V2 phase 1 foundation. Runtime V2 remains disabled; all existing
 -- and application-created Loops retain workflow_version=1 by default.
@@ -494,6 +497,8 @@ CREATE TABLE IF NOT EXISTS public.loop_plan_revisions (
   revision_number integer NOT NULL,
   status text NOT NULL DEFAULT 'draft',
   summary text,
+  content_hash text,
+  plan_snapshot jsonb,
   created_by text,
   approved_by text,
   approved_at timestamptz,
@@ -501,8 +506,13 @@ CREATE TABLE IF NOT EXISTS public.loop_plan_revisions (
   updated_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT loop_plan_revisions_id_loop_id_key UNIQUE (id, loop_id),
   CONSTRAINT loop_plan_revisions_revision_number_check CHECK (revision_number > 0),
-  CONSTRAINT loop_plan_revisions_status_check CHECK (status IN ('draft', 'pending_approval', 'approved', 'superseded'))
+  CONSTRAINT loop_plan_revisions_status_check CHECK (status IN ('draft', 'pending_approval', 'approved', 'superseded')),
+  CONSTRAINT loop_plan_revisions_content_hash_check CHECK (content_hash IS NULL OR content_hash ~ '^[0-9a-f]{64}$'),
+  CONSTRAINT loop_plan_revisions_plan_snapshot_check CHECK (plan_snapshot IS NULL OR jsonb_typeof(plan_snapshot) = 'object'),
+  CONSTRAINT loop_plan_revisions_runtime_snapshot_check CHECK ((content_hash IS NULL) = (plan_snapshot IS NULL))
 );
+ALTER TABLE public.loop_plan_revisions ADD COLUMN IF NOT EXISTS content_hash text;
+ALTER TABLE public.loop_plan_revisions ADD COLUMN IF NOT EXISTS plan_snapshot jsonb;
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -511,6 +521,15 @@ BEGIN
       AND conrelid='public.loop_plan_revisions'::regclass
   ) THEN
     ALTER TABLE public.loop_plan_revisions ADD CONSTRAINT loop_plan_revisions_id_loop_id_key UNIQUE (id, loop_id);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='loop_plan_revisions_content_hash_check' AND conrelid='public.loop_plan_revisions'::regclass) THEN
+    ALTER TABLE public.loop_plan_revisions ADD CONSTRAINT loop_plan_revisions_content_hash_check CHECK (content_hash IS NULL OR content_hash ~ '^[0-9a-f]{64}$');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='loop_plan_revisions_plan_snapshot_check' AND conrelid='public.loop_plan_revisions'::regclass) THEN
+    ALTER TABLE public.loop_plan_revisions ADD CONSTRAINT loop_plan_revisions_plan_snapshot_check CHECK (plan_snapshot IS NULL OR jsonb_typeof(plan_snapshot)='object');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='loop_plan_revisions_runtime_snapshot_check' AND conrelid='public.loop_plan_revisions'::regclass) THEN
+    ALTER TABLE public.loop_plan_revisions ADD CONSTRAINT loop_plan_revisions_runtime_snapshot_check CHECK ((content_hash IS NULL) = (plan_snapshot IS NULL));
   END IF;
 END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_loop_plan_revisions_loop_revision ON public.loop_plan_revisions(loop_id, revision_number);
@@ -662,9 +681,104 @@ CREATE TRIGGER loop_task_dependencies_validate_graph
 BEFORE INSERT OR UPDATE OF task_id, depends_on_task_id ON public.loop_task_dependencies
 FOR EACH ROW EXECUTE FUNCTION public.validate_loop_task_dependency();
 
+CREATE OR REPLACE FUNCTION public.reject_approved_loop_plan_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $reject_approved_loop_plan_mutation$
+DECLARE
+  revision_status text;
+  revision_id uuid;
+  old_revision_id uuid;
+  new_revision_id uuid;
+BEGIN
+  IF TG_TABLE_NAME = 'loop_plan_revisions' THEN
+    IF TG_OP = 'DELETE' THEN
+      IF OLD.status = 'approved' THEN
+        RAISE EXCEPTION 'Approved Loop plan revision is immutable' USING ERRCODE = '23514';
+      END IF;
+      RETURN OLD;
+    END IF;
+    IF TG_OP = 'UPDATE' THEN
+      IF OLD.status = 'approved' AND to_jsonb(NEW) IS DISTINCT FROM to_jsonb(OLD) THEN
+        RAISE EXCEPTION 'Approved Loop plan revision is immutable' USING ERRCODE = '23514';
+      END IF;
+    END IF;
+    IF NEW.status = 'approved' AND (
+      NEW.content_hash IS NULL OR NEW.plan_snapshot IS NULL
+      OR jsonb_typeof(NEW.plan_snapshot) <> 'object'
+      OR NEW.content_hash !~ '^[0-9a-f]{64}$'
+    ) THEN
+      RAISE EXCEPTION 'Approved Loop plan revision requires an exact snapshot and hash' USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  IF TG_TABLE_NAME = 'loop_stages' THEN
+    revision_id := CASE WHEN TG_OP='DELETE' THEN OLD.plan_revision_id ELSE NEW.plan_revision_id END;
+  ELSIF TG_TABLE_NAME = 'loop_tasks' THEN
+    SELECT s.plan_revision_id INTO revision_id FROM public.loop_stages s
+     WHERE s.id = CASE WHEN TG_OP='DELETE' THEN OLD.stage_id ELSE NEW.stage_id END;
+  ELSIF TG_TABLE_NAME = 'loop_task_dependencies' THEN
+    IF TG_OP <> 'INSERT' THEN
+      SELECT s.plan_revision_id INTO old_revision_id
+        FROM public.loop_tasks t JOIN public.loop_stages s ON s.id=t.stage_id
+       WHERE t.id = OLD.task_id;
+    END IF;
+    IF TG_OP <> 'DELETE' THEN
+      SELECT s.plan_revision_id INTO new_revision_id
+        FROM public.loop_tasks t JOIN public.loop_stages s ON s.id=t.stage_id
+       WHERE t.id = NEW.task_id;
+    END IF;
+    IF EXISTS (
+      SELECT 1 FROM public.loop_plan_revisions r
+       WHERE r.id IN (old_revision_id, new_revision_id) AND r.status='approved'
+    ) THEN
+      RAISE EXCEPTION 'Approved Loop plan structure is immutable' USING ERRCODE = '23514';
+    END IF;
+    revision_id := COALESCE(new_revision_id, old_revision_id);
+  END IF;
+  SELECT r.status INTO revision_status FROM public.loop_plan_revisions r WHERE r.id=revision_id;
+  IF revision_status <> 'approved' THEN
+    IF TG_OP='DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF;
+  END IF;
+
+  IF TG_OP <> 'UPDATE' OR TG_TABLE_NAME = 'loop_task_dependencies' THEN
+    RAISE EXCEPTION 'Approved Loop plan structure is immutable' USING ERRCODE = '23514';
+  END IF;
+  IF TG_TABLE_NAME = 'loop_stages'
+     AND (to_jsonb(NEW) - ARRAY['status','updated_at']) IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['status','updated_at']) THEN
+    RAISE EXCEPTION 'Approved Loop stage specification is immutable' USING ERRCODE = '23514';
+  END IF;
+  IF TG_TABLE_NAME = 'loop_tasks'
+     AND (to_jsonb(NEW) - ARRAY['status','updated_at']) IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['status','updated_at']) THEN
+    RAISE EXCEPTION 'Approved Loop task specification is immutable' USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END
+$reject_approved_loop_plan_mutation$;
+REVOKE ALL ON FUNCTION public.reject_approved_loop_plan_mutation() FROM PUBLIC;
+
+DROP TRIGGER IF EXISTS loop_plan_revisions_freeze_approved ON public.loop_plan_revisions;
+CREATE TRIGGER loop_plan_revisions_freeze_approved BEFORE INSERT OR UPDATE OR DELETE ON public.loop_plan_revisions
+FOR EACH ROW EXECUTE FUNCTION public.reject_approved_loop_plan_mutation();
+DROP TRIGGER IF EXISTS loop_stages_freeze_approved ON public.loop_stages;
+CREATE TRIGGER loop_stages_freeze_approved BEFORE INSERT OR UPDATE OR DELETE ON public.loop_stages
+FOR EACH ROW EXECUTE FUNCTION public.reject_approved_loop_plan_mutation();
+DROP TRIGGER IF EXISTS loop_tasks_freeze_approved ON public.loop_tasks;
+CREATE TRIGGER loop_tasks_freeze_approved BEFORE INSERT OR UPDATE OR DELETE ON public.loop_tasks
+FOR EACH ROW EXECUTE FUNCTION public.reject_approved_loop_plan_mutation();
+DROP TRIGGER IF EXISTS loop_task_dependencies_freeze_approved ON public.loop_task_dependencies;
+CREATE TRIGGER loop_task_dependencies_freeze_approved BEFORE INSERT OR UPDATE OR DELETE ON public.loop_task_dependencies
+FOR EACH ROW EXECUTE FUNCTION public.reject_approved_loop_plan_mutation();
+
 CREATE TABLE IF NOT EXISTS public.loop_task_runs (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   task_id uuid NOT NULL CONSTRAINT loop_task_runs_task_id_fkey REFERENCES public.loop_tasks(id) ON DELETE CASCADE,
+  work_item_id uuid CONSTRAINT loop_task_runs_work_item_id_fkey REFERENCES public.work_items(id) ON DELETE RESTRICT,
+  execution_attempt_id uuid,
+  run_role text NOT NULL DEFAULT 'implementation',
+  quality_cycle integer NOT NULL DEFAULT 1,
   attempt_number integer NOT NULL DEFAULT 1,
   status text NOT NULL DEFAULT 'queued',
   started_at timestamptz,
@@ -674,11 +788,18 @@ CREATE TABLE IF NOT EXISTS public.loop_task_runs (
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT loop_task_runs_id_task_id_key UNIQUE (id, task_id),
+  CONSTRAINT loop_task_runs_run_role_check CHECK (run_role IN ('implementation')),
+  CONSTRAINT loop_task_runs_quality_cycle_check CHECK (quality_cycle > 0),
+  CONSTRAINT loop_task_runs_runtime_identity_check CHECK (work_item_id IS NULL OR execution_attempt_id IS NOT NULL),
   CONSTRAINT loop_task_runs_attempt_number_check CHECK (attempt_number > 0),
   CONSTRAINT loop_task_runs_status_check CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
   CONSTRAINT loop_task_runs_output_check CHECK (jsonb_typeof(output) = 'object'),
   CONSTRAINT loop_task_runs_timestamps_check CHECK (finished_at IS NULL OR started_at IS NULL OR finished_at >= started_at)
 );
+ALTER TABLE public.loop_task_runs ADD COLUMN IF NOT EXISTS work_item_id uuid;
+ALTER TABLE public.loop_task_runs ADD COLUMN IF NOT EXISTS execution_attempt_id uuid;
+ALTER TABLE public.loop_task_runs ADD COLUMN IF NOT EXISTS run_role text NOT NULL DEFAULT 'implementation';
+ALTER TABLE public.loop_task_runs ADD COLUMN IF NOT EXISTS quality_cycle integer NOT NULL DEFAULT 1;
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -688,8 +809,34 @@ BEGIN
   ) THEN
     ALTER TABLE public.loop_task_runs ADD CONSTRAINT loop_task_runs_id_task_id_key UNIQUE (id, task_id);
   END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname='loop_task_runs_work_item_id_fkey'
+      AND conrelid='public.loop_task_runs'::regclass
+  ) THEN
+    ALTER TABLE public.loop_task_runs ADD CONSTRAINT loop_task_runs_work_item_id_fkey
+      FOREIGN KEY (work_item_id) REFERENCES public.work_items(id) ON DELETE RESTRICT;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname='loop_task_runs_run_role_check'
+      AND conrelid='public.loop_task_runs'::regclass
+  ) THEN
+    ALTER TABLE public.loop_task_runs ADD CONSTRAINT loop_task_runs_run_role_check CHECK (run_role IN ('implementation'));
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname='loop_task_runs_quality_cycle_check'
+      AND conrelid='public.loop_task_runs'::regclass
+  ) THEN
+    ALTER TABLE public.loop_task_runs ADD CONSTRAINT loop_task_runs_quality_cycle_check CHECK (quality_cycle > 0);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='loop_task_runs_runtime_identity_check' AND conrelid='public.loop_task_runs'::regclass) THEN
+    ALTER TABLE public.loop_task_runs ADD CONSTRAINT loop_task_runs_runtime_identity_check CHECK (work_item_id IS NULL OR execution_attempt_id IS NOT NULL);
+  END IF;
 END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_loop_task_runs_task_attempt ON public.loop_task_runs(task_id, attempt_number);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_loop_task_runs_work_item ON public.loop_task_runs(work_item_id) WHERE work_item_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_loop_task_runs_task_created ON public.loop_task_runs(task_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS public.loop_task_reviews (

@@ -83,6 +83,31 @@ export function buildLoopExecutionInstruction(loop: LoopInstructionContext) {
   ].filter((part): part is string => typeof part === "string").join("\n\n");
 }
 
+export function buildLoopTaskExecutionInstruction(context: {
+  taskKey: string;
+  title: string;
+  description?: string | null;
+  acceptanceCriteria: string[];
+  approvalScope?: {
+    allowed_actions?: string[] | null;
+    forbidden_actions?: string[] | null;
+    notes?: string | null;
+  } | null;
+}) {
+  const scope = context.approvalScope || {};
+  return [
+    `Task key: ${context.taskKey}`,
+    `Objective: ${context.title}`,
+    context.description ? `Task description:\n${context.description}` : null,
+    listSection("Acceptance criteria", context.acceptanceCriteria),
+    "Approved execution restrictions:",
+    listSection("Allowed actions", scope.allowed_actions),
+    listSection("Forbidden actions", scope.forbidden_actions),
+    scope.notes ? `Approval notes: ${scope.notes}` : null,
+    "Complete only this task. Do not expand into other project tasks.",
+  ].filter((part): part is string => typeof part === "string").join("\n\n");
+}
+
 export function buildLoopReworkInstruction(
   loop: LoopInstructionContext,
   feedback: string,

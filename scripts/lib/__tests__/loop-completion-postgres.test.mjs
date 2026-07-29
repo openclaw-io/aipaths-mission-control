@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { after, before, test } from "node:test";
@@ -96,6 +96,7 @@ function postgresTransaction(run) {
 }
 
 const approveRoute = transpileModule(resolve(repoRoot, "src/app/api/loops/[id]/approve/route.ts"), {
+  "node:crypto": { createHash },
   "next/server": { NextResponse: { json: (payload, init = {}) => ({ payload, status: init.status || 200 }) } },
   "@/lib/auth/local": {
     isLocalAuthDisabled: () => true,
@@ -407,7 +408,8 @@ test("concurrent Postgres planners lock rework context and apply its operation e
       planPendingRoute.POST(request),
       planPendingRoute.POST(request),
     ]);
-    assert.equal(responses.reduce((sum, response) => sum + response.payload.promoted, 0), 1);
+    assert.equal(responses.flatMap((response) => response.payload.details)
+      .filter((detail) => detail.loopId === loopId && detail.action === "plan_rework_consumed_and_promoted").length, 1);
 
     const loop = (await pool.query("select status, plan, metadata from public.loops where id = $1", [loopId])).rows[0];
     assert.equal(loop.status, "needs_approval");

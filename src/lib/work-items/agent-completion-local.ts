@@ -92,19 +92,38 @@ export async function patchAgentWorkItemWithCompletion(id: string, body: JsonRec
   }
 
   return withTransaction(async (client) => {
-    // All Loop completion/rework transactions lock Loop -> work item. Looking
-    // up the relation does not lock either row; taking the Loop lock first
-    // prevents an inversion with the review/request_changes path.
-    await client.query(
-      `SELECT l.id
-         FROM public.loop_work_items lwi
-         INNER JOIN public.loops l ON l.id = lwi.loop_id
-        WHERE lwi.work_item_id = $1
-          AND lwi.relation_type = 'primary_execution'
-        LIMIT 1
-        FOR UPDATE OF l`,
+    // Global order for Loop-backed completions: Loop -> task -> run -> work item.
+    // Cardinality is checked before any work-item mutation so malformed/cross
+    // mappings fail closed rather than falling through to another handler.
+    const mappings = await client.query<{
+      loop_id: string; relation_type: string; workflow_version: number;
+    }>(
+      `SELECT l.id loop_id,lwi.relation_type,l.workflow_version
+         FROM public.loop_work_items lwi JOIN public.loops l ON l.id=lwi.loop_id
+        WHERE lwi.work_item_id=$1 AND lwi.relation_type IN ('primary_execution','task_execution')
+        ORDER BY l.id,lwi.relation_type FOR UPDATE OF l`,
       [id],
     );
+    const taskMappings = mappings.rows.filter((row) => row.relation_type === "task_execution");
+    const primaryMappings = mappings.rows.filter((row) => row.relation_type === "primary_execution");
+    if (taskMappings.length > 0) {
+      if (taskMappings.length !== 1 || primaryMappings.length !== 0 || taskMappings[0].workflow_version !== 2) {
+        throw new Error("v2_task_execution_mapping_cardinality");
+      }
+      const lockedTasks = await client.query<{ id: string }>(
+        `SELECT t.id FROM loop_task_runs r JOIN loop_tasks t ON t.id=r.task_id
+          WHERE r.work_item_id=$1 ORDER BY t.id FOR UPDATE OF t`,
+        [id],
+      );
+      if (lockedTasks.rows.length !== 1) throw new Error("v2_task_execution_run_cardinality");
+      const lockedRuns = await client.query<{ id: string }>(
+        "SELECT id FROM loop_task_runs WHERE work_item_id=$1 ORDER BY id FOR UPDATE",
+        [id],
+      );
+      if (lockedRuns.rows.length !== 1) throw new Error("v2_task_execution_run_cardinality");
+    } else if (primaryMappings.some((row) => row.workflow_version !== 1)) {
+      throw new Error("primary_execution_requires_v1");
+    }
 
     const existingResult = await client.query(
       "SELECT * FROM public.work_items WHERE id = $1 LIMIT 1 FOR UPDATE",
@@ -114,6 +133,9 @@ export async function patchAgentWorkItemWithCompletion(id: string, body: JsonRec
     if (!existing) return null;
 
     const status = typeof body.status === "string" ? body.status : null;
+    if (taskMappings.length > 0 && (!status || !["in_progress", "done", "failed", "canceled"].includes(status))) {
+      throw new Error("v2_task_status_transition_conflict");
+    }
     const existingPayload = (existing.payload || {}) as JsonRecord;
     const terminalStatuses = new Set(["done", "failed", "canceled"]);
     const expectedAttempt = typeof existingPayload.execution_attempt_id === "string"
