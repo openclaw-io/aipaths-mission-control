@@ -67,6 +67,7 @@ export type ShadowReviewRow = {
   id: string;
   task_id: string;
   task_run_id: string | null;
+  task_run_owned?: boolean | null;
   status: string;
 };
 
@@ -74,7 +75,13 @@ export type ShadowEvidenceRow = {
   id: string;
   task_id: string;
   task_run_id: string | null;
+  task_run_owned?: boolean | null;
   kind: string;
+};
+
+export type ShadowHistoryCountRow = {
+  task_id: string;
+  count: number | string;
 };
 
 export type LoopWorkflowShadowInput = {
@@ -86,6 +93,9 @@ export type LoopWorkflowShadowInput = {
   runs: ShadowRunRow[];
   reviews: ShadowReviewRow[];
   evidence: ShadowEvidenceRow[];
+  runCounts?: ShadowHistoryCountRow[];
+  reviewCounts?: ShadowHistoryCountRow[];
+  evidenceCounts?: ShadowHistoryCountRow[];
 };
 
 export type ShadowTask = {
@@ -154,6 +164,34 @@ function stageStatusFor(tasks: ShadowTask[]): WorkflowItemStatus {
   if (tasks.some((task) => task.status === "in_progress" || task.status === "completed")) return "in_progress";
   if (tasks.some((task) => task.status === "ready")) return "ready";
   return "pending";
+}
+
+function historyCounts(
+  rows: ShadowHistoryCountRow[] | undefined,
+  fallbackRows: Array<{ task_id: string }>,
+  selectedTaskIds: Set<string>,
+  label: string,
+): Map<string, number> {
+  if (rows === undefined) {
+    const fallback = new Map<string, number>();
+    for (const row of fallbackRows) fallback.set(row.task_id, (fallback.get(row.task_id) ?? 0) + 1);
+    return fallback;
+  }
+
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    if (!selectedTaskIds.has(row.task_id)) {
+      throw new Error(`${label} count references task ${row.task_id} outside the current plan revision`);
+    }
+    const count = typeof row.count === "string"
+      ? (/^\d+$/.test(row.count) ? Number(row.count) : Number.NaN)
+      : row.count;
+    if (!Number.isSafeInteger(count) || count < 0 || counts.has(row.task_id)) {
+      throw new Error(`V2 ${label} count snapshot is inconsistent for task ${row.task_id}`);
+    }
+    counts.set(row.task_id, count);
+  }
+  return counts;
 }
 
 function projectV1(loop: ShadowLoopRow): LoopWorkflowShadow {
@@ -266,11 +304,17 @@ function projectV2(input: LoopWorkflowShadowInput): LoopWorkflowShadow {
   const runsById = new Map(input.runs.map((run) => [run.id, run]));
   for (const item of [...input.reviews, ...input.evidence]) {
     if (!selectedTaskIds.has(item.task_id) || item.task_run_id === null) continue;
-    const run = runsById.get(item.task_run_id);
-    if (!run || run.task_id !== item.task_id) {
+    const ownershipIsValid = item.task_run_owned === undefined
+      ? runsById.get(item.task_run_id)?.task_id === item.task_id
+      : item.task_run_owned === true;
+    if (!ownershipIsValid) {
       throw new Error(`${item.id} task run does not belong to task ${item.task_id}`);
     }
   }
+
+  const runCounts = historyCounts(input.runCounts, input.runs, selectedTaskIds, "run");
+  const reviewCounts = historyCounts(input.reviewCounts, input.reviews, selectedTaskIds, "review");
+  const evidenceCounts = historyCounts(input.evidenceCounts, input.evidence, selectedTaskIds, "evidence");
 
   const stages = stageRows.map<ShadowStage>((stage) => ({
     id: stage.id,
@@ -296,11 +340,11 @@ function projectV2(input: LoopWorkflowShadowInput): LoopWorkflowShadow {
           .filter((dependency) => dependency.task_id === task.id && selectedTaskIds.has(dependency.depends_on_task_id))
           .map((dependency) => dependency.depends_on_task_id)
           .sort(),
-        runCount: input.runs.filter((run) => run.task_id === task.id).length,
+        runCount: runCounts.get(task.id) ?? 0,
         runStatuses: input.runs.filter((run) => run.task_id === task.id).map((run) => run.status),
-        reviewCount: input.reviews.filter((review) => review.task_id === task.id).length,
+        reviewCount: reviewCounts.get(task.id) ?? 0,
         reviewStatuses: input.reviews.filter((review) => review.task_id === task.id).map((review) => review.status),
-        evidenceCount: input.evidence.filter((item) => item.task_id === task.id).length,
+        evidenceCount: evidenceCounts.get(task.id) ?? 0,
         evidenceKinds: input.evidence.filter((item) => item.task_id === task.id).map((item) => item.kind),
       })),
   }));

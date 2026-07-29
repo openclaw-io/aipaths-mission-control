@@ -18,6 +18,7 @@ import {
   type LoopWorkflowShadow,
   type ShadowDependencyRow,
   type ShadowEvidenceRow,
+  type ShadowHistoryCountRow,
   type ShadowPlanRevisionRow,
   type ShadowReviewRow,
   type ShadowRunRow,
@@ -429,7 +430,15 @@ export async function buildLoopWorkflowShadow(
   }
 
   const taskIds = tasks.map((task) => task.id);
-  const [dependenciesResult, runsResult, reviewsResult, evidenceResult] = taskIds.length > 0
+  const [
+    dependenciesResult,
+    runsResult,
+    reviewsResult,
+    evidenceResult,
+    runCountsResult,
+    reviewCountsResult,
+    evidenceCountsResult,
+  ] = taskIds.length > 0
     ? await Promise.all([
         db.query<ShadowDependencyRow>(
           `select task_id, depends_on_task_id, dependency_type
@@ -446,20 +455,47 @@ export async function buildLoopWorkflowShadow(
           [taskIds, V2_HISTORY_LIMIT],
         ),
         db.query<ShadowReviewRow>(
-          `select id, task_id, task_run_id, status
-           from loop_task_reviews
-           where task_id = any($1::uuid[])
-           order by created_at desc, id desc
+          `select review.id, review.task_id, review.task_run_id, review.status,
+                  case when review.task_run_id is null then true
+                       else referenced_run.task_id = review.task_id end as task_run_owned
+           from loop_task_reviews as review
+           left join loop_task_runs as referenced_run on referenced_run.id = review.task_run_id
+           where review.task_id = any($1::uuid[])
+           order by review.created_at desc, review.id desc
            limit $2`,
           [taskIds, V2_HISTORY_LIMIT],
         ),
         db.query<ShadowEvidenceRow>(
-          `select id, task_id, task_run_id, kind
-           from loop_evidence
-           where task_id = any($1::uuid[])
-           order by created_at desc, id desc
+          `select evidence.id, evidence.task_id, evidence.task_run_id, evidence.kind,
+                  case when evidence.task_run_id is null then true
+                       else referenced_run.task_id = evidence.task_id end as task_run_owned
+           from loop_evidence as evidence
+           left join loop_task_runs as referenced_run on referenced_run.id = evidence.task_run_id
+           where evidence.task_id = any($1::uuid[])
+           order by evidence.created_at desc, evidence.id desc
            limit $2`,
           [taskIds, V2_HISTORY_LIMIT],
+        ),
+        db.query<ShadowHistoryCountRow>(
+          `select task_id, count(*) as count
+           from loop_task_runs
+           where task_id = any($1::uuid[])
+           group by task_id`,
+          [taskIds],
+        ),
+        db.query<ShadowHistoryCountRow>(
+          `select task_id, count(*) as count
+           from loop_task_reviews
+           where task_id = any($1::uuid[])
+           group by task_id`,
+          [taskIds],
+        ),
+        db.query<ShadowHistoryCountRow>(
+          `select task_id, count(*) as count
+           from loop_evidence
+           where task_id = any($1::uuid[])
+           group by task_id`,
+          [taskIds],
         ),
       ])
     : [
@@ -467,6 +503,9 @@ export async function buildLoopWorkflowShadow(
         { rows: [] as ShadowRunRow[] },
         { rows: [] as ShadowReviewRow[] },
         { rows: [] as ShadowEvidenceRow[] },
+        { rows: [] as ShadowHistoryCountRow[] },
+        { rows: [] as ShadowHistoryCountRow[] },
+        { rows: [] as ShadowHistoryCountRow[] },
       ];
 
   const taskIdSet = new Set(taskIds);
@@ -496,6 +535,9 @@ export async function buildLoopWorkflowShadow(
     runs,
     reviews,
     evidence,
+    runCounts: normalizeRows(runCountsResult.rows || []),
+    reviewCounts: normalizeRows(reviewCountsResult.rows || []),
+    evidenceCounts: normalizeRows(evidenceCountsResult.rows || []),
   });
 }
 

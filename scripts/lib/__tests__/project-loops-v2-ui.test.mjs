@@ -97,8 +97,11 @@ function workflowRows({ malformedDependency = false } = {}) {
     ],
     dependencies: [{ task_id: "task-build", depends_on_task_id: malformedDependency ? "task-outside" : "task-design", dependency_type: "hard" }],
     runs: [{ id: "run-1", task_id: "task-build", attempt_number: 1, status: "running", started_at: "2026-01-02T01:00:00Z", finished_at: null, error: null, output: {}, created_at: "2026-01-02T01:00:00Z" }],
-    reviews: [{ id: "review-1", task_id: "task-build", task_run_id: "run-1", status: "pending", reviewer: null, feedback: null, decided_at: null, created_at: "2026-01-02T01:01:00Z" }],
-    evidence: [{ id: "evidence-1", task_id: "task-build", task_run_id: "run-1", kind: "artifact", uri: "file://artifact", content: null, metadata: {}, created_at: "2026-01-02T01:02:00Z" }],
+    reviews: [{ id: "review-1", task_id: "task-build", task_run_id: "run-1", task_run_owned: true, status: "pending", reviewer: null, feedback: null, decided_at: null, created_at: "2026-01-02T01:01:00Z" }],
+    evidence: [{ id: "evidence-1", task_id: "task-build", task_run_id: "run-1", task_run_owned: true, kind: "artifact", uri: "file://artifact", content: null, metadata: {}, created_at: "2026-01-02T01:02:00Z" }],
+    runCounts: [{ task_id: "task-build", count: "1" }],
+    reviewCounts: [{ task_id: "task-build", count: "1" }],
+    evidenceCounts: [{ task_id: "task-build", count: "1" }],
   };
 }
 
@@ -111,6 +114,9 @@ function detailQuery(rows, calls) {
     if (/from loop_stages/i.test(sql) && !/join loop_stages/i.test(sql)) return { rows: rows.stages };
     if (/from loop_tasks/i.test(sql) && /join loop_stages/i.test(sql)) return { rows: rows.tasks };
     if (/from loop_task_dependencies/i.test(sql)) return { rows: rows.dependencies };
+    if (/count\(\*\)/i.test(sql) && /from loop_task_runs/i.test(sql)) return { rows: rows.runCounts };
+    if (/count\(\*\)/i.test(sql) && /from loop_task_reviews/i.test(sql)) return { rows: rows.reviewCounts };
+    if (/count\(\*\)/i.test(sql) && /from loop_evidence/i.test(sql)) return { rows: rows.evidenceCounts };
     if (/from loop_task_runs/i.test(sql)) return { rows: rows.runs };
     if (/from loop_task_reviews/i.test(sql)) return { rows: rows.reviews };
     if (/from loop_evidence/i.test(sql)) return { rows: rows.evidence };
@@ -170,6 +176,57 @@ test("V2 detail DTO and SQL do not leak unused history payloads and history read
     assert.match(sql, /limit\s+\$\d+/i, `${table} history must have a parameterized limit`);
     assert.doesNotMatch(sql, /\b(?:output|error|feedback|content|uri|metadata)\b/i);
   }
+});
+
+test("V2 bounded detail keeps old run references valid and exposes exact per-task counts", async () => {
+  const calls = [];
+  const rows = workflowRows();
+  rows.runs = Array.from({ length: 100 }, (_, index) => ({
+    id: `run-new-${index}`,
+    task_id: "task-build",
+    status: "completed",
+  }));
+  rows.evidence = [{
+    id: "evidence-for-old-run",
+    task_id: "task-build",
+    task_run_id: "run-old-outside-window",
+    task_run_owned: true,
+    kind: "artifact",
+  }];
+  rows.runCounts = [{ task_id: "task-build", count: "101" }];
+  rows.reviewCounts = [{ task_id: "task-build", count: "1" }];
+  rows.evidenceCounts = [{ task_id: "task-build", count: "237" }];
+  const { getLoopDetail } = loadReadModel({ query: detailQuery(rows, calls) });
+
+  const detail = await getLoopDetail("loop-v2");
+  const task = detail.workflow.stages[1].tasks[0];
+  assert.equal(task.runCount, 101);
+  assert.equal(task.runStatuses.length, 100, "detailed run history remains bounded");
+  assert.equal(task.reviewCount, 1);
+  assert.equal(task.evidenceCount, 237);
+  assert.deepEqual(Array.from(task.evidenceKinds), ["artifact"]);
+
+  const evidenceSql = calls.find(({ sql }) => /from loop_evidence/i.test(sql) && !/count\(\*\)/i.test(sql)).sql;
+  assert.match(evidenceSql, /join\s+loop_task_runs/i, "evidence ownership must be checked in SQL");
+  for (const table of ["loop_task_runs", "loop_task_reviews", "loop_evidence"]) {
+    const countSql = calls.find(({ sql }) => /count\(\*\)/i.test(sql) && new RegExp(`from ${table}`, "i").test(sql))?.sql || "";
+    assert.match(countSql, /group\s+by\s+task_id/i, `${table} needs exact grouped counts`);
+  }
+});
+
+test("V2 bounded detail fails closed when DB ownership validation rejects a run reference", async () => {
+  const calls = [];
+  const rows = workflowRows();
+  rows.evidence = [{
+    id: "cross-task-evidence",
+    task_id: "task-build",
+    task_run_id: "run-from-another-task",
+    task_run_owned: false,
+    kind: "artifact",
+  }];
+  const { getLoopDetail } = loadReadModel({ query: detailQuery(rows, calls) });
+
+  await assert.rejects(() => getLoopDetail("loop-v2"), /task run does not belong to task/i);
 });
 
 test("V2 detail rejects a snapshot whose row version or current revision changes at final validation", async () => {
@@ -360,6 +417,9 @@ test("LoopDetail renders the V2 Proyecto hierarchy read-only while V1 keeps its 
     runs: rows.runs,
     reviews: rows.reviews,
     evidence: rows.evidence,
+    runCounts: rows.runCounts,
+    reviewCounts: rows.reviewCounts,
+    evidenceCounts: rows.evidenceCounts,
   });
 
   const v2Html = renderToStaticMarkup(React.createElement(LoopDetail, {
