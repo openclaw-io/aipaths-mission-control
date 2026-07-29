@@ -150,6 +150,77 @@ export function findSemanticImportErrors(rowsByTable) {
     }
     journalKeys.add(key);
   }
+
+  const revisionsById = new Map((rowsByTable.get("loop_plan_revisions") || []).map((row) => [String(row.id), row]));
+  for (const loop of rowsByTable.get("loops") || []) {
+    if (loop.workflow_version == null) continue;
+    if (loop.workflow_version === 1) {
+      if (loop.mode !== "linear" || loop.current_plan_revision_id != null) {
+        errors.push(`Loop ${loop.id} V1 state must be linear with no current plan revision`);
+      }
+      continue;
+    }
+    if (loop.workflow_version !== 2) {
+      errors.push(`Loop ${loop.id} has unsupported workflow_version ${loop.workflow_version}`);
+      continue;
+    }
+    if (loop.mode !== "linear" && loop.mode !== "dag") {
+      errors.push(`Loop ${loop.id} V2 has unsupported mode ${loop.mode}`);
+    }
+    const current = loop.current_plan_revision_id == null
+      ? undefined
+      : revisionsById.get(String(loop.current_plan_revision_id));
+    if (!current || String(current.loop_id) !== String(loop.id)) {
+      errors.push(`Loop ${loop.id} current plan revision must belong to the same Loop`);
+    }
+  }
+
+  const stageRevisionById = new Map(
+    (rowsByTable.get("loop_stages") || []).map((row) => [String(row.id), String(row.plan_revision_id)]),
+  );
+  const taskRevisionById = new Map(
+    (rowsByTable.get("loop_tasks") || []).map((row) => [String(row.id), stageRevisionById.get(String(row.stage_id))]),
+  );
+  const dependencies = rowsByTable.get("loop_task_dependencies") || [];
+  const adjacency = new Map();
+  for (const edge of dependencies) {
+    const taskId = String(edge.task_id);
+    const dependencyId = String(edge.depends_on_task_id);
+    const taskRevision = taskRevisionById.get(taskId);
+    const dependencyRevision = taskRevisionById.get(dependencyId);
+    if (taskRevision && dependencyRevision && taskRevision !== dependencyRevision) {
+      errors.push(`Loop task dependency ${taskId}->${dependencyId} must stay in the same plan revision`);
+    }
+    const outgoing = adjacency.get(taskId) || [];
+    outgoing.push(dependencyId);
+    adjacency.set(taskId, outgoing);
+  }
+
+  const visitState = new Map();
+  let cyclic = false;
+  const visit = (taskId) => {
+    if (visitState.get(taskId) === 1) {
+      cyclic = true;
+      return;
+    }
+    if (visitState.get(taskId) === 2 || cyclic) return;
+    visitState.set(taskId, 1);
+    for (const dependencyId of adjacency.get(taskId) || []) visit(dependencyId);
+    visitState.set(taskId, 2);
+  };
+  for (const taskId of adjacency.keys()) visit(taskId);
+  if (cyclic) errors.push("Loop task dependency graph contains a cycle");
+
+  const runsById = new Map((rowsByTable.get("loop_task_runs") || []).map((row) => [String(row.id), row]));
+  for (const [tableName, label] of [["loop_task_reviews", "review"], ["loop_evidence", "evidence"]]) {
+    for (const row of rowsByTable.get(tableName) || []) {
+      if (row.task_run_id == null) continue;
+      const run = runsById.get(String(row.task_run_id));
+      if (run && String(run.task_id) !== String(row.task_id)) {
+        errors.push(`${label} ${row.id} references run ${row.task_run_id}, which must belong to the same task`);
+      }
+    }
+  }
   return errors;
 }
 

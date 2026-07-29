@@ -164,6 +164,12 @@ function stageStatusFor(tasks: ShadowTask[]): WorkflowItemStatus {
 }
 
 function projectV1(loop: ShadowLoopRow): LoopWorkflowShadow {
+  if (loop.mode !== "linear") {
+    throw new Error(`V1 Loop ${loop.id} must use linear mode`);
+  }
+  if (loop.current_plan_revision_id !== null) {
+    throw new Error(`V1 Loop ${loop.id} must not have a current plan revision`);
+  }
   const plan = Array.isArray(loop.plan) ? loop.plan : [];
   const sourceSteps = plan.length > 0
     ? plan
@@ -211,6 +217,9 @@ function projectV1(loop: ShadowLoopRow): LoopWorkflowShadow {
 
 function projectV2(input: LoopWorkflowShadowInput): LoopWorkflowShadow {
   const { loop } = input;
+  if (loop.mode !== "linear" && loop.mode !== "dag") {
+    throw new Error(`V2 Loop ${loop.id} has unsupported mode: ${String(loop.mode)}`);
+  }
   if (!loop.current_plan_revision_id) {
     throw new Error(`V2 Loop ${loop.id} has no current plan revision`);
   }
@@ -229,6 +238,43 @@ function projectV2(input: LoopWorkflowShadowInput): LoopWorkflowShadow {
   const selectedTaskIds = new Set(
     input.tasks.filter((task) => selectedStageIds.has(task.stage_id)).map((task) => task.id),
   );
+  for (const dependency of input.dependencies) {
+    const taskIsCurrent = selectedTaskIds.has(dependency.task_id);
+    const dependencyIsCurrent = selectedTaskIds.has(dependency.depends_on_task_id);
+    if (taskIsCurrent !== dependencyIsCurrent) {
+      throw new Error(
+        `Task ${dependency.task_id} dependency ${dependency.depends_on_task_id} points outside the current plan revision`,
+      );
+    }
+  }
+  const adjacency = new Map<string, string[]>(
+    Array.from(selectedTaskIds, (taskId): [string, string[]] => [taskId, []]),
+  );
+  for (const dependency of input.dependencies) {
+    if (selectedTaskIds.has(dependency.task_id)) {
+      adjacency.get(dependency.task_id)?.push(dependency.depends_on_task_id);
+    }
+  }
+  const visitState = new Map<string, 1 | 2>();
+  const visit = (taskId: string): void => {
+    if (visitState.get(taskId) === 1) {
+      throw new Error(`V2 Loop ${loop.id} dependency graph contains a cycle`);
+    }
+    if (visitState.get(taskId) === 2) return;
+    visitState.set(taskId, 1);
+    for (const dependencyId of adjacency.get(taskId) ?? []) visit(dependencyId);
+    visitState.set(taskId, 2);
+  };
+  for (const taskId of selectedTaskIds) visit(taskId);
+
+  const runsById = new Map(input.runs.map((run) => [run.id, run]));
+  for (const item of [...input.reviews, ...input.evidence]) {
+    if (!selectedTaskIds.has(item.task_id) || item.task_run_id === null) continue;
+    const run = runsById.get(item.task_run_id);
+    if (!run || run.task_id !== item.task_id) {
+      throw new Error(`${item.id} task run does not belong to task ${item.task_id}`);
+    }
+  }
 
   const stages = stageRows.map<ShadowStage>((stage) => ({
     id: stage.id,

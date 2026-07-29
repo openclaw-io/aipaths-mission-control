@@ -86,7 +86,7 @@ test("V2 foreign keys, checks, and query indexes enforce the minimum safe graph"
 
   const currentRevisionFk = byName.get("loops_current_plan_revision_id_fkey");
   assert.equal(currentRevisionFk.parent_table, "loop_plan_revisions");
-  assert.equal(currentRevisionFk.confdeltype, "n", "current revision deletion must SET NULL");
+  assert.equal(currentRevisionFk.confdeltype, "a", "a V2 current revision cannot be deleted into an invalid NULL state");
   assert.equal(currentRevisionFk.condeferrable, true);
   assert.equal(currentRevisionFk.condeferred, true);
 
@@ -112,6 +112,7 @@ test("V2 foreign keys, checks, and query indexes enforce the minimum safe graph"
     "loops_workflow_version_check",
     "loops_mode_check",
     "loops_row_version_check",
+    "loops_workflow_state_check",
     "loop_plan_revisions_revision_number_check",
     "loop_plan_revisions_status_check",
     "loop_stages_status_check",
@@ -178,6 +179,215 @@ test("legacy inserts remain V1/linear while the circular current revision FK is 
       [revisionId, v2Id],
     );
     await client.query("set constraints loops_current_plan_revision_id_fkey immediate");
+    await client.query("savepoint delete_current_revision");
+    await assert.rejects(
+      () => client.query("delete from public.loop_plan_revisions where id=$1", [revisionId]),
+      (error) => error.code === "23503",
+      "deleting the selected revision must fail rather than violate loops_workflow_state_check",
+    );
+    await client.query("rollback to savepoint delete_current_revision");
+    await client.query("rollback");
+  } finally {
+    client.release();
+  }
+});
+
+test("concurrent dependency writers serialize per revision and cannot commit a cycle", async () => {
+  const first = await pool.connect();
+  const second = await pool.connect();
+  const ids = Object.fromEntries([
+    "loop", "revision", "stage", "taskA", "taskB",
+  ].map((key) => [key, randomUUID()]));
+  try {
+    await first.query(`insert into public.loops (id, key, name) values ($1, $2, 'Concurrent graph')`,
+      [ids.loop, `concurrent-graph-${ids.loop}`]);
+    await first.query(`insert into public.loop_plan_revisions (id, loop_id, revision_number) values ($1, $2, 1)`,
+      [ids.revision, ids.loop]);
+    await first.query(`insert into public.loop_stages (id, plan_revision_id, key, title) values ($1, $2, 'stage', 'Stage')`,
+      [ids.stage, ids.revision]);
+    await first.query(`insert into public.loop_tasks (id, stage_id, key, title) values
+      ($1, $2, 'a', 'A'), ($3, $2, 'b', 'B')`, [ids.taskA, ids.stage, ids.taskB]);
+
+    await first.query("begin");
+    await first.query("insert into public.loop_task_dependencies (task_id, depends_on_task_id) values ($1, $2)",
+      [ids.taskA, ids.taskB]);
+    await second.query("begin");
+    const competingInsert = second.query(
+      "insert into public.loop_task_dependencies (task_id, depends_on_task_id) values ($1, $2)",
+      [ids.taskB, ids.taskA],
+    );
+
+    let waiting = false;
+    for (let attempt = 0; attempt < 50 && !waiting; attempt += 1) {
+      const state = await first.query(
+        "select wait_event_type, wait_event from pg_stat_activity where pid=$1",
+        [second.processID],
+      );
+      waiting = state.rows[0]?.wait_event_type === "Lock" && state.rows[0]?.wait_event === "advisory";
+      if (!waiting) await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    }
+    assert.equal(waiting, true, "competing graph mutation must wait on the revision advisory lock");
+
+    await first.query("commit");
+    await assert.rejects(() => competingInsert, /cycle/i);
+    await second.query("rollback");
+  } finally {
+    await first.query("rollback").catch(() => {});
+    await second.query("rollback").catch(() => {});
+    await first.query("delete from public.loops where id=$1", [ids.loop]).catch(() => {});
+    first.release();
+    second.release();
+  }
+});
+
+test("stage and task structural membership is immutable after insert", async () => {
+  const client = await pool.connect();
+  const ids = Object.fromEntries([
+    "loop", "revisionA", "revisionB", "stageA", "stageB", "task",
+  ].map((key) => [key, randomUUID()]));
+  try {
+    await client.query("begin");
+    await client.query(`insert into public.loops (id, key, name) values ($1, $2, 'Immutable graph')`,
+      [ids.loop, `immutable-graph-${ids.loop}`]);
+    await client.query(`insert into public.loop_plan_revisions (id, loop_id, revision_number) values
+      ($1, $2, 1), ($3, $2, 2)`, [ids.revisionA, ids.loop, ids.revisionB]);
+    await client.query(`insert into public.loop_stages (id, plan_revision_id, key, title) values
+      ($1, $2, 'a', 'A'), ($3, $4, 'b', 'B')`, [ids.stageA, ids.revisionA, ids.stageB, ids.revisionB]);
+    await client.query(`insert into public.loop_tasks (id, stage_id, key, title) values ($1, $2, 'task', 'Task')`,
+      [ids.task, ids.stageA]);
+
+    await client.query("savepoint move_task");
+    await assert.rejects(
+      () => client.query("update public.loop_tasks set stage_id=$1 where id=$2", [ids.stageB, ids.task]),
+      (error) => error.code === "23514" && /structural membership.*immutable/i.test(error.message),
+    );
+    await client.query("rollback to savepoint move_task");
+
+    await client.query("savepoint move_stage");
+    await assert.rejects(
+      () => client.query("update public.loop_stages set plan_revision_id=$1 where id=$2", [ids.revisionB, ids.stageA]),
+      (error) => error.code === "23514" && /structural membership.*immutable/i.test(error.message),
+    );
+    await client.query("rollback to savepoint move_stage");
+    await client.query("rollback");
+  } finally {
+    await client.query("rollback").catch(() => {});
+    client.release();
+  }
+});
+
+test("a task move racing an edge insert cannot invalidate the committed graph", async () => {
+  const first = await pool.connect();
+  const second = await pool.connect();
+  const ids = Object.fromEntries([
+    "loop", "revisionA", "revisionB", "stageA", "stageB", "taskA", "taskB",
+  ].map((key) => [key, randomUUID()]));
+  try {
+    await first.query(`insert into public.loops (id, key, name) values ($1, $2, 'Membership race')`,
+      [ids.loop, `membership-race-${ids.loop}`]);
+    await first.query(`insert into public.loop_plan_revisions (id, loop_id, revision_number) values
+      ($1, $2, 1), ($3, $2, 2)`, [ids.revisionA, ids.loop, ids.revisionB]);
+    await first.query(`insert into public.loop_stages (id, plan_revision_id, key, title) values
+      ($1, $2, 'a', 'A'), ($3, $4, 'b', 'B')`, [ids.stageA, ids.revisionA, ids.stageB, ids.revisionB]);
+    await first.query(`insert into public.loop_tasks (id, stage_id, key, title) values
+      ($1, $2, 'a', 'A'), ($3, $2, 'b', 'B')`, [ids.taskA, ids.stageA, ids.taskB]);
+
+    await first.query("begin");
+    await first.query("insert into public.loop_task_dependencies (task_id, depends_on_task_id) values ($1, $2)",
+      [ids.taskA, ids.taskB]);
+
+    await second.query("begin");
+    const moveAttempt = second.query(
+      "update public.loop_tasks set stage_id=$1 where id=$2",
+      [ids.stageB, ids.taskA],
+    ).then(
+      () => ({ status: "fulfilled" }),
+      (error) => ({ status: "rejected", error }),
+    );
+    const beforeEdgeCommit = await Promise.race([
+      moveAttempt,
+      new Promise((resolveWait) => setTimeout(() => resolveWait({ status: "pending" }), 50)),
+    ]);
+    assert.notEqual(beforeEdgeCommit.status, "fulfilled", "a racing move must never beat graph protection");
+    await first.query("commit");
+    const moveResult = beforeEdgeCommit.status === "pending" ? await moveAttempt : beforeEdgeCommit;
+    assert.equal(moveResult.status, "rejected");
+    assert.equal(moveResult.error.code, "23514");
+    assert.match(moveResult.error.message, /structural membership.*immutable/i);
+    await second.query("rollback");
+
+    const graph = await first.query(`
+      select dependency.task_id, dependency.depends_on_task_id,
+             task_stage.plan_revision_id as task_revision,
+             dependency_stage.plan_revision_id as dependency_revision
+        from public.loop_task_dependencies dependency
+        join public.loop_tasks task on task.id=dependency.task_id
+        join public.loop_stages task_stage on task_stage.id=task.stage_id
+        join public.loop_tasks depends_on on depends_on.id=dependency.depends_on_task_id
+        join public.loop_stages dependency_stage on dependency_stage.id=depends_on.stage_id
+       where dependency.task_id=$1 and dependency.depends_on_task_id=$2
+    `, [ids.taskA, ids.taskB]);
+    assert.equal(graph.rowCount, 1);
+    assert.equal(graph.rows[0].task_revision, graph.rows[0].dependency_revision);
+  } finally {
+    await first.query("rollback").catch(() => {});
+    await second.query("rollback").catch(() => {});
+    await first.query("delete from public.loops where id=$1", [ids.loop]).catch(() => {});
+    first.release();
+    second.release();
+  }
+});
+
+test("V2 graph rejects cross-loop current revisions, cross-revision edges, cycles, and mismatched run ownership", async () => {
+  const client = await pool.connect();
+  const ids = Object.fromEntries([
+    "loopA", "loopB", "revisionA", "revisionB", "stageA", "stageB", "taskA1", "taskA2", "taskB", "runB",
+  ].map((key) => [key, randomUUID()]));
+  try {
+    await client.query("begin");
+    await client.query(`insert into public.loops (id, key, name) values
+      ($1, $2, 'A'), ($3, $4, 'B')`, [ids.loopA, `graph-a-${ids.loopA}`, ids.loopB, `graph-b-${ids.loopB}`]);
+    await client.query(`insert into public.loop_plan_revisions (id, loop_id, revision_number) values
+      ($1, $2, 1), ($3, $4, 1)`, [ids.revisionA, ids.loopA, ids.revisionB, ids.loopB]);
+    await client.query(`insert into public.loop_stages (id, plan_revision_id, key, title) values
+      ($1, $2, 'a', 'A'), ($3, $4, 'b', 'B')`, [ids.stageA, ids.revisionA, ids.stageB, ids.revisionB]);
+    await client.query(`insert into public.loop_tasks (id, stage_id, key, title) values
+      ($1, $2, 'a1', 'A1'), ($3, $2, 'a2', 'A2'), ($4, $5, 'b', 'B')`,
+      [ids.taskA1, ids.stageA, ids.taskA2, ids.taskB, ids.stageB]);
+    await client.query(`insert into public.loop_task_runs (id, task_id) values ($1, $2)`, [ids.runB, ids.taskB]);
+
+    await client.query("savepoint bad_current_revision");
+    await client.query("update public.loops set workflow_version=2, mode='dag', current_plan_revision_id=$1 where id=$2", [ids.revisionB, ids.loopA]);
+    await assert.rejects(
+      () => client.query("set constraints loops_current_plan_revision_id_fkey immediate"),
+      (error) => error.code === "23503",
+    );
+    await client.query("rollback to savepoint bad_current_revision");
+
+    await client.query("savepoint cross_revision");
+    await assert.rejects(
+      () => client.query("insert into public.loop_task_dependencies (task_id, depends_on_task_id) values ($1, $2)", [ids.taskA1, ids.taskB]),
+      /same plan revision/i,
+    );
+    await client.query("rollback to savepoint cross_revision");
+
+    await client.query("insert into public.loop_task_dependencies (task_id, depends_on_task_id) values ($1, $2)", [ids.taskA1, ids.taskA2]);
+    await client.query("savepoint cyclic_edge");
+    await assert.rejects(
+      () => client.query("insert into public.loop_task_dependencies (task_id, depends_on_task_id) values ($1, $2)", [ids.taskA2, ids.taskA1]),
+      /cycle/i,
+    );
+    await client.query("rollback to savepoint cyclic_edge");
+
+    for (const table of ["loop_task_reviews", "loop_evidence"]) {
+      await client.query(`savepoint mismatched_${table}`);
+      const sql = table === "loop_task_reviews"
+        ? `insert into public.${table} (task_id, task_run_id, status) values ($1, $2, 'pending')`
+        : `insert into public.${table} (task_id, task_run_id, kind, content) values ($1, $2, 'artifact', 'x')`;
+      await assert.rejects(() => client.query(sql, [ids.taskA1, ids.runB]), (error) => error.code === "23503");
+      await client.query(`rollback to savepoint mismatched_${table}`);
+    }
+
     await client.query("rollback");
   } finally {
     client.release();

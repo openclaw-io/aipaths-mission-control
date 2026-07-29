@@ -4,6 +4,19 @@ BEGIN;
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
 
+-- The guard and destructive DDL share one lock window: no writer can add V2
+-- state after it has been counted but before it is dropped.
+LOCK TABLE
+  public.loops,
+  public.loop_plan_revisions,
+  public.loop_stages,
+  public.loop_tasks,
+  public.loop_task_dependencies,
+  public.loop_task_runs,
+  public.loop_task_reviews,
+  public.loop_evidence
+IN ACCESS EXCLUSIVE MODE;
+
 DO $phase1_rollback_guard$
 DECLARE
   relation_name text;
@@ -59,6 +72,8 @@ DROP TABLE public.loop_task_dependencies;
 DROP TABLE public.loop_tasks;
 DROP TABLE public.loop_stages;
 DROP TABLE public.loop_plan_revisions;
+DROP FUNCTION public.validate_loop_task_dependency();
+DROP FUNCTION public.reject_loop_structure_membership_change();
 
 ALTER TABLE public.loops
   DROP COLUMN current_plan_revision_id,

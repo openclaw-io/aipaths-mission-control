@@ -45,10 +45,97 @@ BEGIN
   WHERE c.conname='loops_current_plan_revision_id_fkey'
     AND c.conrelid='public.loops'::regclass
     AND c.confrelid='public.loop_plan_revisions'::regclass
-    AND c.contype='f' AND c.confdeltype='n'
-    AND c.condeferrable AND c.condeferred;
+    AND c.contype='f' AND c.confdeltype='a'
+    AND c.condeferrable AND c.condeferred
+    AND pg_get_constraintdef(c.oid) LIKE 'FOREIGN KEY (current_plan_revision_id, id)%REFERENCES loop_plan_revisions(id, loop_id)%DEFERRABLE INITIALLY DEFERRED%';
   IF fk_count <> 1 THEN
-    RAISE EXCEPTION 'Project Loops V2 phase 1 verification: nullable current revision FK is not safely deferred';
+    RAISE EXCEPTION 'Project Loops V2 phase 1 verification: current revision FK is not same-Loop, deletion-restricting, and safely deferred';
+  END IF;
+
+  SELECT count(*) INTO violations
+  FROM pg_constraint c
+  WHERE (
+      (
+        (c.conname='loop_task_reviews_task_run_id_fkey'
+          AND c.conrelid='public.loop_task_reviews'::regclass)
+        OR (c.conname='loop_evidence_task_run_id_fkey'
+          AND c.conrelid='public.loop_evidence'::regclass)
+      )
+      AND c.contype='f'
+      AND c.confrelid='public.loop_task_runs'::regclass
+      AND pg_get_constraintdef(c.oid) LIKE 'FOREIGN KEY (task_run_id, task_id)%REFERENCES loop_task_runs(id, task_id)%ON DELETE SET NULL (task_run_id)%'
+    )
+    OR (c.conname='loops_workflow_state_check'
+      AND c.conrelid='public.loops'::regclass AND c.contype='c');
+  IF violations <> 3 THEN
+    RAISE EXCEPTION 'Project Loops V2 phase 1 verification: workflow state or task-run ownership constraints are incomplete';
+  END IF;
+
+  SELECT count(*) INTO violations
+  FROM pg_trigger
+  WHERE tgrelid='public.loop_task_dependencies'::regclass
+    AND tgname='loop_task_dependencies_validate_graph' AND NOT tgisinternal AND tgenabled <> 'D'
+    AND tgfoid=to_regprocedure('public.validate_loop_task_dependency()');
+  IF violations <> 1 OR to_regprocedure('public.validate_loop_task_dependency()') IS NULL THEN
+    RAISE EXCEPTION 'Project Loops V2 phase 1 verification: transactional dependency graph validation is absent';
+  END IF;
+
+  SELECT count(*) INTO violations
+  FROM pg_trigger trigger_definition
+  JOIN (VALUES
+    ('public.loop_stages'::regclass, 'loop_stages_immutable_membership', 'plan_revision_id'),
+    ('public.loop_tasks'::regclass, 'loop_tasks_immutable_membership', 'stage_id')
+  ) AS expected(relation_id, trigger_name, column_name)
+    ON expected.relation_id=trigger_definition.tgrelid
+   AND expected.trigger_name=trigger_definition.tgname
+  JOIN pg_attribute column_definition
+    ON column_definition.attrelid=expected.relation_id
+   AND column_definition.attname=expected.column_name
+  WHERE NOT trigger_definition.tgisinternal
+    AND trigger_definition.tgenabled <> 'D'
+    AND trigger_definition.tgtype=19
+    AND trigger_definition.tgattr::text=column_definition.attnum::text
+    AND trigger_definition.tgfoid=to_regprocedure('public.reject_loop_structure_membership_change()');
+  IF violations <> 2 OR to_regprocedure('public.reject_loop_structure_membership_change()') IS NULL THEN
+    RAISE EXCEPTION 'Project Loops V2 phase 1 verification: immutable stage/task structural membership is absent';
+  END IF;
+
+  SELECT count(*) INTO violations
+  FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+  WHERE n.nspname='public'
+    AND c.relname = ANY(ARRAY[
+      'loop_plan_revisions','loop_stages','loop_tasks','loop_task_dependencies',
+      'loop_task_runs','loop_task_reviews','loop_evidence'
+    ])
+    AND c.relrowsecurity
+    AND has_table_privilege('authenticated', c.oid, 'SELECT')
+    AND NOT has_table_privilege('authenticated', c.oid, 'INSERT,UPDATE,DELETE')
+    AND NOT has_table_privilege('anon', c.oid, 'SELECT,INSERT,UPDATE,DELETE')
+    AND has_table_privilege('service_role', c.oid, 'SELECT,INSERT,UPDATE,DELETE');
+  IF violations <> 7 THEN
+    RAISE EXCEPTION 'Project Loops V2 phase 1 verification: RLS or fail-closed table grants are incomplete';
+  END IF;
+
+  SELECT
+    count(*) FILTER (WHERE
+      (p.polcmd='r' AND p.polroles=ARRAY['authenticated'::regrole::oid])
+      OR (p.polcmd='*' AND p.polroles=ARRAY['service_role'::regrole::oid])
+    ),
+    count(*)
+  INTO violations, fk_count
+  FROM pg_policy p
+  WHERE p.polrelid IN (
+    'public.loop_plan_revisions'::regclass, 'public.loop_stages'::regclass,
+    'public.loop_tasks'::regclass, 'public.loop_task_dependencies'::regclass,
+    'public.loop_task_runs'::regclass, 'public.loop_task_reviews'::regclass,
+    'public.loop_evidence'::regclass
+  );
+  IF violations <> 14 OR fk_count <> 14
+     OR has_function_privilege('authenticated', 'public.validate_loop_task_dependency()', 'EXECUTE')
+     OR has_function_privilege('anon', 'public.validate_loop_task_dependency()', 'EXECUTE')
+     OR has_function_privilege('authenticated', 'public.reject_loop_structure_membership_change()', 'EXECUTE')
+     OR has_function_privilege('anon', 'public.reject_loop_structure_membership_change()', 'EXECUTE') THEN
+    RAISE EXCEPTION 'Project Loops V2 phase 1 verification: graph policies or function revokes are incomplete';
   END IF;
 
   SELECT count(*) INTO violations

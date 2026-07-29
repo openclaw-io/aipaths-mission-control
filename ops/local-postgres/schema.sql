@@ -396,7 +396,11 @@ CREATE TABLE IF NOT EXISTS public.loops (
   updated_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT loops_workflow_version_check CHECK (workflow_version IN (1, 2)),
   CONSTRAINT loops_mode_check CHECK (mode IN ('linear', 'dag')),
-  CONSTRAINT loops_row_version_check CHECK (row_version > 0)
+  CONSTRAINT loops_row_version_check CHECK (row_version > 0),
+  CONSTRAINT loops_workflow_state_check CHECK (
+    (workflow_version = 1 AND mode = 'linear' AND current_plan_revision_id IS NULL)
+    OR (workflow_version = 2 AND current_plan_revision_id IS NOT NULL)
+  )
 );
 
 ALTER TABLE public.loops ADD COLUMN IF NOT EXISTS type text NOT NULL DEFAULT 'ops';
@@ -429,6 +433,12 @@ BEGIN
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='loops_row_version_check' AND conrelid='public.loops'::regclass) THEN
     ALTER TABLE public.loops ADD CONSTRAINT loops_row_version_check CHECK (row_version > 0);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='loops_workflow_state_check' AND conrelid='public.loops'::regclass) THEN
+    ALTER TABLE public.loops ADD CONSTRAINT loops_workflow_state_check CHECK (
+      (workflow_version = 1 AND mode = 'linear' AND current_plan_revision_id IS NULL)
+      OR (workflow_version = 2 AND current_plan_revision_id IS NOT NULL)
+    );
   END IF;
 END $$;
 
@@ -489,9 +499,20 @@ CREATE TABLE IF NOT EXISTS public.loop_plan_revisions (
   approved_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT loop_plan_revisions_id_loop_id_key UNIQUE (id, loop_id),
   CONSTRAINT loop_plan_revisions_revision_number_check CHECK (revision_number > 0),
   CONSTRAINT loop_plan_revisions_status_check CHECK (status IN ('draft', 'pending_approval', 'approved', 'superseded'))
 );
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname='loop_plan_revisions_id_loop_id_key'
+      AND conrelid='public.loop_plan_revisions'::regclass
+  ) THEN
+    ALTER TABLE public.loop_plan_revisions ADD CONSTRAINT loop_plan_revisions_id_loop_id_key UNIQUE (id, loop_id);
+  END IF;
+END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_loop_plan_revisions_loop_revision ON public.loop_plan_revisions(loop_id, revision_number);
 CREATE INDEX IF NOT EXISTS idx_loop_plan_revisions_loop_status ON public.loop_plan_revisions(loop_id, status, revision_number DESC);
 
@@ -535,6 +556,40 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_loop_tasks_stage_key ON public.loop_tasks(s
 CREATE INDEX IF NOT EXISTS idx_loop_tasks_stage_position ON public.loop_tasks(stage_id, position, id);
 CREATE INDEX IF NOT EXISTS idx_loop_tasks_status ON public.loop_tasks(status, updated_at DESC);
 
+CREATE OR REPLACE FUNCTION public.reject_loop_structure_membership_change()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $reject_loop_structure_membership_change$
+BEGIN
+  IF TG_TABLE_NAME = 'loop_stages' THEN
+    IF to_jsonb(NEW)->'plan_revision_id' IS DISTINCT FROM to_jsonb(OLD)->'plan_revision_id' THEN
+      RAISE EXCEPTION 'Loop stage structural membership is immutable after insert'
+        USING ERRCODE = '23514';
+    END IF;
+  ELSIF TG_TABLE_NAME = 'loop_tasks' THEN
+    IF to_jsonb(NEW)->'stage_id' IS DISTINCT FROM to_jsonb(OLD)->'stage_id' THEN
+      RAISE EXCEPTION 'Loop task structural membership is immutable after insert'
+        USING ERRCODE = '23514';
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$reject_loop_structure_membership_change$;
+REVOKE ALL ON FUNCTION public.reject_loop_structure_membership_change() FROM PUBLIC;
+
+DROP TRIGGER IF EXISTS loop_stages_immutable_membership ON public.loop_stages;
+CREATE TRIGGER loop_stages_immutable_membership
+BEFORE UPDATE OF plan_revision_id
+ON public.loop_stages
+FOR EACH ROW EXECUTE FUNCTION public.reject_loop_structure_membership_change();
+
+DROP TRIGGER IF EXISTS loop_tasks_immutable_membership ON public.loop_tasks;
+CREATE TRIGGER loop_tasks_immutable_membership
+BEFORE UPDATE OF stage_id
+ON public.loop_tasks
+FOR EACH ROW EXECUTE FUNCTION public.reject_loop_structure_membership_change();
+
 CREATE TABLE IF NOT EXISTS public.loop_task_dependencies (
   task_id uuid NOT NULL CONSTRAINT loop_task_dependencies_task_id_fkey REFERENCES public.loop_tasks(id) ON DELETE CASCADE,
   depends_on_task_id uuid NOT NULL CONSTRAINT loop_task_dependencies_depends_on_task_id_fkey REFERENCES public.loop_tasks(id) ON DELETE CASCADE,
@@ -545,6 +600,67 @@ CREATE TABLE IF NOT EXISTS public.loop_task_dependencies (
   CONSTRAINT loop_task_dependencies_type_check CHECK (dependency_type IN ('hard', 'soft'))
 );
 CREATE INDEX IF NOT EXISTS idx_loop_task_dependencies_depends_on ON public.loop_task_dependencies(depends_on_task_id, task_id);
+
+CREATE OR REPLACE FUNCTION public.validate_loop_task_dependency()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public
+AS $validate_loop_task_dependency$
+DECLARE
+  task_revision uuid;
+  dependency_revision uuid;
+  closes_cycle boolean;
+BEGIN
+  SELECT stage.plan_revision_id INTO task_revision
+  FROM public.loop_tasks AS task
+  JOIN public.loop_stages AS stage ON stage.id = task.stage_id
+  WHERE task.id = NEW.task_id;
+
+  SELECT stage.plan_revision_id INTO dependency_revision
+  FROM public.loop_tasks AS task
+  JOIN public.loop_stages AS stage ON stage.id = task.stage_id
+  WHERE task.id = NEW.depends_on_task_id;
+
+  IF task_revision IS NULL OR dependency_revision IS NULL THEN RETURN NEW; END IF;
+  IF task_revision <> dependency_revision THEN
+    RAISE EXCEPTION 'Loop task dependency endpoints must belong to the same plan revision'
+      USING ERRCODE = '23514';
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended(task_revision::text, 0));
+
+  IF TG_OP = 'UPDATE' THEN
+    WITH RECURSIVE reachable(task_id) AS (
+      SELECT NEW.depends_on_task_id
+      UNION
+      SELECT edge.depends_on_task_id
+      FROM public.loop_task_dependencies AS edge
+      JOIN reachable ON reachable.task_id = edge.task_id
+      WHERE (edge.task_id, edge.depends_on_task_id) <> (OLD.task_id, OLD.depends_on_task_id)
+    )
+    SELECT EXISTS (SELECT 1 FROM reachable WHERE task_id = NEW.task_id) INTO closes_cycle;
+  ELSE
+    WITH RECURSIVE reachable(task_id) AS (
+      SELECT NEW.depends_on_task_id
+      UNION
+      SELECT edge.depends_on_task_id
+      FROM public.loop_task_dependencies AS edge
+      JOIN reachable ON reachable.task_id = edge.task_id
+    )
+    SELECT EXISTS (SELECT 1 FROM reachable WHERE task_id = NEW.task_id) INTO closes_cycle;
+  END IF;
+
+  IF closes_cycle THEN
+    RAISE EXCEPTION 'Loop task dependency would create a cycle' USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END
+$validate_loop_task_dependency$;
+REVOKE ALL ON FUNCTION public.validate_loop_task_dependency() FROM PUBLIC;
+
+DROP TRIGGER IF EXISTS loop_task_dependencies_validate_graph ON public.loop_task_dependencies;
+CREATE TRIGGER loop_task_dependencies_validate_graph
+BEFORE INSERT OR UPDATE OF task_id, depends_on_task_id ON public.loop_task_dependencies
+FOR EACH ROW EXECUTE FUNCTION public.validate_loop_task_dependency();
 
 CREATE TABLE IF NOT EXISTS public.loop_task_runs (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -557,18 +673,29 @@ CREATE TABLE IF NOT EXISTS public.loop_task_runs (
   output jsonb NOT NULL DEFAULT '{}'::jsonb,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT loop_task_runs_id_task_id_key UNIQUE (id, task_id),
   CONSTRAINT loop_task_runs_attempt_number_check CHECK (attempt_number > 0),
   CONSTRAINT loop_task_runs_status_check CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
   CONSTRAINT loop_task_runs_output_check CHECK (jsonb_typeof(output) = 'object'),
   CONSTRAINT loop_task_runs_timestamps_check CHECK (finished_at IS NULL OR started_at IS NULL OR finished_at >= started_at)
 );
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname='loop_task_runs_id_task_id_key'
+      AND conrelid='public.loop_task_runs'::regclass
+  ) THEN
+    ALTER TABLE public.loop_task_runs ADD CONSTRAINT loop_task_runs_id_task_id_key UNIQUE (id, task_id);
+  END IF;
+END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_loop_task_runs_task_attempt ON public.loop_task_runs(task_id, attempt_number);
 CREATE INDEX IF NOT EXISTS idx_loop_task_runs_task_created ON public.loop_task_runs(task_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS public.loop_task_reviews (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   task_id uuid NOT NULL CONSTRAINT loop_task_reviews_task_id_fkey REFERENCES public.loop_tasks(id) ON DELETE CASCADE,
-  task_run_id uuid CONSTRAINT loop_task_reviews_task_run_id_fkey REFERENCES public.loop_task_runs(id) ON DELETE SET NULL,
+  task_run_id uuid,
   status text NOT NULL DEFAULT 'pending',
   reviewer text,
   feedback text,
@@ -578,13 +705,17 @@ CREATE TABLE IF NOT EXISTS public.loop_task_reviews (
   CONSTRAINT loop_task_reviews_status_check CHECK (status IN ('pending', 'approved', 'changes_requested', 'rejected')),
   CONSTRAINT loop_task_reviews_decision_check CHECK ((status = 'pending' AND decided_at IS NULL) OR (status <> 'pending' AND decided_at IS NOT NULL))
 );
+ALTER TABLE public.loop_task_reviews DROP CONSTRAINT IF EXISTS loop_task_reviews_task_run_id_fkey;
+ALTER TABLE public.loop_task_reviews ADD CONSTRAINT loop_task_reviews_task_run_id_fkey
+  FOREIGN KEY (task_run_id, task_id) REFERENCES public.loop_task_runs(id, task_id)
+  ON DELETE SET NULL (task_run_id);
 CREATE INDEX IF NOT EXISTS idx_loop_task_reviews_task_created ON public.loop_task_reviews(task_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_loop_task_reviews_run ON public.loop_task_reviews(task_run_id) WHERE task_run_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS public.loop_evidence (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   task_id uuid NOT NULL CONSTRAINT loop_evidence_task_id_fkey REFERENCES public.loop_tasks(id) ON DELETE CASCADE,
-  task_run_id uuid CONSTRAINT loop_evidence_task_run_id_fkey REFERENCES public.loop_task_runs(id) ON DELETE SET NULL,
+  task_run_id uuid,
   kind text NOT NULL,
   uri text,
   content text,
@@ -594,17 +725,17 @@ CREATE TABLE IF NOT EXISTS public.loop_evidence (
   CONSTRAINT loop_evidence_metadata_check CHECK (jsonb_typeof(metadata) = 'object'),
   CONSTRAINT loop_evidence_payload_check CHECK (nullif(btrim(uri), '') IS NOT NULL OR nullif(btrim(content), '') IS NOT NULL)
 );
+ALTER TABLE public.loop_evidence DROP CONSTRAINT IF EXISTS loop_evidence_task_run_id_fkey;
+ALTER TABLE public.loop_evidence ADD CONSTRAINT loop_evidence_task_run_id_fkey
+  FOREIGN KEY (task_run_id, task_id) REFERENCES public.loop_task_runs(id, task_id)
+  ON DELETE SET NULL (task_run_id);
 CREATE INDEX IF NOT EXISTS idx_loop_evidence_task_created ON public.loop_evidence(task_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_loop_evidence_run ON public.loop_evidence(task_run_id) WHERE task_run_id IS NOT NULL;
 
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='loops_current_plan_revision_id_fkey' AND conrelid='public.loops'::regclass) THEN
-    ALTER TABLE public.loops ADD CONSTRAINT loops_current_plan_revision_id_fkey
-      FOREIGN KEY (current_plan_revision_id) REFERENCES public.loop_plan_revisions(id)
-      ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED;
-  END IF;
-END $$;
+ALTER TABLE public.loops DROP CONSTRAINT IF EXISTS loops_current_plan_revision_id_fkey;
+ALTER TABLE public.loops ADD CONSTRAINT loops_current_plan_revision_id_fkey
+  FOREIGN KEY (current_plan_revision_id, id) REFERENCES public.loop_plan_revisions(id, loop_id)
+  DEFERRABLE INITIALLY DEFERRED;
 
 -- -----------------------------------------------------------------------------
 -- Memories / activity / usage

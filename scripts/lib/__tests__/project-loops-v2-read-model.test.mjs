@@ -145,12 +145,63 @@ test("V2 renders only the current real revision and attaches normalized history 
   assert.equal(projected.stages.some((stage) => stage.id === "stage-old"), false);
 });
 
-test("shadow read model rejects malformed V2 snapshots instead of falling back to V1", () => {
+test("shadow read model rejects inconsistent workflow version, mode, and current revision state", () => {
   const { projectLoopWorkflowShadow } = loadShadowReadModel();
   assert.throws(() => projectLoopWorkflowShadow({
     loop: { id: "loop-v2", workflow_version: 2, mode: "linear", current_plan_revision_id: null, plan: [] },
     planRevisions: [], stages: [], tasks: [], dependencies: [], runs: [], reviews: [], evidence: [],
   }), /current plan revision/i);
+
+  assert.throws(() => projectLoopWorkflowShadow({
+    loop: { id: "loop-v1", workflow_version: 1, mode: "dag", current_plan_revision_id: null, plan: [] },
+    planRevisions: [], stages: [], tasks: [], dependencies: [], runs: [], reviews: [], evidence: [],
+  }), /V1.*linear/i);
+
+  assert.throws(() => projectLoopWorkflowShadow({
+    loop: { id: "loop-v1", workflow_version: 1, mode: "linear", current_plan_revision_id: "rev-1", plan: [] },
+    planRevisions: [], stages: [], tasks: [], dependencies: [], runs: [], reviews: [], evidence: [],
+  }), /V1.*current plan revision/i);
+
+  assert.throws(() => projectLoopWorkflowShadow({
+    loop: { id: "loop-v2", workflow_version: 2, mode: "invalid", current_plan_revision_id: "rev-1", plan: [] },
+    planRevisions: [{ id: "rev-1", loop_id: "loop-v2", revision_number: 1, status: "approved", summary: null, created_at: "x", updated_at: "x" }],
+    stages: [], tasks: [], dependencies: [], runs: [], reviews: [], evidence: [],
+  }), /mode/i);
+});
+
+test("shadow read model rejects cross-revision dependencies rather than hiding them", () => {
+  const { projectLoopWorkflowShadow } = loadShadowReadModel();
+  const malformed = {
+    loop: { id: "loop-v2", workflow_version: 2, mode: "dag", current_plan_revision_id: "rev-1", plan: [] },
+    planRevisions: [{ id: "rev-1", loop_id: "loop-v2", revision_number: 1, status: "approved", summary: null, created_at: "x", updated_at: "x" }],
+    stages: [
+      { id: "stage-current", plan_revision_id: "rev-1", key: "current", title: "Current", description: null, position: 0, status: "pending" },
+      { id: "stage-other", plan_revision_id: "rev-2", key: "other", title: "Other", description: null, position: 0, status: "pending" },
+    ],
+    tasks: [
+      { id: "task-current", stage_id: "stage-current", key: "current", title: "Current", description: null, position: 0, status: "pending" },
+      { id: "task-other", stage_id: "stage-other", key: "other", title: "Other", description: null, position: 0, status: "pending" },
+    ],
+    dependencies: [{ task_id: "task-current", depends_on_task_id: "task-other", dependency_type: "hard" }],
+    runs: [], reviews: [], evidence: [],
+  };
+  assert.throws(() => projectLoopWorkflowShadow(malformed), /dependency.*outside.*current plan revision/i);
+  assert.throws(() => projectLoopWorkflowShadow({
+    ...malformed,
+    dependencies: [{ task_id: "task-other", depends_on_task_id: "task-current", dependency_type: "hard" }],
+  }), /dependency.*outside.*current plan revision/i, "either cross-revision edge direction must fail closed");
+
+  assert.throws(() => projectLoopWorkflowShadow({
+    ...malformed,
+    dependencies: [
+      { task_id: "task-current", depends_on_task_id: "task-second", dependency_type: "hard" },
+      { task_id: "task-second", depends_on_task_id: "task-current", dependency_type: "hard" },
+    ],
+    tasks: [
+      malformed.tasks[0],
+      { id: "task-second", stage_id: "stage-current", key: "second", title: "Second", description: null, position: 1, status: "pending" },
+    ],
+  }), /dependency graph.*cycle/i, "a malformed current-revision cycle must fail closed");
 });
 
 test("shadow module remains pure and is not wired into runtime or UI", () => {

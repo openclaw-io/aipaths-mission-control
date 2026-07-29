@@ -30,45 +30,45 @@ const BASELINE_CONFIG_TABLES = new Set(["scheduler_config", "execution_window_co
 // cycle (loops.current_plan_revision_id -> loop_plan_revisions.id) is safe because
 // that nullable FK is INITIALLY DEFERRED and the whole import is transactional.
 export const TABLES = [
-  { name: "pipeline_runs", orderBy: "id" },
-  { name: "recurring_work_rules", orderBy: "created_at" },
-  { name: "loops", orderBy: "created_at" },
-  { name: "loop_plan_revisions", orderBy: "created_at" },
-  { name: "loop_stages", orderBy: "created_at" },
-  { name: "loop_tasks", orderBy: "created_at" },
-  { name: "loop_task_dependencies", orderBy: "created_at" },
-  { name: "loop_task_runs", orderBy: "created_at" },
-  { name: "loop_task_reviews", orderBy: "created_at" },
-  { name: "loop_evidence", orderBy: "created_at" },
-  { name: "pipeline_items", orderBy: "created_at" },
-  { name: "ops_owned_videos", orderBy: "published_at" },
-  { name: "intel_sources", orderBy: "id" },
-  { name: "intel_runs", orderBy: "id" },
-  { name: "competitor_channels", orderBy: "id" },
-  { name: "competitor_transcripts", orderBy: "id" },
-  { name: "work_items", orderBy: "created_at" },
-  { name: "work_item_dependencies", orderBy: "created_at" },
-  { name: "recurring_work_occurrences", orderBy: "created_at" },
-  { name: "pipeline_events", orderBy: "created_at" },
-  { name: "pipeline_work_map", orderBy: "created_at" },
-  { name: "loop_events", orderBy: "created_at" },
-  { name: "loop_work_items", orderBy: "created_at" },
-  { name: "activity_log", orderBy: "created_at" },
-  { name: "memories", orderBy: "created_at" },
-  { name: "usage_logs", orderBy: "created_at" },
-  { name: "ops_youtube_video_daily", orderBy: "date" },
-  { name: "ops_youtube_short_daily", orderBy: "date" },
-  { name: "ops_youtube_channel_daily", orderBy: "date" },
-  { name: "ops_community_daily", orderBy: "date" },
-  { name: "ops_youtube_comments", orderBy: "created_at" },
-  { name: "ops_daily_snapshots", orderBy: "date" },
-  { name: "academy_daily_kpis", orderBy: "date" },
-  { name: "ops_youtube_video_learning_snapshots", orderBy: "computed_at" },
-  { name: "intel_items_raw", orderBy: "id" },
-  { name: "intel_items_enriched", orderBy: "id" },
-  { name: "intel_trend_daily", orderBy: "date" },
-  { name: "competitor_video_snapshots", orderBy: "id" },
-  { name: "intel_inbox_reviews", orderBy: "created_at" },
+  { name: "pipeline_runs", orderBy: ["id"] },
+  { name: "recurring_work_rules", orderBy: ["created_at", "id"] },
+  { name: "loops", orderBy: ["created_at", "id"] },
+  { name: "loop_plan_revisions", orderBy: ["created_at", "id"] },
+  { name: "loop_stages", orderBy: ["created_at", "id"] },
+  { name: "loop_tasks", orderBy: ["created_at", "id"] },
+  { name: "loop_task_dependencies", orderBy: ["created_at", "task_id", "depends_on_task_id"] },
+  { name: "loop_task_runs", orderBy: ["created_at", "id"] },
+  { name: "loop_task_reviews", orderBy: ["created_at", "id"] },
+  { name: "loop_evidence", orderBy: ["created_at", "id"] },
+  { name: "pipeline_items", orderBy: ["created_at", "id"] },
+  { name: "ops_owned_videos", orderBy: ["published_at", "id"] },
+  { name: "intel_sources", orderBy: ["id"] },
+  { name: "intel_runs", orderBy: ["id"] },
+  { name: "competitor_channels", orderBy: ["id"] },
+  { name: "competitor_transcripts", orderBy: ["id"] },
+  { name: "work_items", orderBy: ["created_at", "id"] },
+  { name: "work_item_dependencies", orderBy: ["created_at", "id"] },
+  { name: "recurring_work_occurrences", orderBy: ["created_at", "id"] },
+  { name: "pipeline_events", orderBy: ["created_at", "id"] },
+  { name: "pipeline_work_map", orderBy: ["created_at", "id"] },
+  { name: "loop_events", orderBy: ["created_at", "id"] },
+  { name: "loop_work_items", orderBy: ["created_at", "id"] },
+  { name: "activity_log", orderBy: ["created_at", "id"] },
+  { name: "memories", orderBy: ["created_at", "id"] },
+  { name: "usage_logs", orderBy: ["created_at", "id"] },
+  { name: "ops_youtube_video_daily", orderBy: ["date", "id"] },
+  { name: "ops_youtube_short_daily", orderBy: ["date", "id"] },
+  { name: "ops_youtube_channel_daily", orderBy: ["date", "id"] },
+  { name: "ops_community_daily", orderBy: ["date", "id"] },
+  { name: "ops_youtube_comments", orderBy: ["created_at", "id"] },
+  { name: "ops_daily_snapshots", orderBy: ["date", "id"] },
+  { name: "academy_daily_kpis", orderBy: ["date", "id"] },
+  { name: "ops_youtube_video_learning_snapshots", orderBy: ["computed_at", "id"] },
+  { name: "intel_items_raw", orderBy: ["id"] },
+  { name: "intel_items_enriched", orderBy: ["id"] },
+  { name: "intel_trend_daily", orderBy: ["date", "id"] },
+  { name: "competitor_video_snapshots", orderBy: ["id"] },
+  { name: "intel_inbox_reviews", orderBy: ["created_at", "id"] },
 ];
 const TABLE_NAMES = TABLES.map((table) => table.name);
 const TABLE_NAME_SET = new Set(TABLE_NAMES);
@@ -139,11 +139,11 @@ function loadEnv(path) {
 async function fetchAllRows(cloud, table) {
   const rows = [];
   for (let offset = 0; ; offset += PAGE_SIZE) {
-    const { data, error } = await cloud
-      .from(table.name)
-      .select("*")
-      .order(table.orderBy, { ascending: true })
-      .range(offset, offset + PAGE_SIZE - 1);
+    let query = cloud.from(table.name).select("*");
+    for (const orderColumn of table.orderBy) {
+      query = query.order(orderColumn, { ascending: true, nullsFirst: true });
+    }
+    const { data, error } = await query.range(offset, offset + PAGE_SIZE - 1);
     if (error) throw new Error(`${table.name}: ${error.message}`);
     const batch = data || [];
     rows.push(...batch);
