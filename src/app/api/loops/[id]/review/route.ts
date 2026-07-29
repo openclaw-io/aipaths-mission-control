@@ -241,7 +241,7 @@ export async function POST(
         }],
       };
       await client.query(
-        `update loops set status='completed',metadata=$1::jsonb,last_completed_at=$2,
+        `update loops set status='completed',metadata=$1::jsonb,
                 updated_at=$2,row_version=row_version+1
           where id=$3 and status='in_review' and current_plan_revision_id=$4`,
         [JSON.stringify(metadata), now, id, loop.current_plan_revision_id],

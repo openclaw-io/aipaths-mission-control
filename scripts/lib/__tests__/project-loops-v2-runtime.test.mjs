@@ -527,6 +527,45 @@ test("three-task chain serializes concurrent materializers, unblocks on completi
   } finally { await cleanup(loopId); }
 });
 
+test("V2 final review completes against the historical local loops shape without last_completed_at", async () => {
+  const created = await invokeCreate(chainPayload({
+    stages: [{ key: "only", title: "Only", tasks: [{ key: "finish", title: "Finish" }] }],
+  }));
+  const loopId = created.payload.loop.id;
+  let historicalShapeInstalled = false;
+  try {
+    await invokeApprove(loopId);
+    await invokeMaterialize();
+    const task = (await rowsFor(loopId)).rows[0];
+    await agentCompletion.patchAgentWorkItemWithCompletion(task.work_item_id, {
+      status: "done", execution_attempt_id: task.payload.execution_attempt_id,
+    });
+    assert.equal((await pool.query("select status from loops where id=$1", [loopId])).rows[0].status, "in_review");
+
+    await pool.query("alter table loops drop column last_completed_at");
+    historicalShapeInstalled = true;
+    assert.equal((await pool.query(`select count(*)::int count from information_schema.columns
+      where table_schema='public' and table_name='loops' and column_name='last_completed_at'`)).rows[0].count, 0);
+
+    const decisionId = randomUUID();
+    const approved = await invokeReview(loopId, {
+      action: "approve_deliverable", feedback: "ship historical local shape", decision_id: decisionId,
+    });
+    assert.equal(approved.status, 200);
+    assert.equal(approved.payload.status, "completed");
+    const completed = (await pool.query("select status,metadata from loops where id=$1", [loopId])).rows[0];
+    assert.equal(completed.status, "completed");
+    assert.equal(completed.metadata.decision_ledger.at(-1).decision_id, decisionId);
+    assert.equal((await pool.query(
+      "select count(*)::int count from loop_events where loop_id=$1 and event_type='loop.review_approved'",
+      [loopId],
+    )).rows[0].count, 1);
+  } finally {
+    await cleanup(loopId);
+    if (historicalShapeInstalled) await pool.query("alter table loops add column last_completed_at timestamptz");
+  }
+});
+
 test("failed/canceled V2 task blocks run, task, stage and Loop; final review fails closed", async () => {
   const created = await invokeCreate(chainPayload({ stages: [{ key: "only", title: "Only", tasks: [{ key: "fail", title: "Fail safely" }] }] }));
   const loopId = created.payload.loop.id;
