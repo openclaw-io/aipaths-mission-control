@@ -140,6 +140,20 @@ test("explicit plan-pending write path promotes an already planned Loop with its
       withTransaction: async (run) => run({
         async query(sql) {
           const normalized = sql.replace(/\s+/g, " ").trim().toLowerCase();
+          if (normalized.startsWith("select id, status") && normalized.includes("for update")) {
+            return { rows: [{
+              id: "loop-ready",
+              status: "planning",
+              key: "loop-ready",
+              name: "Already normalized",
+              summary: "Ready for approval",
+              description: "Planned explicitly",
+              priority: "medium",
+              metadata: { normalized_at: "2026-07-27T00:00:00.000Z" },
+              plan: [{ id: "step-1", title: "Execute", status: "pending", notes: null }],
+              clarification_questions: [],
+            }] };
+          }
           if (normalized.startsWith("update public.loops")) {
             updateSql = normalized;
             return { rows: [{ id: "loop-ready" }] };
@@ -198,7 +212,7 @@ test("plan rework persists reviewer feedback as pending planner context", async 
   });
 
   const response = await route.POST(
-    { json: async () => ({ action: "rework", comment: "Add an explicit rollback validation step" }) },
+    { json: async () => ({ action: "rework", queue: false, comment: "Add an explicit rollback validation step" }) },
     { params: Promise.resolve({ id: "loop-rework" }) },
   );
 
@@ -209,36 +223,38 @@ test("plan rework persists reviewer feedback as pending planner context", async 
   assert.equal(updatedMetadata.plan_rework_context.requested_by, "reviewer@example.test");
 });
 
-test("plan-pending consumes pending rework context and persists a revised plan", async () => {
+test("plan-pending consumes feedback only after a deterministic, verifiable plan operation", async () => {
   let updateParams;
   let eventParams;
+  const lockedLoop = {
+    id: "loop-plan-rework",
+    status: "planning",
+    key: "loop-plan-rework",
+    name: "Rework this plan",
+    summary: "Planner must consume feedback",
+    description: "Original normalized description",
+    priority: "medium",
+    metadata: {
+      original_input: "Original input remains durable",
+      normalized_at: "2026-07-27T00:00:00.000Z",
+      plan_rework_context: {
+        status: "pending",
+        feedback: "Add an explicit rollback validation step",
+        requested_at: "2026-07-28T00:00:00.000Z",
+        requested_by: "reviewer@example.test",
+      },
+    },
+    plan: [{ id: "step-1", title: "Implement", status: "done", notes: null }],
+    clarification_questions: [],
+  };
   const route = transpileModule(resolve(repoRoot, "src/app/api/loops/plan-pending/route.ts"), {
     "next/server": { NextResponse: { json: (payload, init = {}) => ({ payload, status: init.status || 200 }) } },
     "@/lib/db/postgres": {
-      query: async () => ({ rows: [{
-        id: "loop-plan-rework",
-        status: "planning",
-        key: "loop-plan-rework",
-        name: "Rework this plan",
-        summary: "Planner must consume feedback",
-        description: "Original normalized description",
-        priority: "medium",
-        metadata: {
-          original_input: "Original input remains durable",
-          normalized_at: "2026-07-27T00:00:00.000Z",
-          plan_rework_context: {
-            status: "pending",
-            feedback: "Add an explicit rollback validation step",
-            requested_at: "2026-07-28T00:00:00.000Z",
-            requested_by: "reviewer@example.test",
-          },
-        },
-        plan: [{ id: "step-1", title: "Implement", status: "done", notes: null }],
-        clarification_questions: [],
-      }] }),
+      query: async () => ({ rows: [lockedLoop] }),
       withTransaction: async (run) => run({
         async query(sql, params = []) {
           const normalized = sql.replace(/\s+/g, " ").trim().toLowerCase();
+          if (normalized.startsWith("select id, status") && normalized.includes("for update")) return { rows: [lockedLoop] };
           if (normalized.startsWith("update public.loops")) {
             updateParams = params;
             return { rows: [{ id: "loop-plan-rework" }] };
@@ -258,11 +274,79 @@ test("plan-pending consumes pending rework context and persists a revised plan",
   const revisedPlan = JSON.parse(updateParams[0]);
   const revisedMetadata = JSON.parse(updateParams[1]);
   assert.equal(revisedPlan[0].status, "pending");
-  assert.equal(revisedPlan.at(-1).title, "Address plan review feedback");
-  assert.equal(revisedPlan.at(-1).notes, "Add an explicit rollback validation step");
+  assert.equal(revisedPlan.at(-1).title, "Rollback validation");
+  assert.equal(revisedPlan.at(-1).notes, null);
   assert.equal(revisedMetadata.original_input, "Original input remains durable");
   assert.equal(revisedMetadata.plan_rework_context.status, "consumed");
+  assert.deepEqual(revisedMetadata.plan_rework_context.applied_operations, [{
+    type: "append_step",
+    step_id: "plan-rework-2",
+    title: "Rollback validation",
+  }]);
   assert.equal(JSON.parse(eventParams[1]).source, "plan_rework_revision");
+});
+
+test("unsupported plan feedback remains needs_attention and is never represented as consumed", async () => {
+  let updateParams;
+  let eventParams;
+  let eventWrites = 0;
+  const lockedLoop = {
+    id: "loop-unsupported-rework",
+    status: "planning",
+    key: "loop-unsupported-rework",
+    name: "Rework this plan",
+    summary: "No fake consumption",
+    description: "Original normalized description",
+    priority: "medium",
+    metadata: {
+      normalized_at: "2026-07-27T00:00:00.000Z",
+      plan_rework_context: {
+        status: "pending",
+        feedback: "Make this whole plan much better",
+        requested_at: "2026-07-28T00:00:00.000Z",
+      },
+    },
+    plan: [{ id: "step-1", title: "Implement", status: "done", notes: null }],
+    clarification_questions: [],
+  };
+  const route = transpileModule(resolve(repoRoot, "src/app/api/loops/plan-pending/route.ts"), {
+    "next/server": { NextResponse: { json: (payload, init = {}) => ({ payload, status: init.status || 200 }) } },
+    "@/lib/db/postgres": {
+      query: async () => ({ rows: [lockedLoop] }),
+      withTransaction: async (run) => run({
+        async query(sql, params = []) {
+          const normalized = sql.replace(/\s+/g, " ").trim().toLowerCase();
+          if (normalized.startsWith("select id, status") && normalized.includes("for update")) return { rows: [lockedLoop] };
+          if (normalized.startsWith("update public.loops")) {
+            updateParams = params;
+            lockedLoop.metadata = JSON.parse(params[0]);
+            return { rows: [{ id: lockedLoop.id }] };
+          }
+          if (normalized.startsWith("insert into public.loop_events")) {
+            eventParams = params;
+            eventWrites += 1;
+            return { rows: [] };
+          }
+          throw new Error(`Unexpected unsupported rework SQL: ${normalized}`);
+        },
+      }),
+    },
+  });
+
+  const response = await route.POST({ headers: { get: () => "Bearer test-key" } });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.payload.promoted, 0);
+  assert.equal(response.payload.details[0].action, "plan_rework_needs_attention");
+  const metadata = JSON.parse(updateParams[0]);
+  assert.equal(metadata.plan_rework_context.status, "needs_attention");
+  assert.equal(metadata.plan_rework_context.consumed_at, undefined);
+  assert.equal(JSON.parse(eventParams[1]).reason, "unsupported_feedback_operation");
+
+  const retry = await route.POST({ headers: { get: () => "Bearer test-key" } });
+  assert.equal(retry.payload.promoted, 0);
+  assert.equal(retry.payload.details[0].action, "plan_rework_needs_attention");
+  assert.equal(eventWrites, 1, "needs_attention retries must not write another event or promote");
 });
 
 test("the real queue=false approval route can subsequently transition approved to queued", async () => {
@@ -271,6 +355,7 @@ test("the real queue=false approval route can subsequently transition approved t
     status: "needs_approval",
     approval_scope: { approved: false },
     metadata: { original_input: "durable" },
+    last_approved_at: null,
   };
   const route = transpileModule(resolve(repoRoot, "src/app/api/loops/[id]/approve/route.ts"), {
     "next/server": { NextResponse: { json: (payload, init = {}) => ({ payload, status: init.status || 200 }) } },
@@ -287,6 +372,7 @@ test("the real queue=false approval route can subsequently transition approved t
             state.status = params[0];
             state.approval_scope = JSON.parse(params[1]);
             state.metadata = JSON.parse(params[2]);
+            state.last_approved_at = params[3];
             return { rows: [{ id: "loop-queue" }] };
           }
           if (normalized.startsWith("insert into loop_events")) {
@@ -302,10 +388,13 @@ test("the real queue=false approval route can subsequently transition approved t
   });
 
   const invoke = (queue) => route.POST(
-    { json: async () => ({ queue }) },
+    { json: async () => ({ action: "approve", queue }) },
     { params: Promise.resolve({ id: "loop-queue" }) },
   );
   const approved = await invoke(false);
+  const originalApprovedBy = state.approval_scope.approved_by;
+  const originalApprovedAt = state.approval_scope.approved_at;
+  const originalLastApprovedAt = state.last_approved_at;
   const queued = await invoke(true);
 
   assert.equal(approved.status, 200);
@@ -313,10 +402,68 @@ test("the real queue=false approval route can subsequently transition approved t
   assert.equal(queued.status, 200);
   assert.equal(queued.payload.status, "queued");
   assert.equal(state.status, "queued");
+  assert.equal(state.approval_scope.approved_by, originalApprovedBy);
+  assert.equal(state.approval_scope.approved_at, originalApprovedAt);
+  assert.equal(state.last_approved_at, originalLastApprovedAt);
   assert.deepEqual(events.map(({ eventType, fromStatus, toStatus }) => ({ eventType, fromStatus, toStatus })), [
     { eventType: "loop.approved", fromStatus: "needs_approval", toStatus: "approved" },
     { eventType: "loop.queued", fromStatus: "approved", toStatus: "queued" },
   ]);
+});
+
+test("plan approval accepts only the exact action allowlist and a boolean queue", async () => {
+  let transactions = 0;
+  const route = transpileModule(resolve(repoRoot, "src/app/api/loops/[id]/approve/route.ts"), {
+    "next/server": { NextResponse: { json: (payload, init = {}) => ({ payload, status: init.status || 200 }) } },
+    "@/lib/auth/local": {
+      getLocalMissionControlUser: () => ({ email: "reviewer@example.test" }),
+      isLocalAuthDisabled: () => true,
+    },
+    "@/lib/db/postgres": { withTransaction: async () => { transactions += 1; } },
+    "@/lib/supabase/server": { createClient: async () => { throw new Error("unexpected cloud auth"); } },
+  });
+
+  for (const body of [
+    { queue: true },
+    { action: "APPROVE", queue: true },
+    { action: "anything", queue: true },
+    { action: "approve", queue: "true" },
+    { action: "rework", queue: 0 },
+  ]) {
+    const response = await route.POST(
+      { json: async () => body },
+      { params: Promise.resolve({ id: "loop-1" }) },
+    );
+    assert.equal(response.status, 400);
+  }
+  assert.equal(transactions, 0);
+});
+
+test("review request_review is removed because completion is the sole transition into review", async () => {
+  const route = transpileModule(resolve(repoRoot, "src/app/api/loops/[id]/review/route.ts"), {
+    "next/server": { NextResponse: { json: (payload, init = {}) => ({ payload, status: init.status || 200 }) } },
+    "node:crypto": { randomUUID: () => "unused" },
+    "@/lib/auth/local": {
+      getLocalMissionControlUser: () => ({ email: "reviewer@example.test" }),
+      isLocalAuthDisabled: () => true,
+    },
+    "@/lib/db/postgres": { withTransaction: async () => { throw new Error("must not transact"); } },
+    "@/lib/supabase/server": { createClient: async () => { throw new Error("unexpected cloud auth"); } },
+    "@/lib/loops/execution-instruction": { buildLoopReworkInstruction: () => "unused" },
+  });
+  const response = await route.POST(
+    { json: async () => ({ action: "request_review" }) },
+    { params: Promise.resolve({ id: "loop-1" }) },
+  );
+  assert.equal(response.status, 400);
+  assert.equal(response.payload.error, "Invalid review action");
+});
+
+test("work-item wake loads acceptance criteria in both local and cloud Loop context queries", () => {
+  const source = readFileSync(resolve(repoRoot, "src/app/api/work-items/notify/route.ts"), "utf8");
+  assert.match(source, /type LoopContextRow[\s\S]*acceptance_criteria:/);
+  assert.match(source, /select id, name, summary, description, acceptance_criteria, clarification_questions/);
+  assert.match(source, /\.select\("id,name,summary,description,acceptance_criteria,clarification_questions,metadata,approval_scope"\)/);
 });
 
 test("Loop read model is strictly read-only and cannot persist any lifecycle transition", () => {

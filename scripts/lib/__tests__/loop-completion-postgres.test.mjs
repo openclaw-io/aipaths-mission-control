@@ -76,6 +76,43 @@ const agentCompletion = transpileModule(resolve(repoRoot, "src/lib/work-items/ag
 });
 
 const executionInstruction = transpileModule(resolve(repoRoot, "src/lib/loops/execution-instruction.ts"));
+
+function postgresTransaction(run) {
+  return (async () => {
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      await client.query("set local lock_timeout = '5s'");
+      const result = await run(client);
+      await client.query("commit");
+      return result;
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+  })();
+}
+
+const approveRoute = transpileModule(resolve(repoRoot, "src/app/api/loops/[id]/approve/route.ts"), {
+  "next/server": { NextResponse: { json: (payload, init = {}) => ({ payload, status: init.status || 200 }) } },
+  "@/lib/auth/local": {
+    isLocalAuthDisabled: () => true,
+    getLocalMissionControlUser: () => ({ email: "approval-reviewer@example.test" }),
+  },
+  "@/lib/db/postgres": { withTransaction: postgresTransaction },
+  "@/lib/supabase/server": { createClient: async () => { throw new Error("unexpected cloud auth"); } },
+});
+
+const planPendingRoute = transpileModule(resolve(repoRoot, "src/app/api/loops/plan-pending/route.ts"), {
+  "next/server": { NextResponse: { json: (payload, init = {}) => ({ payload, status: init.status || 200 }) } },
+  "@/lib/db/postgres": {
+    query: (text, params) => pool.query(text, params),
+    withTransaction: postgresTransaction,
+  },
+});
+
 const reviewRoute = transpileModule(resolve(repoRoot, "src/app/api/loops/[id]/review/route.ts"), {
   "next/server": { NextResponse: { json: (payload, init = {}) => ({ payload, status: init.status || 200 }) } },
   "node:crypto": { randomUUID },
@@ -144,6 +181,199 @@ async function cleanupLoopGraph(loopId, workItemId) {
   await pool.query("delete from public.work_items where id = $1", [workItemId]);
   await pool.query("delete from public.loops where id = $1", [loopId]);
 }
+
+async function insertApprovalLoop(loopId) {
+  await pool.query(
+    `insert into public.loops
+       (id, key, name, status, plan, metadata, approval_scope)
+     values
+       ($1, $2, 'Approval contract test', 'needs_approval', '[{"id":"step-1","title":"Execute","status":"pending"}]'::jsonb,
+        '{"original_input":"preserve"}'::jsonb, '{"approved":false}'::jsonb)`,
+    [loopId, `loop-approval-${loopId}`],
+  );
+}
+
+async function invokeApproval(loopId, body) {
+  return approveRoute.POST(
+    { json: async () => body },
+    { params: Promise.resolve({ id: loopId }) },
+  );
+}
+
+test("Postgres approval replay is exact, audited, and approved-to-queued preserves approval identity", async () => {
+  const loopId = randomUUID();
+  try {
+    await insertApprovalLoop(loopId);
+    const request = { action: "approve", queue: false, comment: "Approve this plan" };
+    const first = await invokeApproval(loopId, request);
+    assert.equal(first.status, 200);
+    const approved = (await pool.query(
+      "select status, approval_scope, metadata, last_approved_at from public.loops where id = $1",
+      [loopId],
+    )).rows[0];
+
+    const replay = await invokeApproval(loopId, request);
+    assert.equal(replay.status, 200);
+    assert.equal(replay.payload.replay, true);
+    const different = await invokeApproval(loopId, { ...request, comment: "Different request at destination" });
+    assert.equal(different.status, 409);
+    assert.equal(different.payload.error, "approval_transition_conflict");
+
+    const queued = await invokeApproval(loopId, { action: "approve", queue: true, comment: "Queue approved plan" });
+    assert.equal(queued.status, 200);
+    const afterQueue = (await pool.query(
+      "select status, approval_scope, metadata, last_approved_at from public.loops where id = $1",
+      [loopId],
+    )).rows[0];
+    assert.equal(afterQueue.status, "queued");
+    assert.equal(afterQueue.approval_scope.approved_by, approved.approval_scope.approved_by);
+    assert.equal(afterQueue.approval_scope.approved_at, approved.approval_scope.approved_at);
+    assert.equal(new Date(afterQueue.last_approved_at).toISOString(), new Date(approved.last_approved_at).toISOString());
+
+    const events = (await pool.query(
+      "select event_type, actor, payload from public.loop_events where loop_id = $1 order by created_at, id",
+      [loopId],
+    )).rows;
+    assert.equal(events.length, 2);
+    assert.deepEqual(events.map((event) => event.event_type), ["loop.approved", "loop.queued"]);
+    assert.equal(events[0].actor, "approval-reviewer@example.test");
+    assert.equal(events[0].payload.action, "approve");
+    assert.equal(events[0].payload.queue, false);
+    assert.equal(events[0].payload.comment, "Approve this plan");
+    assert.equal(events[0].payload.acted_by, "approval-reviewer@example.test");
+    assert.equal(afterQueue.metadata.last_plan_decision.from_status, "approved");
+    assert.equal(afterQueue.metadata.last_plan_decision.to_status, "queued");
+
+    const rework = await invokeApproval(loopId, { action: "rework", queue: false, comment: "Add a rollback step" });
+    assert.equal(rework.status, 200);
+    const afterRework = (await pool.query(
+      "select status, approval_scope, last_approved_at from public.loops where id = $1",
+      [loopId],
+    )).rows[0];
+    assert.equal(afterRework.status, "planning");
+    assert.equal(afterRework.approval_scope.approved, false);
+    assert.equal(afterRework.approval_scope.approved_at, null);
+    assert.equal(new Date(afterRework.last_approved_at).toISOString(), new Date(approved.last_approved_at).toISOString());
+    assert.equal(Number((await pool.query(
+      "select count(*)::int as count from public.loop_events where loop_id = $1 and event_type = 'loop.approved'",
+      [loopId],
+    )).rows[0].count), 1, "rework must not be audited as a new approval");
+  } finally {
+    await pool.query("delete from public.loop_events where loop_id = $1", [loopId]);
+    await pool.query("delete from public.loops where id = $1", [loopId]);
+  }
+});
+
+test("concurrent Postgres approvals serialize to one decision and one audit event", async () => {
+  const loopId = randomUUID();
+  try {
+    await insertApprovalLoop(loopId);
+    const responses = await Promise.all([
+      invokeApproval(loopId, { action: "approve", queue: true, comment: "Concurrent A" }),
+      invokeApproval(loopId, { action: "approve", queue: true, comment: "Concurrent B" }),
+    ]);
+    assert.deepEqual(responses.map((response) => response.status).sort(), [200, 409]);
+    const loop = (await pool.query("select status, metadata from public.loops where id = $1", [loopId])).rows[0];
+    assert.equal(loop.status, "queued");
+    assert.ok(["Concurrent A", "Concurrent B"].includes(loop.metadata.last_plan_decision.comment));
+    assert.equal(Number((await pool.query(
+      "select count(*)::int as count from public.loop_events where loop_id = $1",
+      [loopId],
+    )).rows[0].count), 1);
+  } finally {
+    await pool.query("delete from public.loop_events where loop_id = $1", [loopId]);
+    await pool.query("delete from public.loops where id = $1", [loopId]);
+  }
+});
+
+test("approval audit failure rolls back the Postgres state transition", async () => {
+  const loopId = randomUUID();
+  const functionName = `reject_approval_${loopId.replaceAll("-", "")}`;
+  const triggerName = `reject_approval_${loopId.replaceAll("-", "")}`;
+  try {
+    await insertApprovalLoop(loopId);
+    await pool.query(`
+      create function public.${functionName}() returns trigger language plpgsql as $$
+      begin
+        if new.loop_id = '${loopId}'::uuid and new.event_type = 'loop.approved' then
+          raise exception 'injected approval audit failure';
+        end if;
+        return new;
+      end $$;
+      create trigger ${triggerName} before insert on public.loop_events
+      for each row execute function public.${functionName}();
+    `);
+
+    await assert.rejects(
+      () => invokeApproval(loopId, { action: "approve", queue: false, comment: "Must roll back" }),
+      /injected approval audit failure/,
+    );
+    const loop = (await pool.query(
+      "select status, approval_scope, metadata, last_approved_at from public.loops where id = $1",
+      [loopId],
+    )).rows[0];
+    assert.equal(loop.status, "needs_approval");
+    assert.deepEqual(loop.approval_scope, { approved: false });
+    assert.deepEqual(loop.metadata, { original_input: "preserve" });
+    assert.equal(loop.last_approved_at, null);
+    assert.equal(Number((await pool.query(
+      "select count(*)::int as count from public.loop_events where loop_id = $1",
+      [loopId],
+    )).rows[0].count), 0);
+  } finally {
+    await pool.query(`drop trigger if exists ${triggerName} on public.loop_events`);
+    await pool.query(`drop function if exists public.${functionName}()`);
+    await pool.query("delete from public.loop_events where loop_id = $1", [loopId]);
+    await pool.query("delete from public.loops where id = $1", [loopId]);
+  }
+});
+
+test("concurrent Postgres planners lock rework context and apply its operation exactly once", async () => {
+  const loopId = randomUUID();
+  try {
+    await pool.query(
+      `insert into public.loops
+         (id, key, name, summary, description, status, plan, metadata, approval_scope)
+       values
+         ($1, $2, 'Concurrent plan rework', 'Apply one operation', 'Locked planner test', 'planning',
+          '[{"id":"step-1","title":"Implement","status":"done"}]'::jsonb,
+          $3::jsonb, '{}'::jsonb)`,
+      [loopId, `loop-plan-rework-${loopId}`, JSON.stringify({
+        normalized_at: "2026-07-29T00:00:00.000Z",
+        plan_rework_context: {
+          status: "pending",
+          feedback: "Add an explicit rollback validation step",
+          requested_at: "2026-07-29T00:00:00.000Z",
+          requested_by: "reviewer@example.test",
+        },
+      })],
+    );
+    const request = { headers: { get: () => "Bearer test-key" } };
+    const responses = await Promise.all([
+      planPendingRoute.POST(request),
+      planPendingRoute.POST(request),
+    ]);
+    assert.equal(responses.reduce((sum, response) => sum + response.payload.promoted, 0), 1);
+
+    const loop = (await pool.query("select status, plan, metadata from public.loops where id = $1", [loopId])).rows[0];
+    assert.equal(loop.status, "needs_approval");
+    assert.equal(loop.plan.filter((step) => step.id === "plan-rework-2").length, 1);
+    assert.equal(loop.plan.at(-1).title, "Rollback validation");
+    assert.equal(loop.metadata.plan_rework_context.status, "consumed");
+    assert.deepEqual(loop.metadata.plan_rework_context.applied_operations, [{
+      type: "append_step",
+      step_id: "plan-rework-2",
+      title: "Rollback validation",
+    }]);
+    assert.equal(Number((await pool.query(
+      "select count(*)::int as count from public.loop_events where loop_id = $1 and event_type = 'loop.ready_for_approval'",
+      [loopId],
+    )).rows[0].count), 1);
+  } finally {
+    await pool.query("delete from public.loop_events where loop_id = $1", [loopId]);
+    await pool.query("delete from public.loops where id = $1", [loopId]);
+  }
+});
 
 test("primary Loop completion atomically enters review, completes the plan, and preserves payload context", async () => {
   const loopId = randomUUID();

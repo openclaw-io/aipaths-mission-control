@@ -19,7 +19,7 @@ export function ApproveForQueueButton({
       const res = await fetch(`/api/loops/${loopId}/approve`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ queue: true }),
+        body: JSON.stringify({ action: "approve", queue: true }),
       });
 
       if (!res.ok) {

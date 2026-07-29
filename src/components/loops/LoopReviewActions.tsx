@@ -43,7 +43,7 @@ export function LoopReviewActions({
       <div className="mb-3">
         <h3 className="text-sm font-semibold text-white">Review Flow</h3>
         <p className="mt-1 text-xs text-gray-500">
-          Move the loop into review, approve the deliverable, or request changes with context.
+          Completion moves the loop into review. Approve the deliverable or request changes with context.
         </p>
       </div>
 

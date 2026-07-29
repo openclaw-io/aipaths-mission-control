@@ -42,7 +42,6 @@ export async function POST(
   const feedback = typeof body?.feedback === "string" ? body.feedback.trim() : "";
 
   const transitions: Record<string, { nextStatus: string; eventType: string }> = {
-    request_review: { nextStatus: "in_review", eventType: "loop.review_requested" },
     approve_deliverable: { nextStatus: "completed", eventType: "loop.review_approved" },
     request_changes: { nextStatus: "in_progress", eventType: "loop.review_changes_requested" },
   };
