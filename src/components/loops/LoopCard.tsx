@@ -53,6 +53,9 @@ export function LoopCard({
       </div>
 
       <div className="mt-4">
+        {loop.progressLabel?.endsWith(" tasks") && (
+          <div className="mb-2 text-xs text-gray-500">{loop.progressLabel}</div>
+        )}
         <div className="flex items-center gap-1.5">
           {WORKFLOW_STEPS.map((step, index) => (
             <div key={step} className="flex min-w-0 flex-1 items-center gap-1.5">

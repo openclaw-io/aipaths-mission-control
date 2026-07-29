@@ -204,7 +204,7 @@ test("shadow read model rejects cross-revision dependencies rather than hiding t
   }), /dependency graph.*cycle/i, "a malformed current-revision cycle must fail closed");
 });
 
-test("shadow module remains pure and is not wired into runtime or UI", () => {
+test("shadow projection remains pure while the live read model may consume it", () => {
   const source = readFileSync(sourcePath, "utf8");
   assert.doesNotMatch(source, /@\/lib\/db|supabase|\bfetch\s*\(|\.(?:insert|update|delete)\s*\(/i);
   assert.doesNotMatch(source, /"use client"/);

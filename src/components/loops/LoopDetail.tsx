@@ -43,6 +43,78 @@ function formatTimestamp(value: string | null | undefined) {
   }
 }
 
+function V2WorkflowPanel({ workflow }: { workflow: NonNullable<LoopDetailPayload["workflow"]> }) {
+  const tasksById = new Map(
+    workflow.stages.flatMap((stage) => stage.tasks).map((task) => [task.id, task]),
+  );
+
+  return (
+    <Section title="Proyecto">
+      <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-gray-400">
+        <span className="rounded-full border border-blue-900/60 bg-blue-950/20 px-2 py-0.5 text-blue-200">
+          Revisión {workflow.planRevision?.revision_number ?? "actual"}
+        </span>
+        <span className="rounded-full border border-gray-700 px-2 py-0.5 uppercase text-gray-300">
+          {workflow.mode}
+        </span>
+      </div>
+
+      {workflow.stages.length === 0 ? (
+        <p className="text-sm text-gray-500">No hay etapas en la revisión actual.</p>
+      ) : (
+        <div className="space-y-4">
+          {workflow.stages.map((stage) => (
+            <div key={stage.id} className="overflow-hidden rounded-lg border border-gray-800 bg-[#0d0d14]">
+              <div className="flex items-start justify-between gap-3 border-b border-gray-800 px-4 py-3">
+                <div>
+                  <p className="text-sm font-semibold text-white">{stage.title}</p>
+                  {stage.description && <p className="mt-1 text-xs text-gray-500">{stage.description}</p>}
+                </div>
+                <span className="shrink-0 rounded-full border border-gray-700 px-2 py-0.5 text-xs text-gray-300">
+                  {stage.status.replaceAll("_", " ")}
+                </span>
+              </div>
+
+              {stage.tasks.length === 0 ? (
+                <p className="px-4 py-3 text-xs text-gray-500">Sin tareas.</p>
+              ) : (
+                <div className="divide-y divide-gray-800">
+                  {stage.tasks.map((task) => {
+                    const dependencyNames = task.dependencies.map((dependencyId) => {
+                      const dependency = tasksById.get(dependencyId);
+                      return dependency?.title || dependency?.key || dependencyId;
+                    });
+                    return (
+                      <div key={task.id} className="px-4 py-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="text-sm text-gray-100">{task.title}</p>
+                            {task.description && <p className="mt-1 text-xs text-gray-500">{task.description}</p>}
+                          </div>
+                          <span className="shrink-0 rounded-full border border-gray-700 px-2 py-0.5 text-xs text-gray-300">
+                            {task.status.replaceAll("_", " ")}
+                          </span>
+                        </div>
+                        <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-gray-500">
+                          <span>{task.runs.length} {task.runs.length === 1 ? "intento" : "intentos"}</span>
+                          <span>{task.evidence.length} {task.evidence.length === 1 ? "evidencia" : "evidencias"}</span>
+                          {dependencyNames.length > 0 && (
+                            <span>Depende de: {dependencyNames.join(", ")}</span>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </Section>
+  );
+}
+
 export function LoopDetail({
   loop,
   onClose,
@@ -53,6 +125,7 @@ export function LoopDetail({
   const router = useRouter();
   const activeStep = deriveWorkflowStep(loop.status);
   const dotClass = deriveDotClass(loop.status, loop.needsMyAttention);
+  const isV2Project = loop.workflowVersion === 2 && Boolean(loop.workflow);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
@@ -113,7 +186,7 @@ export function LoopDetail({
                     <p className="whitespace-pre-wrap"><span className="font-medium text-emerald-300">A:</span> {entry.response}</p>
                   </div>
                 ))}
-                {loop.status === "needs_clarification" && (
+                {loop.workflowVersion !== 2 && loop.status === "needs_clarification" && (
                   <SubmitClarificationBox
                     loopId={loop.id}
                     onDone={() => {
@@ -153,25 +226,29 @@ export function LoopDetail({
             </Section>
           )}
 
-          <Section title="Compact Plan">
-            {loop.plan.length === 0 ? (
-              <p className="text-sm text-gray-500">No plan steps yet.</p>
-            ) : (
-              <div className="space-y-2">
-                {loop.plan.map((step: PlanStep) => (
-                  <div key={step.id} className="flex items-start justify-between gap-3 rounded border border-gray-800 bg-[#0d0d14] p-3">
-                    <div>
-                      <p className="text-sm text-white">{step.title}</p>
-                      {step.notes && <p className="mt-1 text-xs text-gray-500">{step.notes}</p>}
+          {isV2Project && loop.workflow ? (
+            <V2WorkflowPanel workflow={loop.workflow} />
+          ) : (
+            <Section title="Compact Plan">
+              {loop.plan.length === 0 ? (
+                <p className="text-sm text-gray-500">No plan steps yet.</p>
+              ) : (
+                <div className="space-y-2">
+                  {loop.plan.map((step: PlanStep) => (
+                    <div key={step.id} className="flex items-start justify-between gap-3 rounded border border-gray-800 bg-[#0d0d14] p-3">
+                      <div>
+                        <p className="text-sm text-white">{step.title}</p>
+                        {step.notes && <p className="mt-1 text-xs text-gray-500">{step.notes}</p>}
+                      </div>
+                      <span className="rounded-full border border-gray-700 px-2 py-0.5 text-xs text-gray-300">{step.status || "pending"}</span>
                     </div>
-                    <span className="rounded-full border border-gray-700 px-2 py-0.5 text-xs text-gray-300">{step.status || "pending"}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </Section>
+                  ))}
+                </div>
+              )}
+            </Section>
+          )}
 
-          {loop.status === "needs_approval" && (
+          {loop.workflowVersion !== 2 && loop.status === "needs_approval" && (
             <section className="rounded-lg border border-gray-800 bg-[#111118] p-4">
               <p className="text-sm text-gray-300">This loop is waiting for your approval before it can move into queue.</p>
               <div className="mt-4">
@@ -197,7 +274,7 @@ export function LoopDetail({
             </section>
           )}
 
-          {(loop.status === "in_progress" || loop.status === "in_review") && (
+          {loop.workflowVersion !== 2 && (loop.status === "in_progress" || loop.status === "in_review") && (
             <LoopReviewActions
               loopId={loop.id}
               status={loop.status}
