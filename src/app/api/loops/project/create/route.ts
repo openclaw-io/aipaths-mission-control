@@ -25,6 +25,7 @@ type V2CreateInput = {
   acceptanceCriteria: string[];
   stages: StageInput[];
   approvalScope: { allowed_actions: string[]; forbidden_actions: string[]; notes: string | null };
+  repository: string;
 };
 
 function text(value: unknown, max: number) {
@@ -51,11 +52,13 @@ function parseV2Create(value: unknown): { ok: true; value: V2CreateInput } | { o
   const title = text(body.title, 200);
   const input = text(body.input, 20_000);
   const ownerAgent = text(body.owner_agent, 100);
+  const repository = text(body.repository_id ?? body.repository_key ?? body.repository, 80);
   const acceptanceCriteria = stringList(body.acceptance_criteria, LIMITS.criteria, 1_000);
   if (!idempotencyKey) return { ok: false, error: "invalid_idempotency_key" };
   if (!title) return { ok: false, error: "invalid_title" };
   if (!input) return { ok: false, error: "invalid_input" };
   if (!ownerAgent) return { ok: false, error: "invalid_owner_agent" };
+  if (!repository || !KEY_PATTERN.test(repository)) return { ok: false, error: "registered_repository_required" };
   if (!acceptanceCriteria || acceptanceCriteria.length === 0) return { ok: false, error: "invalid_acceptance_criteria" };
   if (!Array.isArray(body.stages) || body.stages.length === 0 || body.stages.length > LIMITS.stages) {
     return { ok: false, error: "invalid_stages" };
@@ -146,7 +149,7 @@ function parseV2Create(value: unknown): { ok: true; value: V2CreateInput } | { o
   if (!allowed || !forbidden || (rawScope.notes != null && !notes)) return { ok: false, error: "invalid_approval_scope" };
 
   return { ok: true, value: {
-    idempotencyKey, title, input, ownerAgent, acceptanceCriteria, stages,
+    idempotencyKey, title, input, ownerAgent, acceptanceCriteria, stages, repository,
     approvalScope: { allowed_actions: allowed, forbidden_actions: forbidden, notes },
   } };
 }
@@ -168,11 +171,12 @@ function canonicalDependencies(taskKey: string, dependencies: Dependency[]) {
     .map((dependency) => ({ key: dependency.dependsOnKey, type: dependency.type }));
 }
 
-function buildPlanSnapshot(project: V2CreateInput) {
+function buildPlanSnapshot(project: V2CreateInput, repository: { id: string; key: string }) {
   return canonical({
     schema_version: 1,
     objective: { title: project.title, input: project.input },
     owner_agent: project.ownerAgent,
+    repository,
     acceptance_criteria: project.acceptanceCriteria,
     approval_policy: project.approvalScope,
     stages: project.stages.map((stage, stagePosition) => ({
@@ -208,12 +212,17 @@ export async function POST(request: NextRequest) {
   if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 });
   const project = parsed.value;
   const requestSnapshot = canonical(project);
-  const planSnapshot = buildPlanSnapshot(project);
-  const planHash = contentHash(planSnapshot);
   const now = new Date().toISOString();
 
   const result = await withTransaction(async (client) => {
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`project-loop-create:${project.idempotencyKey}`]);
+    const repository = (await client.query<{ id: string; key: string }>(
+      `select id,key from review_repositories where enabled=true and (id::text=$1 or key=$1) for share`,
+      [project.repository],
+    )).rows[0];
+    if (!repository) return { kind: "repository_missing" as const };
+    const planSnapshot = buildPlanSnapshot(project, repository);
+    const planHash = contentHash(planSnapshot);
     const existing = await client.query<{
       id: string; key: string; status: string; metadata: Record<string, unknown>;
       current_plan_revision_id: string; content_hash: string | null;
@@ -301,5 +310,6 @@ export async function POST(request: NextRequest) {
   });
 
   if (result.kind === "conflict") return NextResponse.json({ error: "idempotency_key_payload_conflict" }, { status: 409 });
+  if (result.kind === "repository_missing") return NextResponse.json({ error: "registered_repository_not_found_or_disabled" }, { status: 400 });
   return NextResponse.json({ ok: true, replay: result.replay, loop: result.loop }, { status: result.replay ? 200 : 201 });
 }

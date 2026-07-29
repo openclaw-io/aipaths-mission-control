@@ -96,6 +96,13 @@ function V2WorkflowPanel({ workflow }: { workflow: LoopDetailV2Payload["workflow
                           </span>
                         </div>
                         <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-gray-500">
+                          <span>Ciclo {task.qualityCycle ?? 1}/3</span>
+                          <span>{task.qualityState ?? "implementation"}</span>
+                          <span>implementation: {task.implementationStatus || "pending"}</span>
+                          <span>review: {task.reviewRunStatus || "pending"}</span>
+                          {task.artifactSha && <span>SHA {task.artifactSha.slice(0, 8)}</span>}
+                          {task.latestReviewStatus && <span>última revisión: {task.latestReviewStatus}</span>}
+                          <span>{task.findingsCount ?? 0} findings</span>
                           <span>{task.runCount} {task.runCount === 1 ? "intento" : "intentos"}</span>
                           <span>{task.reviewCount} {task.reviewCount === 1 ? "revisión" : "revisiones"}</span>
                           <span>{task.evidenceCount} {task.evidenceCount === 1 ? "evidencia" : "evidencias"}</span>
@@ -164,7 +171,20 @@ export function LoopDetail({
           {loop.status === "queued" && <QueuedExecutionHint />}
 
           {loop.workflowVersion === 2 ? (
-            <V2WorkflowPanel workflow={loop.workflow} />
+            <>
+              <V2WorkflowPanel workflow={loop.workflow} />
+              {loop.status === "in_review" && (
+                <LoopReviewActions
+                  loopId={loop.id}
+                  status={loop.status}
+                  workflowVersion={2}
+                  onDone={() => {
+                    router.refresh();
+                    onClose();
+                  }}
+                />
+              )}
+            </>
           ) : (
             <>
           <Section title="Clarification">
@@ -279,6 +299,7 @@ export function LoopDetail({
             <LoopReviewActions
               loopId={loop.id}
               status={loop.status}
+              workflowVersion={1}
               onDone={() => {
                 router.refresh();
                 onClose();

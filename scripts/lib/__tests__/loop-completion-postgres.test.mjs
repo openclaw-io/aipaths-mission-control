@@ -49,6 +49,9 @@ function transpileModule(sourcePath, requires = {}, globals = {}) {
 const youtubePipeline = transpileModule(resolve(repoRoot, "src/lib/youtube-pipeline.ts"));
 const completion = transpileModule(resolve(repoRoot, "src/lib/work-items/completion-orchestration.ts"), {
   "@/lib/youtube-pipeline": youtubePipeline,
+  "@/lib/work-items/git-artifact": {
+    verifyRepositoryCommit: async (repositoryPath, sha) => ({ repositoryPath, repositoryRoot: repositoryPath, sha }),
+  },
 });
 const databaseUrl = requireMissionControlTestDatabaseUrl();
 const pool = new pg.Pool({ connectionString: databaseUrl, max: 2 });

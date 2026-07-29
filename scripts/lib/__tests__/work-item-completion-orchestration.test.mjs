@@ -49,6 +49,9 @@ function transpileModule(sourcePath, requires = {}) {
 const youtubePipeline = transpileModule(youtubeSource);
 const { orchestrateWorkItemCompletion, buildPublicationVerificationRequest } = transpileModule(completionSource, {
   "@/lib/youtube-pipeline": youtubePipeline,
+  "@/lib/work-items/git-artifact": {
+    verifyRepositoryCommit: async (repositoryPath, sha) => ({ repositoryPath, repositoryRoot: repositoryPath, sha }),
+  },
 });
 
 const databaseUrl = requireMissionControlTestDatabaseUrl();

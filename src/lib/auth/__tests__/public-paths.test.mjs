@@ -19,6 +19,9 @@ describe("middleware public paths", () => {
       "/api/loops/materialize-queued",
       "/api/loops/plan-pending",
       "/api/youtube/launch-package",
+      "/api/reviewer/dispatch",
+      "/api/reviewer/reconcile",
+      "/api/reviewer/executions/123e4567-e89b-12d3-a456-426614174000/complete",
     ]) {
       assert.equal(isPublicPath(pathname), true, pathname);
     }
@@ -33,6 +36,8 @@ describe("middleware public paths", () => {
       "/api/work-items/example/requeue",
       "/api/work-items/recurring-rules",
       "/api/work-items/recurring-rules/materialize",
+      "/api/reviewer",
+      "/api/reviewer/executions/123e4567-e89b-12d3-a456-426614174000",
     ]) {
       assert.equal(isPublicPath(pathname), false, pathname);
     }
@@ -44,6 +49,11 @@ describe("middleware public paths", () => {
       "/api/healthz/extra",
       "/api/work-items/notify/extra",
       "/api/loops/materialize-queued/extra",
+      "/api/reviewer/dispatch/extra",
+      "/api/reviewer/reconcile/extra",
+      "/api/reviewer/executions/not-a-uuid/complete",
+      "/api/reviewer/executions/123e4567-e89b-12d3-a456-426614174000/complete/extra",
+      "/api/reviewer/executions/123e4567-e89b-12d3-a456-426614174000%2fcomplete",
     ]) {
       assert.equal(isPublicPath(pathname), false, pathname);
     }

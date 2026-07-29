@@ -59,8 +59,8 @@ test("fresh schema exposes the additive Project Loops V2 core contract", async (
     loop_stages: ["id", "plan_revision_id", "key", "title", "description", "position", "status", "created_at", "updated_at"],
     loop_tasks: ["id", "stage_id", "key", "title", "description", "position", "status", "assignee_agent", "metadata", "created_at", "updated_at"],
     loop_task_dependencies: ["task_id", "depends_on_task_id", "dependency_type", "created_at"],
-    loop_task_runs: ["id", "task_id", "work_item_id", "execution_attempt_id", "run_role", "quality_cycle", "attempt_number", "status", "started_at", "finished_at", "error", "output", "created_at", "updated_at"],
-    loop_task_reviews: ["id", "task_id", "task_run_id", "status", "reviewer", "feedback", "decided_at", "created_at", "updated_at"],
+    loop_task_runs: ["id", "task_id", "work_item_id", "execution_attempt_id", "run_role", "quality_cycle", "attempt_number", "status", "started_at", "finished_at", "error", "output", "created_at", "updated_at", "server_session_id", "artifact_sha", "target_run_id", "target_sha", "repository_id", "base_sha"],
+    loop_task_reviews: ["id", "task_id", "task_run_id", "status", "reviewer", "feedback", "decided_at", "created_at", "updated_at", "review_run_id", "quality_cycle", "reviewed_sha", "reviewer_session_id", "findings", "decision_id"],
     loop_evidence: ["id", "task_id", "task_run_id", "kind", "uri", "content", "metadata", "created_at"],
   };
   for (const [table, expected] of Object.entries(requiredColumns)) {
@@ -386,7 +386,7 @@ test("V2 graph rejects cross-loop current revisions, cross-revision edges, cycle
     for (const table of ["loop_task_reviews", "loop_evidence"]) {
       await client.query(`savepoint mismatched_${table}`);
       const sql = table === "loop_task_reviews"
-        ? `insert into public.${table} (task_id, task_run_id, status) values ($1, $2, 'pending')`
+        ? `insert into public.${table} (task_id, task_run_id, status, reviewed_sha) values ($1, $2, 'pending', '0000000000000000000000000000000000000000')`
         : `insert into public.${table} (task_id, task_run_id, kind, content) values ($1, $2, 'artifact', 'x')`;
       await assert.rejects(() => client.query(sql, [ids.taskA1, ids.runB]), (error) => error.code === "23503");
       await client.query(`rollback to savepoint mismatched_${table}`);

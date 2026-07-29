@@ -59,6 +59,8 @@ export async function PATCH(
     const statusCode = message === "empty_work_item_patch"
       ? 400
       : message === "stale_execution_attempt" || message === "terminal_status_conflict"
+          || message === "fresh_review_controlled_payload_mutation"
+          || message === "fresh_review_dedicated_reviewer_required"
         ? 409
         : 500;
     return NextResponse.json({ error: message }, { status: statusCode });

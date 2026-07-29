@@ -27,6 +27,12 @@ const WORK_ITEM_COLUMNS = `
   payload
 `;
 
+const FRESH_REVIEW_CONTROLLED_PAYLOAD_KEYS = new Set([
+  "dispatch_session_id", "dispatch_session_key", "runtime_contract", "source_loop_id", "loop_task_id",
+  "task_run_id", "run_role", "quality_cycle", "target_run_id", "target_sha", "execution_attempt_id",
+  "plan_revision_id", "plan_hash",
+]);
+
 function jsonValuesEqual(left: unknown, right: unknown): boolean {
   if (Object.is(left, right)) return true;
   if (Array.isArray(left) || Array.isArray(right)) {
@@ -162,6 +168,12 @@ export async function patchAgentWorkItemWithCompletion(id: string, body: JsonRec
     const payloadIncrement = body.payload_increment && typeof body.payload_increment === "object" && !Array.isArray(body.payload_increment)
       ? body.payload_increment as JsonRecord
       : null;
+    if (existingPayload.runtime_contract === "fresh_review_v1") {
+      const attemptedKeys = [...Object.keys(payloadPatch || {}), ...Object.keys(payloadIncrement || {})];
+      if (attemptedKeys.some((key) => FRESH_REVIEW_CONTROLLED_PAYLOAD_KEYS.has(key))) {
+        throw new Error("fresh_review_controlled_payload_mutation");
+      }
+    }
 
     const completionTime = new Date();
     const updates: Record<string, unknown> = {};
@@ -182,7 +194,11 @@ export async function patchAgentWorkItemWithCompletion(id: string, body: JsonRec
     }
 
     let nextPayload: JsonRecord | null = null;
-    if (body.output !== undefined) nextPayload = { ...(existing.payload || {}), output: body.output };
+    // Fresh-review output (including repository_path) belongs only to the
+    // immutable run evidence, never to the mutable/UI-facing work payload.
+    if (body.output !== undefined && existingPayload.runtime_contract !== "fresh_review_v1") {
+      nextPayload = { ...(existing.payload || {}), output: body.output };
+    }
     if (payloadPatch) nextPayload = { ...(existing.payload || {}), ...(nextPayload || {}), ...payloadPatch };
     if (payloadIncrement) {
       const incrementedPayload: JsonRecord = { ...(existing.payload || {}), ...(nextPayload || {}) };

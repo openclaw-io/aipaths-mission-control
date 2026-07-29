@@ -9,6 +9,7 @@ import {
   type YouTubeGateKey,
   type YouTubeGateStatus,
 } from "@/lib/youtube-pipeline";
+import { verifyRepositoryCommit } from "@/lib/work-items/git-artifact";
 
 export type JsonRecord = Record<string, unknown>;
 
@@ -80,6 +81,18 @@ function completePlan(plan: unknown) {
   ));
 }
 
+const SHA_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function usefulFindings(findings: unknown[], feedback: string | null) {
+  if (feedback) return findings.length > 0;
+  return findings.some((finding) => {
+    if (typeof finding === "string") return finding.trim().length > 0;
+    if (!finding || typeof finding !== "object" || Array.isArray(finding)) return false;
+    return Object.values(finding as JsonRecord).some((value) => typeof value === "string" && value.trim().length > 0);
+  });
+}
+
 async function reconcileV2TaskExecution(
   client: CompletionQueryClient,
   workItem: WorkItemRow,
@@ -88,14 +101,26 @@ async function reconcileV2TaskExecution(
   const linked = await client.query<{
     loop_id: string; loop_status: string; workflow_version: number; current_plan_revision_id: string;
     approval_scope: Record<string, unknown>; revision_status: string; content_hash: string | null;
-    task_id: string; task_status: string; stage_id: string; plan_revision_id: string;
-    run_id: string; run_status: string; execution_attempt_id: string | null;
+    task_id: string; task_status: string; task_title: string; task_description: string | null;
+    stage_id: string; plan_revision_id: string; run_id: string; run_status: string;
+    run_role: "implementation" | "review"; quality_cycle: number; execution_attempt_id: string | null;
+    server_session_id: string | null; target_run_id: string | null; target_sha: string | null;
+    repository_id: string; base_sha: string; prior_artifact_sha: string | null; prior_repository_id: string | null;
+    repository_key: string; canonical_root: string; git_common_dir: string; object_format: "sha1" | "sha256"; repository_enabled: boolean;
+    priority: string | null;
   }>(
-    `select l.id loop_id,l.status loop_status,l.workflow_version,l.current_plan_revision_id,l.approval_scope,
-            pr.status revision_status,pr.content_hash,t.id task_id,t.status task_status,s.id stage_id,s.plan_revision_id,
-            r.id run_id,r.status run_status,r.execution_attempt_id
+    `select l.id loop_id,l.status loop_status,l.workflow_version,l.current_plan_revision_id,l.approval_scope,l.priority,
+            pr.status revision_status,pr.content_hash,t.id task_id,t.status task_status,t.title task_title,t.description task_description,
+            s.id stage_id,s.plan_revision_id,r.id run_id,r.status run_status,r.run_role,r.quality_cycle,
+            r.execution_attempt_id,r.server_session_id,r.target_run_id,r.target_sha,r.repository_id,r.base_sha,
+            (select prev.artifact_sha from loop_task_runs prev where prev.task_id=r.task_id
+              and prev.run_role='implementation' and prev.quality_cycle=r.quality_cycle-1) prior_artifact_sha,
+            (select prev.repository_id from loop_task_runs prev where prev.task_id=r.task_id
+              and prev.run_role='implementation' and prev.quality_cycle=r.quality_cycle-1) prior_repository_id,
+            repo.key repository_key,repo.canonical_root,repo.git_common_dir,repo.object_format,repo.enabled repository_enabled
        from loop_work_items lwi join loops l on l.id=lwi.loop_id
        join loop_task_runs r on r.work_item_id=lwi.work_item_id
+       join review_repositories repo on repo.id=r.repository_id
        join loop_tasks t on t.id=r.task_id join loop_stages s on s.id=t.stage_id
        join loop_plan_revisions pr on pr.id=s.plan_revision_id and pr.loop_id=l.id
       where lwi.work_item_id=$1 and lwi.relation_type='task_execution'
@@ -127,35 +152,38 @@ async function reconcileV2TaskExecution(
   if (!item.execution_attempt_id || payload.execution_attempt_id !== item.execution_attempt_id
     || readString(body.execution_attempt_id) !== item.execution_attempt_id
     || workItem.source_type !== "loop" || workItem.source_id !== item.task_id
-    || payload.source_loop_id !== item.loop_id || payload.loop_task_id !== item.task_id) {
+    || payload.source_loop_id !== item.loop_id || payload.loop_task_id !== item.task_id
+    || payload.runtime_contract !== "fresh_review_v1" || payload.run_role !== item.run_role
+    || Number(payload.quality_cycle) !== item.quality_cycle) {
     throw new Error("v2_task_execution_identity_mismatch");
   }
+  const dispatchSessionId = readString(payload.dispatch_session_id);
+  if (item.run_role === "review") throw new Error("fresh_review_dedicated_reviewer_required");
   const now = new Date().toISOString();
   const actor = readString(workItem.owner_agent) || "work-item-completion";
 
   if (body.status === "in_progress") {
-    if (item.loop_status !== "in_progress" || item.task_status !== "in_progress" || item.run_status !== "queued") {
+    const expectedTaskStatus = "in_progress";
+    if (item.loop_status !== "in_progress" || item.task_status !== expectedTaskStatus || item.run_status !== "queued") {
       throw new Error("v2_task_start_state_conflict");
     }
     await client.query(
       "update loop_task_runs set status='running',started_at=coalesce(started_at,$2),updated_at=$2 where id=$1 and status='queued'",
       [item.run_id, now],
     );
-    return { applied: true, effect: "loop_task_started", loopId: item.loop_id };
+    return { applied: true, effect: `loop_task_${item.run_role}_started`, loopId: item.loop_id };
   }
 
   if (body.status === "failed" || body.status === "canceled") {
     const runStatus = body.status === "canceled" ? "cancelled" : "failed";
-    if (item.loop_status !== "in_progress" || item.task_status !== "in_progress"
-      || !["queued", "running"].includes(item.run_status)) {
-      throw new Error("v2_task_terminal_state_conflict");
-    }
+    if (item.loop_status !== "in_progress" || !["in_progress", "review_pending"].includes(item.task_status)
+      || !["queued", "running"].includes(item.run_status)) throw new Error("v2_task_terminal_state_conflict");
     await client.query(
       `update loop_task_runs set status=$2,started_at=coalesce(started_at,$3),finished_at=$3,
               error=$4,output=$5::jsonb,updated_at=$3 where id=$1 and status in ('queued','running')`,
       [item.run_id, runStatus, now, readString(body.result), JSON.stringify(asRecord(body.output))],
     );
-    await client.query("update loop_tasks set status='blocked',updated_at=$2 where id=$1 and status='in_progress'", [item.task_id, now]);
+    await client.query("update loop_tasks set status='blocked',updated_at=$2 where id=$1", [item.task_id, now]);
     await client.query("update loop_stages set status='blocked',updated_at=$2 where id=$1", [item.stage_id, now]);
     await client.query("update loops set status='blocked',updated_at=$2,row_version=row_version+1 where id=$1 and status='in_progress'", [item.loop_id, now]);
     await client.query(
@@ -163,61 +191,211 @@ async function reconcileV2TaskExecution(
        values ($1,$2,$3,'blocked',$4,$5::jsonb,$6)`,
       [item.loop_id, `loop.task_${body.status}`, item.loop_status, actor,
         JSON.stringify({ task_id: item.task_id, task_run_id: item.run_id, work_item_id: workItem.id,
-          execution_attempt_id: item.execution_attempt_id, work_item_status: body.status }), now],
+          execution_attempt_id: item.execution_attempt_id, run_role: item.run_role, quality_cycle: item.quality_cycle }), now],
     );
     return { applied: true, effect: `loop_task_${body.status}`, loopId: item.loop_id };
   }
 
   if (body.status !== "done") throw new Error("v2_task_status_transition_conflict");
-  if (item.loop_status !== "in_progress" || item.task_status !== "in_progress"
-    || !["queued", "running"].includes(item.run_status)) throw new Error("v2_task_completion_state_conflict");
-  const output = { ...asRecord(body.output), ...(body.result !== undefined ? { result: body.result } : {}) };
+  if (item.loop_status !== "in_progress" || !["queued", "running"].includes(item.run_status)) {
+    throw new Error("v2_task_completion_state_conflict");
+  }
+  if (!dispatchSessionId || !UUID_PATTERN.test(dispatchSessionId)) throw new Error("fresh_review_dispatch_session_required");
+  const output: JsonRecord = { ...asRecord(body.output), ...(body.result !== undefined ? { result: body.result } : {}) };
+
+  if (item.run_role === "implementation") {
+    if (item.task_status !== "in_progress") throw new Error("v2_task_completion_state_conflict");
+    const artifactSha = readString(output.head_sha);
+    if (!artifactSha || !SHA_PATTERN.test(artifactSha)) throw new Error("implementation_head_sha_required");
+    const repositoryPath = readString(output.repository_path);
+    if (!repositoryPath) throw new Error("implementation_repository_path_required");
+    if (item.quality_cycle > 1 && (!item.prior_artifact_sha || item.prior_repository_id !== item.repository_id)) {
+      throw new Error("implementation_rework_repository_identity_conflict");
+    }
+    await verifyRepositoryCommit(repositoryPath, artifactSha, {
+      id: item.repository_id,
+      canonical_root: item.canonical_root,
+      git_common_dir: item.git_common_dir,
+      object_format: item.object_format,
+      enabled: item.repository_enabled,
+    }, item.base_sha, item.quality_cycle > 1 ? (item.prior_artifact_sha || undefined) : undefined);
+    delete output.repository_path;
+    const completedRun = await client.query(
+      `update loop_task_runs set status='succeeded',started_at=coalesce(started_at,$2),finished_at=$2,
+              error=null,output=$3::jsonb,artifact_sha=$4,server_session_id=$5,updated_at=$2
+        where id=$1 and status in ('queued','running')`,
+      [item.run_id, now, JSON.stringify(output), artifactSha, dispatchSessionId],
+    );
+    if (completedRun.rowCount !== 1) throw new Error("v2_task_completion_state_conflict");
+    const token = (await client.query<{ id: string }>("select gen_random_uuid() id")).rows[0]?.id;
+    if (!token) throw new Error("review_execution_token_failed");
+    const reviewWork = await client.query<{ id: string }>(
+      `insert into work_items(loop_id,parent_id,kind,source_type,source_id,title,instruction,status,priority,owner_agent,requested_by,payload)
+       values ($1,null,'task','loop',$2,$3,$4,'ready',$5,$6,'system',$7::jsonb) returning id`,
+      [item.loop_id, item.task_id, `Fresh review: ${item.task_title}`,
+        `Fresh read-only review for quality cycle ${item.quality_cycle}/3 of exact SHA ${artifactSha}. This work item is dispatched only by the dedicated strongly isolated reviewer runner. Generic agent notification, PATCH completion, and requeue are forbidden.`,
+        item.priority || "medium", actor, JSON.stringify({
+          materialized_from_loop: true, source_loop_id: item.loop_id, loop_task_id: item.task_id,
+          plan_revision_id: item.plan_revision_id, plan_hash: item.content_hash, relation_type: "task_execution",
+          runtime_contract: "fresh_review_v1", run_role: "review", quality_cycle: item.quality_cycle,
+          target_run_id: item.run_id, target_sha: artifactSha, execution_attempt_id: token,
+          execution_generation: 1, dispatch_state: "ready",
+        })],
+    );
+    const reviewWorkId = reviewWork.rows[0]?.id;
+    if (!reviewWorkId) throw new Error("review_work_item_insert_failed");
+    await client.query("insert into loop_work_items(loop_id,work_item_id,relation_type) values ($1,$2,'task_execution')", [item.loop_id, reviewWorkId]);
+    const reviewRun = await client.query<{ id: string }>(
+      `insert into loop_task_runs(task_id,work_item_id,execution_attempt_id,run_role,quality_cycle,attempt_number,status,target_run_id,target_sha,repository_id,base_sha,output,updated_at)
+       values ($1,$2,$3,'review',$4,(select coalesce(max(attempt_number),0)+1 from loop_task_runs where task_id=$1),'queued',$5,$6,$7,$8,'{}'::jsonb,$9) returning id`,
+      [item.task_id, reviewWorkId, token, item.quality_cycle, item.run_id, artifactSha, item.repository_id, item.base_sha, now],
+    );
+    await client.query(
+      `insert into loop_task_reviews(task_id,task_run_id,review_run_id,quality_cycle,status,reviewed_sha,findings,updated_at)
+       values ($1,$2,$3,$4,'pending',$5,'[]'::jsonb,$6)`,
+      [item.task_id, item.run_id, reviewRun.rows[0]?.id, item.quality_cycle, artifactSha, now],
+    );
+    await client.query("update loop_tasks set status='review_pending',updated_at=$2 where id=$1 and status='in_progress'", [item.task_id, now]);
+    await client.query(
+      `insert into loop_events(loop_id,event_type,from_status,to_status,actor,payload,created_at)
+       values ($1,'loop.task_review_pending','in_progress','in_progress',$2,$3::jsonb,$4)`,
+      [item.loop_id, actor, JSON.stringify({ task_id: item.task_id, implementation_run_id: item.run_id,
+        review_run_id: reviewRun.rows[0]?.id, quality_cycle: item.quality_cycle, artifact_sha: artifactSha }), now],
+    );
+    return { applied: true, effect: "loop_task_review_pending", loopId: item.loop_id };
+  }
+
+  if (item.task_status !== "review_pending" || !item.target_run_id || !item.target_sha) {
+    throw new Error("v2_task_completion_state_conflict");
+  }
+  const target = (await client.query<{ server_session_id: string | null; artifact_sha: string | null; status: string; run_role: string }>(
+    "select server_session_id,artifact_sha,status,run_role from loop_task_runs where id=$1 and task_id=$2 for share",
+    [item.target_run_id, item.task_id],
+  )).rows[0];
+  if (!target || target.run_role !== "implementation" || target.status !== "succeeded"
+    || target.artifact_sha !== item.target_sha) throw new Error("fresh_review_target_stale");
+  if (!target.server_session_id || target.server_session_id === dispatchSessionId) throw new Error("fresh_review_session_conflict");
+  const pendingReviews = await client.query<{
+    id: string; task_run_id: string | null; review_run_id: string | null; quality_cycle: number | null;
+    reviewed_sha: string | null;
+  }>(
+    `select id,task_run_id,review_run_id,quality_cycle,reviewed_sha
+       from loop_task_reviews where review_run_id=$1 and task_id=$2 and status='pending' for update`,
+    [item.run_id, item.task_id],
+  );
+  if (pendingReviews.rows.length !== 1) throw new Error("fresh_review_pending_row_conflict");
+  const pendingReview = pendingReviews.rows[0];
+  if (pendingReview.task_run_id !== item.target_run_id || pendingReview.review_run_id !== item.run_id
+    || pendingReview.quality_cycle !== item.quality_cycle || pendingReview.reviewed_sha !== item.target_sha) {
+    throw new Error("fresh_review_pending_row_conflict");
+  }
+  const verdict = readString(output.verdict);
+  const reviewedSha = readString(output.reviewed_sha);
+  const findings = Array.isArray(output.findings) ? output.findings : null;
+  const feedback = readString(output.feedback) || readString(body.result);
+  if (!verdict || !["approved", "changes_requested"].includes(verdict)) throw new Error("review_verdict_invalid");
+  if (!reviewedSha || reviewedSha !== item.target_sha) throw new Error("reviewed_sha_mismatch");
+  if (!findings) throw new Error("review_findings_array_required");
+  if (verdict === "changes_requested" && !usefulFindings(findings, feedback)) throw new Error("review_changes_feedback_required");
+
+  const completedReviewRun = await client.query(
+    `update loop_task_runs set status='succeeded',started_at=coalesce(started_at,$2),finished_at=$2,error=null,
+            output=$3::jsonb,server_session_id=$4::uuid,updated_at=$2 where id=$1 and status in ('queued','running')`,
+    [item.run_id, now, JSON.stringify(output), dispatchSessionId],
+  );
+  if (completedReviewRun.rowCount !== 1) throw new Error("fresh_review_run_concurrent_conflict");
+  const decidedReview = await client.query(
+    `update loop_task_reviews set status=$2,reviewer=$3,feedback=$4,decided_at=$5,reviewed_sha=$6,
+            reviewer_session_id=$7::uuid,findings=$8::jsonb,decision_id=gen_random_uuid(),updated_at=$5
+      where review_run_id=$1 and task_id=$9 and status='pending'`,
+    [item.run_id, verdict, actor, feedback, now, reviewedSha, dispatchSessionId, JSON.stringify(findings), item.task_id],
+  );
+  if (decidedReview.rowCount !== 1) throw new Error("fresh_review_pending_row_conflict");
+
+  if (verdict === "approved") {
+    await client.query("update loop_tasks set status='completed',updated_at=$2 where id=$1 and status='review_pending'", [item.task_id, now]);
+    const stageAggregate = await client.query<{ complete: boolean }>(
+      "select bool_and(status in ('completed','skipped')) complete from loop_tasks where stage_id=$1", [item.stage_id],
+    );
+    await client.query("update loop_stages set status=$2,updated_at=$3 where id=$1", [item.stage_id, stageAggregate.rows[0]?.complete ? "completed" : "in_progress", now]);
+    await client.query(
+      `update loop_tasks candidate set status='ready',updated_at=$2 from loop_stages stage
+       where candidate.stage_id=stage.id and stage.plan_revision_id=$1 and candidate.status='pending'
+         and not exists (select 1 from loop_task_dependencies d join loop_tasks dependency on dependency.id=d.depends_on_task_id
+           where d.task_id=candidate.id and d.dependency_type='hard' and dependency.status<>'completed')`,
+      [item.plan_revision_id, now],
+    );
+    const aggregate = (await client.query<{ complete: boolean; active_runs: number; unapproved: number }>(
+      `select bool_and(t.status in ('completed','skipped')) complete,
+              count(r.id) filter (where r.status in ('queued','running'))::int active_runs,
+              count(*) filter (where t.status='completed' and not exists (
+                select 1 from loop_task_runs impl join loop_task_reviews review on review.task_run_id=impl.id
+                join loop_task_runs rr on rr.id=review.review_run_id and rr.task_id=t.id
+                where impl.task_id=t.id and impl.run_role='implementation' and impl.status='succeeded'
+                  and impl.quality_cycle=(select max(x.quality_cycle) from loop_task_runs x where x.task_id=t.id and x.run_role='implementation')
+                  and impl.artifact_sha is not null and impl.server_session_id is not null
+                  and review.status='approved' and review.reviewed_sha=impl.artifact_sha
+                  and review.reviewer_session_id is distinct from impl.server_session_id and rr.status='succeeded'
+              ))::int unapproved
+         from loop_tasks t join loop_stages s on s.id=t.stage_id left join loop_task_runs r on r.task_id=t.id
+        where s.plan_revision_id=$1`, [item.plan_revision_id],
+    )).rows[0];
+    const nextStatus = aggregate?.complete && aggregate.active_runs === 0 && aggregate.unapproved === 0 ? "in_review" : "in_progress";
+    await client.query("update loops set status=$2,updated_at=$3,row_version=row_version+1 where id=$1 and status='in_progress'", [item.loop_id, nextStatus, now]);
+    await client.query(
+      `insert into loop_events(loop_id,event_type,from_status,to_status,actor,payload,created_at)
+       values ($1,'loop.task_review_approved','in_progress',$2,$3,$4::jsonb,$5)`,
+      [item.loop_id, nextStatus, actor, JSON.stringify({ task_id: item.task_id, review_run_id: item.run_id,
+        implementation_run_id: item.target_run_id, quality_cycle: item.quality_cycle, reviewed_sha: reviewedSha }), now],
+    );
+    return { applied: true, effect: "loop_task_review_approved", loopId: item.loop_id };
+  }
+
+  if (item.quality_cycle === 3) {
+    await client.query("update loop_tasks set status='blocked',updated_at=$2 where id=$1 and status='review_pending'", [item.task_id, now]);
+    await client.query("update loop_stages set status='blocked',updated_at=$2 where id=$1", [item.stage_id, now]);
+    await client.query("update loops set status='blocked',updated_at=$2,row_version=row_version+1 where id=$1 and status='in_progress'", [item.loop_id, now]);
+    await client.query(
+      `insert into loop_events(loop_id,event_type,from_status,to_status,actor,payload,created_at)
+       values ($1,'loop.quality_cycles_exhausted','in_progress','blocked',$2,$3::jsonb,$4)`,
+      [item.loop_id, actor, JSON.stringify({ task_id: item.task_id, quality_cycle: 3, reviewed_sha: reviewedSha,
+        findings_count: findings.length }), now],
+    );
+    return { applied: true, effect: "loop_quality_cycles_exhausted", loopId: item.loop_id };
+  }
+
+  await client.query("update loop_tasks set status='rework_required',updated_at=$2 where id=$1 and status='review_pending'", [item.task_id, now]);
+  const token = (await client.query<{ id: string }>("select gen_random_uuid() id")).rows[0]?.id;
+  const nextCycle = item.quality_cycle + 1;
+  const implementationWork = await client.query<{ id: string }>(
+    `insert into work_items(loop_id,parent_id,kind,source_type,source_id,title,instruction,status,priority,owner_agent,requested_by,payload)
+     values ($1,null,'task','loop',$2,$3,$4,'ready',$5,$6,'system',$7::jsonb) returning id`,
+    [item.loop_id, item.task_id, `Rework project task: ${item.task_title}`,
+      `Quality cycle ${nextCycle}/3 rework for ${item.task_title}. Address the prior review feedback and findings, implement the task, run the required checks, and complete with output.head_sha for the new exact artifact.\n\nFeedback: ${feedback || "See findings."}\nFindings: ${JSON.stringify(findings)}`,
+      item.priority || "medium", actor, JSON.stringify({
+        materialized_from_loop: true, source_loop_id: item.loop_id, loop_task_id: item.task_id,
+        plan_revision_id: item.plan_revision_id, plan_hash: item.content_hash, relation_type: "task_execution",
+        runtime_contract: "fresh_review_v1", run_role: "implementation", quality_cycle: nextCycle,
+        previous_review_run_id: item.run_id, execution_attempt_id: token, execution_generation: 1, dispatch_state: "ready",
+      })],
+  );
+  const implementationWorkId = implementationWork.rows[0]?.id;
+  if (!implementationWorkId || !token) throw new Error("rework_work_item_insert_failed");
+  await client.query("insert into loop_work_items(loop_id,work_item_id,relation_type) values ($1,$2,'task_execution')", [item.loop_id, implementationWorkId]);
   await client.query(
-    `update loop_task_runs set status='succeeded',started_at=coalesce(started_at,$2),finished_at=$2,
-            error=null,output=$3::jsonb,updated_at=$2 where id=$1 and status in ('queued','running')`,
-    [item.run_id, now, JSON.stringify(output)],
+    `insert into loop_task_runs(task_id,work_item_id,execution_attempt_id,run_role,quality_cycle,attempt_number,status,repository_id,base_sha,output,updated_at)
+     values ($1,$2,$3,'implementation',$4,(select coalesce(max(attempt_number),0)+1 from loop_task_runs where task_id=$1),'queued',$5,$6,'{}'::jsonb,$7)`,
+    [item.task_id, implementationWorkId, token, nextCycle, item.repository_id, item.base_sha, now],
   );
-  await client.query("update loop_tasks set status='completed',updated_at=$2 where id=$1 and status='in_progress'", [item.task_id, now]);
-  const stageAggregate = await client.query<{ complete: boolean }>(
-    `select bool_and(status in ('completed','skipped')) complete from loop_tasks where stage_id=$1`,
-    [item.stage_id],
-  );
-  await client.query("update loop_stages set status=$2,updated_at=$3 where id=$1", [
-    item.stage_id, stageAggregate.rows[0]?.complete ? "completed" : "in_progress", now,
-  ]);
-  await client.query(
-    `update loop_tasks candidate set status='ready',updated_at=$2
-      from loop_stages stage
-     where candidate.stage_id=stage.id and stage.plan_revision_id=$1 and candidate.status='pending'
-       and not exists (
-         select 1 from loop_task_dependencies d join loop_tasks dependency on dependency.id=d.depends_on_task_id
-         where d.task_id=candidate.id and d.dependency_type='hard' and dependency.status <> 'completed'
-       )`,
-    [item.plan_revision_id, now],
-  );
-  const projectAggregate = await client.query<{ complete: boolean; active_runs: number; extra_runs: number }>(
-    `select bool_and(t.status in ('completed','skipped')) complete,
-            count(r.id) filter (where r.status in ('queued','running'))::int active_runs,
-            (count(r.id)-count(distinct t.id) filter (where t.status='completed'))::int extra_runs
-       from loop_tasks t join loop_stages s on s.id=t.stage_id
-       left join loop_task_runs r on r.task_id=t.id where s.plan_revision_id=$1`,
-    [item.plan_revision_id],
-  );
-  const aggregate = projectAggregate.rows[0];
-  const nextStatus = aggregate?.complete && aggregate.active_runs === 0 && aggregate.extra_runs === 0
-    ? "in_review" : "in_progress";
-  await client.query(
-    "update loops set status=$2,updated_at=$3,row_version=row_version+1 where id=$1 and status='in_progress'",
-    [item.loop_id, nextStatus, now],
-  );
+  await client.query("update loop_tasks set status='in_progress',updated_at=$2 where id=$1 and status='rework_required'", [item.task_id, now]);
+  await client.query("update loop_stages set status='in_progress',updated_at=$2 where id=$1", [item.stage_id, now]);
   await client.query(
     `insert into loop_events(loop_id,event_type,from_status,to_status,actor,payload,created_at)
-     values ($1,'loop.task_completed',$2,$3,$4,$5::jsonb,$6)`,
-    [item.loop_id, item.loop_status, nextStatus, actor,
-      JSON.stringify({ task_id: item.task_id, task_run_id: item.run_id, work_item_id: workItem.id,
-        execution_attempt_id: item.execution_attempt_id }), now],
+     values ($1,'loop.task_rework_started','in_progress','in_progress',$2,$3::jsonb,$4)`,
+    [item.loop_id, actor, JSON.stringify({ task_id: item.task_id, previous_review_run_id: item.run_id,
+      quality_cycle: nextCycle, findings_count: findings.length, work_item_id: implementationWorkId }), now],
   );
-  return { applied: true, effect: "loop_task_completed", loopId: item.loop_id };
+  return { applied: true, effect: "loop_task_rework_started", loopId: item.loop_id };
 }
 
 async function reconcilePrimaryLoopCompletion(
@@ -674,7 +852,9 @@ export async function orchestrateWorkItemCompletion(
   input: CompletionOrchestrationInput,
 ) {
   const { existing, updated, body, publicationVerification } = input;
-  const v2TaskExecution = await reconcileV2TaskExecution(client, updated, body);
+  // Runtime identity comes from the locked persisted row, never from an
+  // agent-mutated payload assembled earlier in this transaction.
+  const v2TaskExecution = await reconcileV2TaskExecution(client, existing, body);
   if (v2TaskExecution) return v2TaskExecution;
 
   // V1 primary_execution orchestration is intentionally unchanged below.

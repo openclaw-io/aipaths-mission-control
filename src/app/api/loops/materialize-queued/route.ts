@@ -3,6 +3,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { query, withTransaction } from "@/lib/db/postgres";
 import { getExecutionWindowConfig, isExecutionWindowOpenNow } from "@/lib/execution-window";
 import { buildLoopExecutionInstruction, buildLoopTaskExecutionInstruction } from "@/lib/loops/execution-instruction";
+import { captureRegisteredRepositoryHead, type RegisteredRepository } from "@/lib/work-items/git-artifact";
 import {
   getPrimaryExecutionWorkItemLocal,
   isPrimaryExecutionOpen,
@@ -107,6 +108,16 @@ async function materializeV2Task(client: TransactionClient, candidate: LoopRow, 
   if (!loop.owner_agent || loop.owner_agent !== snapshotOwner) {
     return { action: "skipped" as const, reason: "owner_not_exact" };
   }
+  const snapshotRepository = asRecord(snapshot.repository);
+  const repositoryId = typeof snapshotRepository.id === "string" ? snapshotRepository.id : null;
+  const repositoryKey = typeof snapshotRepository.key === "string" ? snapshotRepository.key : null;
+  if (!repositoryId || !repositoryKey) return { action: "skipped" as const, reason: "approved_repository_missing" };
+  const repository = (await client.query<RegisteredRepository & { key: string }>(
+    `select id,key,canonical_root,git_common_dir,object_format,enabled from review_repositories where id=$1 and key=$2 and enabled=true for share`,
+    [repositoryId, repositoryKey],
+  )).rows[0];
+  if (!repository) return { action: "skipped" as const, reason: "approved_repository_disabled_or_changed" };
+  const repositoryHead = await captureRegisteredRepositoryHead(repository);
 
   await client.query(
     `select t.id from loop_tasks t join loop_stages s on s.id=t.stage_id
@@ -180,15 +191,16 @@ async function materializeV2Task(client: TransactionClient, candidate: LoopRow, 
     }), loop.priority || "medium", typeof snapshotTask.assignee_agent === "string" ? snapshotTask.assignee_agent : snapshotOwner,
     JSON.stringify({ materialized_from_loop: true, source_loop_id: loop.id, loop_task_id: eligible.id,
       loop_task_key: eligible.key, plan_revision_id: loop.current_plan_revision_id, plan_hash: revision.content_hash,
-      relation_type: "task_execution", execution_attempt_id: executionAttemptId, execution_generation: 1, dispatch_state: "ready" })],
+      relation_type: "task_execution", runtime_contract: "fresh_review_v1", run_role: "implementation", quality_cycle: 1,
+      execution_attempt_id: executionAttemptId, execution_generation: 1, dispatch_state: "ready" })],
   );
   const workItemId = work.rows[0]?.id;
   if (!workItemId) throw new Error("work_item_insert_failed");
   await client.query("insert into loop_work_items(loop_id,work_item_id,relation_type) values ($1,$2,'task_execution')", [loop.id, workItemId]);
   await client.query(
-    `insert into loop_task_runs(task_id,work_item_id,execution_attempt_id,run_role,quality_cycle,attempt_number,status,output,updated_at)
-     values ($1,$2,$3,'implementation',1,1,'queued','{}'::jsonb,$4)`,
-    [eligible.id, workItemId, executionAttemptId, now],
+    `insert into loop_task_runs(task_id,work_item_id,execution_attempt_id,run_role,quality_cycle,attempt_number,status,repository_id,base_sha,output,updated_at)
+     values ($1,$2,$3,'implementation',1,1,'queued',$4,$5,'{}'::jsonb,$6)`,
+    [eligible.id, workItemId, executionAttemptId, repository.id, repositoryHead.sha, now],
   );
   await client.query("update loop_tasks set status='in_progress',updated_at=$2 where id=$1 and status in ('pending','ready')", [eligible.id, now]);
   await client.query("update loop_stages set status='in_progress',updated_at=$2 where id=$1 and status in ('pending','ready','in_progress')", [eligible.stage_id, now]);

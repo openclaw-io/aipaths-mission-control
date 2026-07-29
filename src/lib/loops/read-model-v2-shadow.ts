@@ -3,6 +3,8 @@ export type WorkflowItemStatus =
   | "pending"
   | "ready"
   | "in_progress"
+  | "review_pending"
+  | "rework_required"
   | "blocked"
   | "completed"
   | "skipped"
@@ -61,6 +63,10 @@ export type ShadowRunRow = {
   id: string;
   task_id: string;
   status: string;
+  run_role?: "implementation" | "review";
+  quality_cycle?: number;
+  artifact_sha?: string | null;
+  target_sha?: string | null;
 };
 
 export type ShadowReviewRow = {
@@ -69,6 +75,9 @@ export type ShadowReviewRow = {
   task_run_id: string | null;
   task_run_owned?: boolean | null;
   status: string;
+  quality_cycle?: number | null;
+  reviewed_sha?: string | null;
+  findings_count?: number;
 };
 
 export type ShadowEvidenceRow = {
@@ -113,6 +122,13 @@ export type ShadowTask = {
   reviewStatuses: string[];
   evidenceCount: number;
   evidenceKinds: string[];
+  qualityCycle?: number;
+  qualityState?: "implementation" | "review" | "approved" | "blocked";
+  implementationStatus?: string | null;
+  reviewRunStatus?: string | null;
+  artifactSha?: string | null;
+  latestReviewStatus?: string | null;
+  findingsCount?: number;
 };
 
 export type ShadowStage = {
@@ -150,7 +166,7 @@ function comparePositionAndId(
 function normalizeLegacyStatus(status: string | undefined): WorkflowItemStatus {
   if (status === "done") return "completed";
   if (status === "cancelled" || status === "canceled") return "cancelled";
-  if (["pending", "ready", "in_progress", "blocked", "completed", "skipped"].includes(status || "")) {
+  if (["pending", "ready", "in_progress", "review_pending", "rework_required", "blocked", "completed", "skipped"].includes(status || "")) {
     return status as WorkflowItemStatus;
   }
   return "pending";
@@ -226,6 +242,7 @@ function projectV1(loop: ShadowLoopRow): LoopWorkflowShadow {
       reviewStatuses: [],
       evidenceCount: 0,
       evidenceKinds: [],
+
     };
   });
 
@@ -328,7 +345,25 @@ function projectV2(input: LoopWorkflowShadowInput): LoopWorkflowShadow {
       .filter((task) => task.stage_id === stage.id)
       .slice()
       .sort(comparePositionAndId)
-      .map((task) => ({
+      .map((task) => {
+        const taskRuns = input.runs.filter((run) => run.task_id === task.id);
+        const implementationRuns = taskRuns.filter((run) => (run.run_role ?? "implementation") === "implementation");
+        const latestImplementation = implementationRuns.slice().sort((left, right) =>
+          (right.quality_cycle ?? 1) - (left.quality_cycle ?? 1) || right.id.localeCompare(left.id)
+        )[0];
+        const qualityCycle = latestImplementation?.quality_cycle ?? 1;
+        const latestReviewRun = taskRuns.find((run) => run.run_role === "review" && (run.quality_cycle ?? 1) === qualityCycle);
+        const latestReview = input.reviews
+          .filter((review) => review.task_id === task.id && (review.quality_cycle ?? 1) === qualityCycle)
+          .sort((left, right) => right.id.localeCompare(left.id))[0];
+        const qualityState: ShadowTask["qualityState"] = task.status === "blocked"
+          ? "blocked"
+          : latestReview?.status === "approved"
+            ? "approved"
+            : latestReviewRun || task.status === "review_pending"
+              ? "review"
+              : "implementation";
+        return ({
         id: task.id,
         key: task.key,
         title: task.title,
@@ -341,12 +376,20 @@ function projectV2(input: LoopWorkflowShadowInput): LoopWorkflowShadow {
           .map((dependency) => dependency.depends_on_task_id)
           .sort(),
         runCount: runCounts.get(task.id) ?? 0,
-        runStatuses: input.runs.filter((run) => run.task_id === task.id).map((run) => run.status),
+        runStatuses: taskRuns.map((run) => run.status),
         reviewCount: reviewCounts.get(task.id) ?? 0,
         reviewStatuses: input.reviews.filter((review) => review.task_id === task.id).map((review) => review.status),
         evidenceCount: evidenceCounts.get(task.id) ?? 0,
         evidenceKinds: input.evidence.filter((item) => item.task_id === task.id).map((item) => item.kind),
-      })),
+        qualityCycle,
+        qualityState,
+        implementationStatus: latestImplementation?.status ?? null,
+        reviewRunStatus: latestReviewRun?.status ?? null,
+        artifactSha: latestImplementation?.artifact_sha ?? null,
+        latestReviewStatus: latestReview?.status ?? null,
+        findingsCount: latestReview?.findings_count ?? 0,
+      });
+      }),
   }));
 
   return {
