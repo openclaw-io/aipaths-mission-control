@@ -2,7 +2,6 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getLocalMissionControlUser, isLocalAuthDisabled } from "@/lib/auth/local";
 import { withTransaction } from "@/lib/db/postgres";
 import { createClient } from "@/lib/supabase/server";
-import { createServiceClient } from "@/lib/supabase/admin";
 
 export const dynamic = "force-dynamic";
 
@@ -32,25 +31,44 @@ export async function POST(
   const now = new Date().toISOString();
   const nextStatus = action === "rework" ? "planning" : queue ? "queued" : "approved";
 
+  // Approval writes must keep the Loop state and its event in one transaction.
+  // Supabase REST cannot provide that atomic boundary, so cloud mode fails
+  // closed rather than risking a state transition without coherent history.
+  if (!useLocalMode) {
+    return NextResponse.json({ error: "cloud_loop_approval_writes_not_supported" }, { status: 503 });
+  }
+
   if (useLocalMode) {
     const result = await withTransaction(async (client) => {
-      const loopRows = await client.query<{ id: string; status: string; approval_scope: Record<string, unknown> | null }>(
-        `select id, status, approval_scope from loops where id = $1 limit 1 for update`, [id],
+      const loopRows = await client.query<{ id: string; status: string; approval_scope: Record<string, unknown> | null; metadata: Record<string, unknown> | null }>(
+        `select id, status, approval_scope, metadata from loops where id = $1 limit 1 for update`, [id],
       );
       const loop = loopRows.rows[0];
       if (!loop) return { kind: "missing" as const };
       if (loop.status === nextStatus) return { kind: "replay" as const };
       const allowed = action === "rework"
         ? ["needs_approval", "approved", "queued"].includes(loop.status)
-        : loop.status === "needs_approval";
+        : loop.status === "needs_approval" || (queue && loop.status === "approved");
       if (!allowed) return { kind: "invalid" as const, status: loop.status };
 
       const approvalScope = action === "rework"
         ? { ...(loop.approval_scope || {}), approved: false, approved_by: null, approved_at: null }
         : { ...(loop.approval_scope || {}), approved: true, approved_by: actorIdentity, approved_at: now, can_execute_unattended: true };
+      const metadata = action === "rework"
+        ? {
+            ...(loop.metadata || {}),
+            plan_rework_context: {
+              status: "pending",
+              feedback: comment || null,
+              requested_at: now,
+              requested_by: actorIdentity,
+              source_status: loop.status,
+            },
+          }
+        : loop.metadata || {};
       await client.query(
-        `update loops set status = $1, approval_scope = $2::jsonb, last_approved_at = $3, updated_at = $3 where id = $4`,
-        [nextStatus, JSON.stringify(approvalScope), now, id],
+        `update loops set status = $1, approval_scope = $2::jsonb, metadata = $3::jsonb, last_approved_at = $4, updated_at = $4 where id = $5`,
+        [nextStatus, JSON.stringify(approvalScope), JSON.stringify(metadata), now, id],
       );
       await client.query(
         `insert into loop_events (loop_id, event_type, from_status, to_status, actor, payload, created_at)
@@ -64,68 +82,6 @@ export async function POST(
     return NextResponse.json({ ok: true, id, status: nextStatus });
   }
 
-  const supabase = createServiceClient();
-
-  const { data: loop, error: loadError } = await supabase
-    .from("loops")
-    .select("id, status, approval_scope")
-    .eq("id", id)
-    .maybeSingle();
-
-  if (loadError) {
-    return NextResponse.json({ error: loadError.message }, { status: 500 });
-  }
-
-  if (!loop) {
-    return NextResponse.json({ error: "Loop not found" }, { status: 404 });
-  }
-
-  const approvalScope = action === "rework"
-    ? {
-        ...(loop.approval_scope || {}),
-        approved: false,
-        approved_by: null,
-        approved_at: null,
-      }
-    : {
-        ...(loop.approval_scope || {}),
-        approved: true,
-        approved_by: actorIdentity,
-        approved_at: now,
-        can_execute_unattended: true,
-      };
-
-  const { error: updateError } = await supabase
-    .from("loops")
-    .update({
-      status: nextStatus,
-      approval_scope: approvalScope,
-      last_approved_at: now,
-      updated_at: now,
-    })
-    .eq("id", id);
-
-  if (updateError) {
-    return NextResponse.json({ error: updateError.message }, { status: 500 });
-  }
-
-  const { error: eventError } = await supabase.from("loop_events").insert({
-    loop_id: id,
-    event_type: action === "rework" ? "loop.plan_rework_requested" : queue ? "loop.queued" : "loop.approved",
-    from_status: loop.status,
-    to_status: nextStatus,
-    actor: actorIdentity,
-    payload: {
-      mode: "manual",
-      queue,
-      comment: comment || null,
-      action,
-    },
-  });
-
-  if (eventError) {
-    return NextResponse.json({ error: eventError.message }, { status: 500 });
-  }
-
-  return NextResponse.json({ ok: true, id, status: nextStatus });
+  // Defensive fallback if the local-mode predicate ever becomes unstable.
+  return NextResponse.json({ error: "cloud_loop_approval_writes_not_supported" }, { status: 503 });
 }

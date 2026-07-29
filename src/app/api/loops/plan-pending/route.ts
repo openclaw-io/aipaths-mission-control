@@ -85,6 +85,25 @@ function buildGenericPlan(summary: string): PlanStep[] {
   ];
 }
 
+function pendingPlanReworkContext(metadata: JsonObject) {
+  const context = metadata.plan_rework_context;
+  if (!context || typeof context !== "object" || Array.isArray(context)) return null;
+  return context.status === "pending" ? context as JsonObject : null;
+}
+
+function revisePlanForFeedback(plan: PlanStep[], feedback: string): PlanStep[] {
+  const reopened = plan.map((step) => ({ ...step, status: "pending" }));
+  return [
+    ...reopened,
+    {
+      id: `plan-rework-${reopened.length + 1}`,
+      title: "Address plan review feedback",
+      status: "pending",
+      notes: feedback || "Review and revise the plan based on the requester's change request.",
+    },
+  ];
+}
+
 function classifyIntent(input: string) {
   const lowered = input.toLowerCase();
 
@@ -209,6 +228,7 @@ export async function POST(request: NextRequest) {
     const hasMeaningfulSummary = cleanText(loop.summary).length > 0;
 
     if (alreadyNormalized && hasMeaningfulPlan) {
+      const planReworkContext = pendingPlanReworkContext(metadata);
       const clarificationHistory = Array.isArray(metadata.clarification_history)
         ? metadata.clarification_history
         : [];
@@ -227,16 +247,44 @@ export async function POST(request: NextRequest) {
       }
 
       const now = new Date().toISOString();
+      const reworkFeedback = planReworkContext && typeof planReworkContext.feedback === "string"
+        ? cleanText(planReworkContext.feedback)
+        : "";
+      const revisedPlan = planReworkContext
+        ? revisePlanForFeedback(loop.plan || [], reworkFeedback)
+        : null;
+      const revisedMetadata = planReworkContext
+        ? {
+            ...metadata,
+            plan_rework_context: {
+              ...planReworkContext,
+              status: "consumed",
+              consumed_at: now,
+              consumed_by: "loop-planner",
+            },
+          }
+        : null;
       try {
         const updated = await withTransaction(async (client) => {
-          const updateResult = await client.query(`
-            UPDATE public.loops
-               SET status = 'needs_approval',
-                   updated_at = $1::timestamptz
-             WHERE id = $2
-               AND status = 'planning'
-             RETURNING id
-          `, [now, loop.id]);
+          const updateResult = planReworkContext
+            ? await client.query(`
+                UPDATE public.loops
+                   SET status = 'needs_approval',
+                       plan = $1::jsonb,
+                       metadata = $2::jsonb,
+                       updated_at = $3::timestamptz
+                 WHERE id = $4
+                   AND status = 'planning'
+                 RETURNING id
+              `, [JSON.stringify(revisedPlan), JSON.stringify(revisedMetadata), now, loop.id])
+            : await client.query(`
+                UPDATE public.loops
+                   SET status = 'needs_approval',
+                       updated_at = $1::timestamptz
+                 WHERE id = $2
+                   AND status = 'planning'
+                 RETURNING id
+              `, [now, loop.id]);
           if (!updateResult.rows[0]) return false;
 
           await client.query(`
@@ -246,7 +294,9 @@ export async function POST(request: NextRequest) {
               ($1, 'loop.ready_for_approval', 'planning', 'needs_approval', 'loop-planner', $2::jsonb, $3::timestamptz)
           `, [
             loop.id,
-            JSON.stringify({ source: "explicit_plan_pending_promotion", guarded: true }),
+            JSON.stringify(planReworkContext
+              ? { source: "plan_rework_revision", guarded: true, feedback: reworkFeedback || null }
+              : { source: "explicit_plan_pending_promotion", guarded: true }),
             now,
           ]);
           return true;
@@ -254,7 +304,10 @@ export async function POST(request: NextRequest) {
 
         if (updated) {
           promoted++;
-          details.push({ loopId: loop.id, action: "already_planned_and_promoted" });
+          details.push({
+            loopId: loop.id,
+            action: planReworkContext ? "plan_rework_consumed_and_promoted" : "already_planned_and_promoted",
+          });
         } else {
           details.push({ loopId: loop.id, action: "skipped_status_changed" });
         }

@@ -14,6 +14,7 @@ type LoopInstructionContext = {
   summary?: string | null;
   description?: string | null;
   target_outcome?: string | null;
+  acceptance_criteria?: string[] | null;
   plan?: PlanStep[] | null;
   metadata?: {
     original_input?: unknown;
@@ -62,6 +63,7 @@ export function buildLoopWakeContext(loop: LoopInstructionContext) {
     listSection("Allowed actions", scope.allowed_actions),
     listSection("Forbidden actions", scope.forbidden_actions),
     scope.notes ? `Approval notes: ${scope.notes}` : null,
+    listSection("Acceptance criteria", loop.acceptance_criteria),
     clarificationContext(loop),
   ].filter((part): part is string => typeof part === "string").join("\n\n");
 }

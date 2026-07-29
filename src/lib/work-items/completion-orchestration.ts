@@ -142,9 +142,10 @@ async function reconcilePrimaryLoopCompletion(
   return { applied: true, effect: "loop_primary_execution_completed", loopId: loop.id };
 }
 
-async function reconcilePrimaryLoopCancellation(
+async function reconcilePrimaryLoopNeedsAttention(
   client: CompletionQueryClient,
   workItem: WorkItemRow,
+  terminalStatus: "failed" | "canceled",
 ) {
   const linkedLoop = await client.query<{ id: string; status: string }>(
     `SELECT l.id, l.status
@@ -160,6 +161,8 @@ async function reconcilePrimaryLoopCancellation(
   if (!loop) return { applied: false, reason: "not_loop_primary_execution" };
 
   const now = new Date().toISOString();
+  const eventType = `loop.primary_execution_${terminalStatus}`;
+  const reason = `primary_execution_${terminalStatus}_needs_attention`;
   await client.query(
     `UPDATE public.loops
         SET status = 'blocked', updated_at = $2::timestamptz
@@ -169,22 +172,23 @@ async function reconcilePrimaryLoopCancellation(
   await client.query(
     `INSERT INTO public.loop_events
        (loop_id, event_type, from_status, to_status, actor, payload, created_at)
-     VALUES ($1, 'loop.primary_execution_canceled', $2, 'blocked', $3, $4::jsonb, $5::timestamptz)`,
+     VALUES ($1, $2, $3, 'blocked', $4, $5::jsonb, $6::timestamptz)`,
     [
       loop.id,
+      eventType,
       loop.status,
       readString(workItem.owner_agent) || "work-item-completion",
       JSON.stringify({
-        reason: "primary_execution_canceled_needs_attention",
+        reason,
         work_item_id: workItem.id,
         relation_type: "primary_execution",
-        work_item_status: "canceled",
+        work_item_status: terminalStatus,
         dispatch_state: readString(asRecord(workItem.payload).dispatch_state),
       }),
       now,
     ],
   );
-  return { applied: true, effect: "loop_primary_execution_canceled", loopId: loop.id };
+  return { applied: true, effect: `loop_primary_execution_${terminalStatus}`, loopId: loop.id };
 }
 
 function resolvePipelineAction(workItem: WorkItemRow, pipelineItem: JsonRecord) {
@@ -531,7 +535,10 @@ export async function orchestrateWorkItemCompletion(
 ) {
   const { existing, updated, body, publicationVerification } = input;
   if (body.status === "canceled" && existing.status !== "canceled") {
-    return reconcilePrimaryLoopCancellation(client, updated);
+    return reconcilePrimaryLoopNeedsAttention(client, updated, "canceled");
+  }
+  if (body.status === "failed" && existing.status !== "failed") {
+    return reconcilePrimaryLoopNeedsAttention(client, updated, "failed");
   }
   if (body.status !== "done" || existing.status === "done") return { applied: false, reason: "not_a_new_completion" };
 

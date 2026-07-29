@@ -602,6 +602,56 @@ test("canceling a primary execution atomically closes dispatch and blocks its Lo
   }
 });
 
+test("failed primary execution atomically blocks its Loop for attention with a coherent event", async () => {
+  const loopId = randomUUID();
+  const workItemId = randomUUID();
+  const attemptId = randomUUID();
+  try {
+    await insertLoopGraph({
+      loopId,
+      workItemId,
+      plan: [{ id: "step-1", title: "Failed step", status: "in_progress" }],
+      payload: {
+        execution_attempt_id: attemptId,
+        execution_generation: 1,
+        dispatch_state: "claimed_by_agent",
+      },
+    });
+
+    await agentCompletion.patchAgentWorkItemWithCompletion(workItemId, {
+      status: "failed",
+      execution_attempt_id: attemptId,
+      payload_patch: { error: "execution exploded" },
+    });
+
+    const loop = (await pool.query("select status, plan from public.loops where id = $1", [loopId])).rows[0];
+    const work = (await pool.query(
+      "select status, completed_at, payload from public.work_items where id = $1",
+      [workItemId],
+    )).rows[0];
+    const events = await pool.query(
+      `select event_type, from_status, to_status, payload
+         from public.loop_events
+        where loop_id = $1 and event_type = 'loop.primary_execution_failed'`,
+      [loopId],
+    );
+
+    assert.equal(work.status, "failed");
+    assert.equal(work.payload.dispatch_state, "failed");
+    assert.equal(loop.status, "blocked");
+    assert.equal(loop.plan[0].status, "in_progress");
+    assert.equal(events.rowCount, 1);
+    assert.equal(events.rows[0].from_status, "in_progress");
+    assert.equal(events.rows[0].to_status, "blocked");
+    assert.equal(events.rows[0].payload.reason, "primary_execution_failed_needs_attention");
+    assert.equal(events.rows[0].payload.work_item_id, workItemId);
+    assert.equal(events.rows[0].payload.work_item_status, "failed");
+    assert.equal(events.rows[0].payload.dispatch_state, "failed");
+  } finally {
+    await cleanupLoopGraph(loopId, workItemId);
+  }
+});
+
 test("Loop review rejects approval and rework outside the valid in-review/done-primary matrix", async () => {
   const invalidCases = [
     { action: "approve_deliverable", loopStatus: "in_progress", primaryStatus: "done", error: "invalid_review_state" },
@@ -705,6 +755,41 @@ test("exact approve/request_changes review replays return 200 before the source-
     } finally {
       await cleanupLoopGraph(loopId, workItemId);
     }
+  }
+});
+
+test("request_changes explicitly reopens every non-empty V1 plan step when no deliverable-to-step mapping exists", async () => {
+  const loopId = randomUUID();
+  const workItemId = randomUUID();
+  try {
+    await insertLoopGraph({
+      loopId,
+      workItemId,
+      plan: [
+        { id: "step-1", title: "Implement", status: "done", notes: "keep implementation notes" },
+        { id: "step-2", title: "Validate", status: "done" },
+        { id: "placeholder", title: "   ", status: "done", notes: "empty placeholder is not reopened" },
+      ],
+      payload: { execution_attempt_id: randomUUID(), execution_generation: 1, dispatch_state: "completed" },
+    });
+    await pool.query("update public.loops set status = 'in_review' where id = $1", [loopId]);
+    await pool.query("update public.work_items set status = 'done', completed_at = now() where id = $1", [workItemId]);
+
+    const response = await reviewRoute.POST(
+      { json: async () => ({ action: "request_changes", feedback: "Revise the deliverable" }) },
+      { params: Promise.resolve({ id: loopId }) },
+    );
+
+    assert.equal(response.status, 200);
+    const loop = (await pool.query("select status, plan from public.loops where id = $1", [loopId])).rows[0];
+    assert.equal(loop.status, "in_progress");
+    assert.deepEqual(loop.plan, [
+      { id: "step-1", title: "Implement", status: "pending", notes: "keep implementation notes" },
+      { id: "step-2", title: "Validate", status: "pending" },
+      { id: "placeholder", title: "   ", status: "done", notes: "empty placeholder is not reopened" },
+    ]);
+  } finally {
+    await cleanupLoopGraph(loopId, workItemId);
   }
 });
 

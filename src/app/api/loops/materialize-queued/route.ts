@@ -32,6 +32,7 @@ type LoopRow = {
   priority: "high" | "medium" | "low" | null;
   owner_agent: string | null;
   target_outcome: string | null;
+  acceptance_criteria: string[] | null;
   plan: Array<{ title?: string; status?: string; notes?: string | null }> | null;
   clarification_questions: ClarificationQuestion[] | null;
   metadata: {
@@ -81,7 +82,7 @@ export async function POST(request: NextRequest) {
   }
 
   const { rows: loops } = await query(`
-    SELECT id,name,description,summary,status,priority,owner_agent,target_outcome,plan,clarification_questions,metadata,approval_scope,last_approved_at,updated_at
+    SELECT id,name,description,summary,status,priority,owner_agent,target_outcome,acceptance_criteria,plan,clarification_questions,metadata,approval_scope,last_approved_at,updated_at
     FROM public.loops
     WHERE status = 'queued'
     ORDER BY updated_at ASC

@@ -7,6 +7,17 @@ import { buildLoopReworkInstruction } from "@/lib/loops/execution-instruction";
 
 export const dynamic = "force-dynamic";
 
+function reopenV1PlanWithoutDeliverableMapping(
+  plan: Array<{ title?: string | null; status?: string | null; notes?: string | null }> | null,
+) {
+  if (!Array.isArray(plan)) return [];
+  return plan.map((step) => (
+    typeof step?.title === "string" && step.title.trim()
+      ? { ...step, status: "pending" }
+      : step
+  ));
+}
+
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -59,6 +70,7 @@ export async function POST(
       summary: string | null;
       description: string | null;
       target_outcome: string | null;
+      acceptance_criteria: string[] | null;
       plan: Array<{ title?: string | null; status?: string | null; notes?: string | null }> | null;
       metadata: Record<string, unknown> | null;
       approval_scope: {
@@ -76,7 +88,7 @@ export async function POST(
 
     const localResult = await withTransaction(async (client) => {
       const loopRes = await client.query<LocalLoop>(
-        `select id, status, name, summary, description, target_outcome, plan, metadata, approval_scope, owner_agent
+        `select id, status, name, summary, description, target_outcome, acceptance_criteria, plan, metadata, approval_scope, owner_agent
            from loops
           where id = $1
           limit 1
@@ -145,14 +157,35 @@ export async function POST(
         ],
       };
 
-      await client.query(
-        `update loops set status = $1, metadata = $2::jsonb, updated_at = $3 where id = $4`,
-        [transition.nextStatus, JSON.stringify(metadata), now, id],
-      );
+      const reopenedPlan = action === "request_changes"
+        ? reopenV1PlanWithoutDeliverableMapping(loop.plan)
+        : null;
+      const reopenedPlanSteps = reopenedPlan
+        ? reopenedPlan.filter((step, index) => step?.status === "pending" && loop.plan?.[index]?.status !== "pending").length
+        : 0;
+
+      if (reopenedPlan) {
+        await client.query(
+          `update loops set status = $1, metadata = $2::jsonb, plan = $3::jsonb, updated_at = $4 where id = $5`,
+          [transition.nextStatus, JSON.stringify(metadata), JSON.stringify(reopenedPlan), now, id],
+        );
+      } else {
+        await client.query(
+          `update loops set status = $1, metadata = $2::jsonb, updated_at = $3 where id = $4`,
+          [transition.nextStatus, JSON.stringify(metadata), now, id],
+        );
+      }
       await client.query(
         `insert into loop_events (loop_id, event_type, from_status, to_status, actor, payload, created_at)
          values ($1, $2, $3, $4, $5, $6::jsonb, $7)`,
-        [id, transition.eventType, loop.status, transition.nextStatus, actorIdentity, JSON.stringify({ action, feedback: feedback || null }), now],
+        [id, transition.eventType, loop.status, transition.nextStatus, actorIdentity, JSON.stringify({
+          action,
+          feedback: feedback || null,
+          ...(action === "request_changes" ? {
+            plan_reopen_policy: "all_non_empty_steps_v1_no_mapping",
+            reopened_plan_steps: reopenedPlanSteps,
+          } : {}),
+        }), now],
       );
 
       let workItemId: string | null = null;
