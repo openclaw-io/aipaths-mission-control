@@ -26,11 +26,20 @@ const PAGE_SIZE = 1000;
 const INSERT_CHUNK_SIZE = 200;
 const BASELINE_CONFIG_TABLES = new Set(["scheduler_config", "execution_window_config"]);
 
-// Closed dependency set, in parent-before-child insertion order.
+// Closed dependency set. Hierarchy parents precede children; the one intentional
+// cycle (loops.current_plan_revision_id -> loop_plan_revisions.id) is safe because
+// that nullable FK is INITIALLY DEFERRED and the whole import is transactional.
 export const TABLES = [
   { name: "pipeline_runs", orderBy: "id" },
   { name: "recurring_work_rules", orderBy: "created_at" },
   { name: "loops", orderBy: "created_at" },
+  { name: "loop_plan_revisions", orderBy: "created_at" },
+  { name: "loop_stages", orderBy: "created_at" },
+  { name: "loop_tasks", orderBy: "created_at" },
+  { name: "loop_task_dependencies", orderBy: "created_at" },
+  { name: "loop_task_runs", orderBy: "created_at" },
+  { name: "loop_task_reviews", orderBy: "created_at" },
+  { name: "loop_evidence", orderBy: "created_at" },
   { name: "pipeline_items", orderBy: "created_at" },
   { name: "ops_owned_videos", orderBy: "published_at" },
   { name: "intel_sources", orderBy: "id" },
@@ -65,6 +74,17 @@ const TABLE_NAMES = TABLES.map((table) => table.name);
 const TABLE_NAME_SET = new Set(TABLE_NAMES);
 
 export const REFERENCE_RULES = [
+  ["loops", "current_plan_revision_id", "loop_plan_revisions", "id"],
+  ["loop_plan_revisions", "loop_id", "loops", "id"],
+  ["loop_stages", "plan_revision_id", "loop_plan_revisions", "id"],
+  ["loop_tasks", "stage_id", "loop_stages", "id"],
+  ["loop_task_dependencies", "task_id", "loop_tasks", "id"],
+  ["loop_task_dependencies", "depends_on_task_id", "loop_tasks", "id"],
+  ["loop_task_runs", "task_id", "loop_tasks", "id"],
+  ["loop_task_reviews", "task_id", "loop_tasks", "id"],
+  ["loop_task_reviews", "task_run_id", "loop_task_runs", "id"],
+  ["loop_evidence", "task_id", "loop_tasks", "id"],
+  ["loop_evidence", "task_run_id", "loop_task_runs", "id"],
   ["work_items", "loop_id", "loops", "id"],
   ["work_items", "parent_id", "work_items", "id"],
   ["work_item_dependencies", "work_item_id", "work_items", "id"],
