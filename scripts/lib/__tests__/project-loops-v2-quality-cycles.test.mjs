@@ -99,6 +99,7 @@ const completion = transpileModule(resolve(repoRoot, "src/lib/work-items/complet
   "@/lib/youtube-pipeline": youtubePipeline,
   "@/lib/work-items/git-artifact": gitArtifact,
 });
+const { isTrustedImplementationDispatchSessionId } = completion;
 const agentCompletion = transpileModule(resolve(repoRoot, "src/lib/work-items/agent-completion-local.ts"), {
   "@/lib/content/live-verification": { verifyPublishedContent: async () => { throw new Error("verification forbidden"); } },
   "@/lib/db/mission-control": { normalizeRow: (row) => row },
@@ -202,13 +203,17 @@ async function dispatch(workItemId, sessionId = randomUUID()) {
   await pool.query("update work_items set status='in_progress',payload=payload||jsonb_build_object('dispatch_session_id',$2::text) where id=$1 and status in ('ready','in_progress')", [workItemId, sessionId]);
   return sessionId;
 }
-async function finishImplementation(loopId, sha, sessionId = randomUUID()) {
+// Cross-contract fixture: mirrors the generic scheduler's buildDispatchSessionId shape.
+function schedulerDispatchSessionId(workItemId, attempt, nonce = randomUUID()) {
+  return `${workItemId}:attempt-${attempt}:${nonce}`;
+}
+async function finishImplementation(loopId, sha, sessionId = randomUUID(), bodySessionId = randomUUID()) {
   const work = await currentWork(loopId);
   assert.equal(work.run_role, "implementation");
   await dispatch(work.id, sessionId);
   await agentCompletion.patchAgentWorkItemWithCompletion(work.id, {
     status: "done", execution_attempt_id: work.payload.execution_attempt_id,
-    session_id: randomUUID(), output: { head_sha: sha, repository_path: cycleWorktrees.get(sha) || REPOSITORY_PATH },
+    session_id: bodySessionId, output: { head_sha: sha, repository_path: cycleWorktrees.get(sha) || REPOSITORY_PATH },
   });
   return { work, sessionId, review: await currentWork(loopId) };
 }
@@ -264,6 +269,41 @@ test("phase 4 migration artifacts exist and declare the fresh-review invariants"
   }
   assert.match(readFileSync(resolve(artifact, "verify.sql"), "utf8"), /TRANSACTION READ ONLY/i);
   assert.match(readFileSync(resolve(artifact, "rollback.sql"), "utf8"), /RAISE EXCEPTION/i);
+});
+
+test("trusted implementation dispatch identities match only local UUIDs or the scheduler contract", () => {
+  const workItemId = "4a5b4ddd-35b2-4e9f-a928-8fc55ab6f3e8";
+  const nonce = "6f5ec6f4-f08b-4bc0-a096-345ba74a4d92";
+  const accepted = [
+    nonce,
+    schedulerDispatchSessionId(workItemId, 1, nonce),
+    schedulerDispatchSessionId(workItemId, 42, nonce),
+  ];
+  for (const identity of accepted) {
+    assert.equal(isTrustedImplementationDispatchSessionId(identity), true, identity);
+  }
+
+  const schedulerIdentity = schedulerDispatchSessionId(workItemId, 2, nonce);
+  const rejected = [
+    null,
+    undefined,
+    "",
+    "arbitrary-session",
+    `noise:${schedulerIdentity}`,
+    ` ${schedulerIdentity}`,
+    schedulerDispatchSessionId(workItemId, 0, nonce),
+    `${workItemId}:attempt--1:${nonce}`,
+    `${workItemId}:attempt-01:${nonce}`,
+    `${workItemId}:attempt-1.5:${nonce}`,
+    `${workItemId}:ATTEMPT-2:${nonce}`,
+    `${workItemId}:attempt-${Number.MAX_SAFE_INTEGER + 1}:${nonce}`,
+    `${workItemId}:attempt-${"9".repeat(129)}:${nonce}`,
+    `${workItemId}:attempt-2:not-a-uuid`,
+    `${workItemId}:attempt-2:${nonce}:trailing-noise`,
+  ];
+  for (const identity of rejected) {
+    assert.equal(isTrustedImplementationDispatchSessionId(identity), false, String(identity));
+  }
 });
 
 async function withPhase3MigrationDatabase(run) {
@@ -607,7 +647,7 @@ test("cycle 1 implementation creates a fresh read-only review and approval compl
   } finally { await retire(loopId); }
 });
 
-test("cycle 1 changes creates a new cycle 2 implementation; latest approval wins", async () => {
+test("cycle 2 accepts the scheduler dispatch identity, stores it exactly, and creates fresh review work", async () => {
   const loopId = await createStartedLoop();
   try {
     await finishImplementation(loopId, SHA1);
@@ -617,7 +657,20 @@ test("cycle 1 changes creates a new cycle 2 implementation; latest approval wins
     assert.equal(work.quality_cycle, 2);
     assert.equal(work.task_status, "in_progress");
     assert.equal(work.payload.runtime_contract, "fresh_review_v1");
-    await finishImplementation(loopId, SHA2);
+    const schedulerSessionId = schedulerDispatchSessionId(work.id, 2, "6f5ec6f4-f08b-4bc0-a096-345ba74a4d92");
+    const bodySessionId = "user-body-session-id-must-not-be-trusted";
+    const completed = await finishImplementation(loopId, SHA2, schedulerSessionId, bodySessionId);
+    assert.equal(completed.review.run_role, "review");
+    assert.equal(completed.review.quality_cycle, 2);
+    assert.equal(completed.review.payload.target_sha, SHA2);
+    const cycle2Implementation = (await pool.query(
+      "select status,artifact_sha,server_session_id from loop_task_runs where id=$1",
+      [work.run_id],
+    )).rows[0];
+    assert.deepEqual({ ...cycle2Implementation }, {
+      status: "succeeded", artifact_sha: SHA2, server_session_id: schedulerSessionId,
+    });
+    assert.notEqual(cycle2Implementation.server_session_id, bodySessionId);
     await finishReview(loopId, { verdict: "approved", sha: SHA2 });
     const history = (await pool.query("select run_role,quality_cycle,status,artifact_sha,target_sha from loop_task_runs where task_id=$1 order by quality_cycle,run_role", [work.task_id])).rows;
     assert.equal(history.length, 4);
