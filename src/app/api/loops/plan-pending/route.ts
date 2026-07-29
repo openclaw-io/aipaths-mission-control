@@ -95,42 +95,51 @@ type PlanReworkOperation = {
   type: "append_step";
   step_id: string;
   title: string;
+  notes: string | null;
 };
 
-function parsePlanReworkOperation(plan: PlanStep[], feedback: string): PlanReworkOperation | null {
-  const normalized = cleanText(feedback).replace(/[.!?]+$/, "");
-  const english = normalized.match(/^add\s+(?:an?\s+)?(?:explicit\s+)?(.+?)\s+step$/i);
-  const spanish = normalized.match(/^(?:agrega|añade|incorpora)\s+(?:un\s+)?paso\s+(?:expl[ií]cito\s+)?(?:para\s+)?(.+)$/i);
-  const rawTitle = cleanText(english?.[1] || spanish?.[1] || "");
-  if (!rawTitle) return null;
-
-  let suffix = plan.length + 1;
+function parsePlanReworkOperations(plan: PlanStep[], value: JsonValue | undefined): PlanReworkOperation[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
   const existingIds = new Set(plan.map((step) => step.id));
-  while (existingIds.has(`plan-rework-${suffix}`)) suffix += 1;
-  return {
-    type: "append_step",
-    step_id: `plan-rework-${suffix}`,
-    title: sentenceCase(rawTitle),
-  };
+  let suffix = plan.length + 1;
+  const operations: PlanReworkOperation[] = [];
+  for (const candidate of value) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return null;
+    if (candidate.type !== "append_step") return null;
+    const title = typeof candidate.title === "string" ? candidate.title.trim() : "";
+    if (!title) return null;
+    if (candidate.notes !== undefined && candidate.notes !== null && typeof candidate.notes !== "string") return null;
+    while (existingIds.has(`plan-rework-${suffix}`)) suffix += 1;
+    const stepId = `plan-rework-${suffix}`;
+    existingIds.add(stepId);
+    suffix += 1;
+    operations.push({
+      type: "append_step",
+      step_id: stepId,
+      title,
+      notes: typeof candidate.notes === "string" && candidate.notes.trim() ? candidate.notes.trim() : null,
+    });
+  }
+  return operations;
 }
 
-function revisePlanForOperation(plan: PlanStep[], operation: PlanReworkOperation): PlanStep[] {
-  const reopened = plan.map((step) => ({ ...step, status: "pending" }));
+function revisePlanForOperations(plan: PlanStep[], operations: PlanReworkOperation[]): PlanStep[] {
   return [
-    ...reopened,
-    {
+    ...plan.map((step) => ({ ...step, status: "pending" })),
+    ...operations.map((operation) => ({
       id: operation.step_id,
       title: operation.title,
       status: "pending",
-      notes: null,
-    },
+      notes: operation.notes,
+    })),
   ];
 }
 
-function planContainsAppliedOperation(plan: PlanStep[], operation: PlanReworkOperation) {
-  return plan.some((step) => step.id === operation.step_id
+function planContainsAppliedOperations(plan: PlanStep[], operations: PlanReworkOperation[]) {
+  return operations.every((operation) => plan.some((step) => step.id === operation.step_id
     && step.title === operation.title
-    && step.status === "pending");
+    && step.notes === operation.notes
+    && step.status === "pending"));
 }
 
 function classifyIntent(input: string) {
@@ -294,52 +303,56 @@ export async function POST(request: NextRequest) {
 
           const now = new Date().toISOString();
           const storedPlanReworkContext = lockedMetadata.plan_rework_context;
-          if (storedPlanReworkContext
+          const planReworkContext = pendingPlanReworkContext(lockedMetadata);
+          const malformedStoredContext = storedPlanReworkContext
             && typeof storedPlanReworkContext === "object"
             && !Array.isArray(storedPlanReworkContext)
-            && storedPlanReworkContext.status === "needs_attention") {
-            return { kind: "needs_attention" as const };
-          }
-          const planReworkContext = pendingPlanReworkContext(lockedMetadata);
-          if (planReworkContext) {
-            const feedback = typeof planReworkContext.feedback === "string"
-              ? cleanText(planReworkContext.feedback)
+            && (storedPlanReworkContext.status === "pending" || storedPlanReworkContext.status === "needs_attention")
+            ? storedPlanReworkContext as JsonObject
+            : null;
+          if (malformedStoredContext) {
+            const feedback = typeof malformedStoredContext.feedback === "string"
+              ? cleanText(malformedStoredContext.feedback)
               : "";
-            const operation = parsePlanReworkOperation(lockedPlan, feedback);
-            if (!operation) {
-              const needsAttentionMetadata = {
+            const operations = parsePlanReworkOperations(lockedPlan, malformedStoredContext.plan_operations);
+            if (!operations) {
+              // Old prose-only requests are made visible at the approval gate.
+              // Do not leave a planning Loop in a metadata-only attention state.
+              const rejectedMetadata = {
                 ...lockedMetadata,
                 plan_rework_context: {
-                  ...planReworkContext,
-                  status: "needs_attention",
-                  needs_attention_at: now,
-                  needs_attention_reason: "unsupported_feedback_operation",
-                  planner_revision_contract: "deterministic-plan-operations-v1",
+                  ...malformedStoredContext,
+                  status: "rejected",
+                  rejected_at: now,
+                  rejection_reason: "unsupported_plan_operations",
+                  planner_revision_contract: "structured-plan-operations-v1",
                 },
               };
-              await client.query(`
+              const restored = await client.query(`
                 UPDATE public.loops
-                   SET metadata = $1::jsonb,
-                       updated_at = $2::timestamptz
-                 WHERE id = $3
+                   SET status = $1,
+                       metadata = $2::jsonb,
+                       updated_at = $3::timestamptz
+                 WHERE id = $4
                    AND status = 'planning'
                  RETURNING id
-              `, [JSON.stringify(needsAttentionMetadata), now, loop.id]);
+              `, ["needs_approval", JSON.stringify(rejectedMetadata), now, loop.id]);
+              if (!restored.rows[0]) throw new Error("malformed_plan_rework_restore_failed");
               await client.query(`
                 INSERT INTO public.loop_events
                   (loop_id, event_type, from_status, to_status, actor, payload, created_at)
                 VALUES
-                  ($1, 'loop.plan_rework_needs_attention', 'planning', 'planning', 'loop-planner', $2::jsonb, $3::timestamptz)
+                  ($1, 'loop.plan_rework_rejected', 'planning', 'needs_approval', 'loop-planner', $2::jsonb, $3::timestamptz)
               `, [loop.id, JSON.stringify({
                 source: "plan_rework_revision",
-                reason: "unsupported_feedback_operation",
+                reason: "unsupported_plan_operations",
                 feedback: feedback || null,
               }), now]);
-              return { kind: "needs_attention" as const };
+              return { kind: "malformed_rework_restored" as const };
             }
 
-            const revisedPlan = revisePlanForOperation(lockedPlan, operation);
-            if (!planContainsAppliedOperation(revisedPlan, operation)) {
+            const revisedPlan = revisePlanForOperations(lockedPlan, operations);
+            if (!planContainsAppliedOperations(revisedPlan, operations)) {
               throw new Error("plan_rework_operation_verification_failed");
             }
             const revisedMetadata = {
@@ -349,8 +362,8 @@ export async function POST(request: NextRequest) {
                 status: "consumed",
                 consumed_at: now,
                 consumed_by: "loop-planner",
-                planner_revision_contract: "deterministic-plan-operations-v1",
-                applied_operations: [operation],
+                planner_revision_contract: "structured-plan-operations-v1",
+                applied_operations: operations,
               },
             };
             const updateResult = await client.query(`
@@ -373,7 +386,7 @@ export async function POST(request: NextRequest) {
               source: "plan_rework_revision",
               guarded: true,
               feedback: feedback || null,
-              applied_operations: [operation],
+              applied_operations: operations,
             }), now]);
             return { kind: "promoted_rework" as const };
           }
@@ -404,8 +417,8 @@ export async function POST(request: NextRequest) {
               ? "plan_rework_consumed_and_promoted"
               : "already_planned_and_promoted",
           });
-        } else if (outcome.kind === "needs_attention") {
-          details.push({ loopId: loop.id, action: "plan_rework_needs_attention" });
+        } else if (outcome.kind === "malformed_rework_restored") {
+          details.push({ loopId: loop.id, action: "malformed_plan_rework_restored_for_approval" });
         } else if (outcome.kind === "not_ready") {
           details.push({ loopId: loop.id, action: "already_normalized_not_ready" });
         } else {

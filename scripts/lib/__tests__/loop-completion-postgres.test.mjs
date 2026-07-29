@@ -113,6 +113,8 @@ const planPendingRoute = transpileModule(resolve(repoRoot, "src/app/api/loops/pl
   },
 });
 
+let reviewNotifyFailuresRemaining = 0;
+const reviewNotifyBodies = [];
 const reviewRoute = transpileModule(resolve(repoRoot, "src/app/api/loops/[id]/review/route.ts"), {
   "next/server": { NextResponse: { json: (payload, init = {}) => ({ payload, status: init.status || 200 }) } },
   "node:crypto": { randomUUID },
@@ -145,7 +147,17 @@ const reviewRoute = transpileModule(resolve(repoRoot, "src/app/api/loops/[id]/re
     isPrimaryExecutionOpen: (status) => Boolean(status && !["done", "failed", "canceled"].includes(status)),
     reconcileLoopStatusWithPrimaryExecution: async () => {},
   },
-}, { fetch: async () => ({ ok: true, status: 200 }), console });
+}, {
+  fetch: async (_url, init) => {
+    reviewNotifyBodies.push(JSON.parse(init.body));
+    if (reviewNotifyFailuresRemaining > 0) {
+      reviewNotifyFailuresRemaining -= 1;
+      return { ok: false, status: 503 };
+    }
+    return { ok: true, status: 200 };
+  },
+  console,
+});
 
 before(async () => {
   await pool.query("select 1 from public.loops limit 1");
@@ -193,11 +205,33 @@ async function insertApprovalLoop(loopId) {
   );
 }
 
+const approvalDecisionIds = new WeakMap();
 async function invokeApproval(loopId, body) {
+  const decisionId = body.decision_id || approvalDecisionIds.get(body) || randomUUID();
+  approvalDecisionIds.set(body, decisionId);
   return approveRoute.POST(
-    { json: async () => body },
+    { json: async () => ({ decision_id: decisionId, ...body }) },
     { params: Promise.resolve({ id: loopId }) },
   );
+}
+
+async function invokeReview(loopId, body) {
+  return reviewRoute.POST(
+    { json: async () => ({ decision_id: body.decision_id || randomUUID(), ...body }) },
+    { params: Promise.resolve({ id: loopId }) },
+  );
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, nested]) => [key, canonicalJson(nested)]),
+    );
+  }
+  return value;
 }
 
 test("Postgres approval replay is exact, audited, and approved-to-queued preserves approval identity", async () => {
@@ -214,10 +248,18 @@ test("Postgres approval replay is exact, audited, and approved-to-queued preserv
 
     const replay = await invokeApproval(loopId, request);
     assert.equal(replay.status, 200);
-    assert.equal(replay.payload.replay, true);
-    const different = await invokeApproval(loopId, { ...request, comment: "Different request at destination" });
+    assert.deepEqual(
+      canonicalJson(replay.payload),
+      canonicalJson(first.payload),
+      "replay must return the exact persisted response",
+    );
+    const different = await invokeApproval(loopId, {
+      ...request,
+      decision_id: first.payload.decision_id,
+      comment: "Different request at destination",
+    });
     assert.equal(different.status, 409);
-    assert.equal(different.payload.error, "approval_transition_conflict");
+    assert.equal(different.payload.error, "decision_id_payload_conflict");
 
     const queued = await invokeApproval(loopId, { action: "approve", queue: true, comment: "Queue approved plan" });
     assert.equal(queued.status, 200);
@@ -244,7 +286,12 @@ test("Postgres approval replay is exact, audited, and approved-to-queued preserv
     assert.equal(afterQueue.metadata.last_plan_decision.from_status, "approved");
     assert.equal(afterQueue.metadata.last_plan_decision.to_status, "queued");
 
-    const rework = await invokeApproval(loopId, { action: "rework", queue: false, comment: "Add a rollback step" });
+    const rework = await invokeApproval(loopId, {
+      action: "rework",
+      queue: false,
+      comment: "Reviewer context",
+      plan_operations: [{ type: "append_step", title: "Validate rollback", notes: null }],
+    });
     assert.equal(rework.status, 200);
     const afterRework = (await pool.query(
       "select status, approval_scope, last_approved_at from public.loops where id = $1",
@@ -258,6 +305,17 @@ test("Postgres approval replay is exact, audited, and approved-to-queued preserv
       "select count(*)::int as count from public.loop_events where loop_id = $1 and event_type = 'loop.approved'",
       [loopId],
     )).rows[0].count), 1, "rework must not be audited as a new approval");
+
+    const beforeDelayedReplay = (await pool.query(
+      "select status, approval_scope, metadata, last_approved_at, updated_at from public.loops where id = $1",
+      [loopId],
+    )).rows[0];
+    const delayedReplay = await invokeApproval(loopId, request);
+    assert.deepEqual(canonicalJson(delayedReplay.payload), canonicalJson(first.payload));
+    assert.deepEqual((await pool.query(
+      "select status, approval_scope, metadata, last_approved_at, updated_at from public.loops where id = $1",
+      [loopId],
+    )).rows[0], beforeDelayedReplay, "delayed approval replay must not rewind an advanced Loop");
   } finally {
     await pool.query("delete from public.loop_events where loop_id = $1", [loopId]);
     await pool.query("delete from public.loops where id = $1", [loopId]);
@@ -342,7 +400,8 @@ test("concurrent Postgres planners lock rework context and apply its operation e
         normalized_at: "2026-07-29T00:00:00.000Z",
         plan_rework_context: {
           status: "pending",
-          feedback: "Add an explicit rollback validation step",
+          feedback: "Audit context only",
+          plan_operations: [{ type: "append_step", title: "Rollback validation", notes: null }],
           requested_at: "2026-07-29T00:00:00.000Z",
           requested_by: "reviewer@example.test",
         },
@@ -364,6 +423,7 @@ test("concurrent Postgres planners lock rework context and apply its operation e
       type: "append_step",
       step_id: "plan-rework-2",
       title: "Rollback validation",
+      notes: null,
     }]);
     assert.equal(Number((await pool.query(
       "select count(*)::int as count from public.loop_events where loop_id = $1 and event_type = 'loop.ready_for_approval'",
@@ -911,10 +971,10 @@ test("Loop review rejects approval and rework outside the valid in-review/done-p
       const beforeLoop = (await pool.query("select status, metadata, updated_at from public.loops where id = $1", [loopId])).rows[0];
       const beforeWork = (await pool.query("select status, payload, updated_at from public.work_items where id = $1", [workItemId])).rows[0];
 
-      const response = await reviewRoute.POST(
-        { json: async () => ({ action: testCase.action, feedback: "must not mutate invalid source state" }) },
-        { params: Promise.resolve({ id: loopId }) },
-      );
+      const response = await invokeReview(loopId, {
+        action: testCase.action,
+        feedback: "must not mutate invalid source state",
+      });
 
       assert.equal(response.status, 409);
       assert.equal(response.payload.error, testCase.error);
@@ -944,10 +1004,12 @@ test("exact approve/request_changes review replays return 200 before the source-
       await pool.query("update public.loops set status = 'in_review' where id = $1", [loopId]);
       await pool.query("update public.work_items set status = 'done', completed_at = now() where id = $1", [workItemId]);
 
-      const invoke = (nextFeedback) => reviewRoute.POST(
-        { json: async () => ({ action, feedback: nextFeedback }) },
-        { params: Promise.resolve({ id: loopId }) },
-      );
+      const decisionId = randomUUID();
+      const invoke = (nextFeedback) => invokeReview(loopId, {
+        decision_id: decisionId,
+        action,
+        feedback: nextFeedback,
+      });
       const first = await invoke(feedback);
       assert.equal(first.status, 200);
       const beforeReplayLoop = (await pool.query(
@@ -981,10 +1043,107 @@ test("exact approve/request_changes review replays return 200 before the source-
 
       const changedAction = await invoke(`${feedback} changed`);
       assert.equal(changedAction.status, 409);
-      assert.equal(changedAction.payload.error, "invalid_review_state");
+      assert.equal(changedAction.payload.error, "decision_id_payload_conflict");
     } finally {
       await cleanupLoopGraph(loopId, workItemId);
     }
+  }
+});
+
+test("Postgres request_changes replay retries a failed notify without rotating the attempt and remains exact after a full review cycle", async () => {
+  const loopId = randomUUID();
+  const workItemId = randomUUID();
+  const originalAttemptId = randomUUID();
+  const decisionId = randomUUID();
+  const notifyStart = reviewNotifyBodies.length;
+  try {
+    await insertLoopGraph({
+      loopId,
+      workItemId,
+      plan: [{ id: "step-1", title: "Durable review replay", status: "done" }],
+      payload: {
+        execution_attempt_id: originalAttemptId,
+        execution_generation: 1,
+        dispatch_state: "completed",
+      },
+    });
+    await pool.query("update public.loops set status = 'in_review' where id = $1", [loopId]);
+    await pool.query("update public.work_items set status = 'done', completed_at = now() where id = $1", [workItemId]);
+
+    const request = {
+      decision_id: decisionId,
+      action: "request_changes",
+      feedback: "Retry notification without another rework mutation",
+    };
+    reviewNotifyFailuresRemaining = 1;
+    const first = await invokeReview(loopId, request);
+    assert.equal(first.status, 200);
+    const afterFirst = (await pool.query(
+      "select status, payload from public.work_items where id = $1",
+      [workItemId],
+    )).rows[0];
+    assert.equal(afterFirst.status, "ready");
+    assert.notEqual(afterFirst.payload.execution_attempt_id, originalAttemptId);
+    assert.equal(afterFirst.payload.execution_generation, 2);
+
+    const retry = await invokeReview(loopId, request);
+    assert.deepEqual(canonicalJson(retry.payload), canonicalJson(first.payload));
+    const afterRetry = (await pool.query(
+      "select status, payload from public.work_items where id = $1",
+      [workItemId],
+    )).rows[0];
+    assert.equal(afterRetry.payload.execution_attempt_id, afterFirst.payload.execution_attempt_id);
+    assert.equal(afterRetry.payload.execution_generation, 2);
+    const retryNotifications = reviewNotifyBodies.slice(notifyStart);
+    assert.equal(retryNotifications.length, 2);
+    assert.equal(retryNotifications[0].idempotencyKey, decisionId);
+    assert.equal(retryNotifications[1].idempotencyKey, decisionId);
+
+    const notificationEntry = (await pool.query(
+      "select metadata from public.loops where id = $1",
+      [loopId],
+    )).rows[0].metadata.decision_ledger.find((entry) => entry.decision_id === decisionId);
+    assert.equal(notificationEntry.notification.status, "succeeded");
+    assert.equal(notificationEntry.notification.attempts, 2);
+
+    await agentCompletion.patchAgentWorkItemWithCompletion(workItemId, {
+      status: "done",
+      execution_attempt_id: afterFirst.payload.execution_attempt_id,
+      output: { revised: true },
+    });
+    const approval = await invokeReview(loopId, {
+      decision_id: randomUUID(),
+      action: "approve_deliverable",
+      feedback: "Approve the revised deliverable",
+    });
+    assert.equal(approval.status, 200);
+
+    const beforeDelayedReplay = (await pool.query(
+      "select l.status as loop_status, l.metadata, wi.status as work_status, wi.payload from public.loops l join public.work_items wi on wi.id = $2 where l.id = $1",
+      [loopId, workItemId],
+    )).rows[0];
+    const delayedReplay = await invokeReview(loopId, request);
+    assert.deepEqual(
+      canonicalJson(delayedReplay.payload),
+      canonicalJson(first.payload),
+      "advanced Loop must return the original decision response",
+    );
+    const afterDelayedReplay = (await pool.query(
+      "select l.status as loop_status, l.metadata, wi.status as work_status, wi.payload from public.loops l join public.work_items wi on wi.id = $2 where l.id = $1",
+      [loopId, workItemId],
+    )).rows[0];
+    assert.deepEqual(afterDelayedReplay, beforeDelayedReplay);
+    assert.equal(afterDelayedReplay.loop_status, "completed");
+    assert.equal(afterDelayedReplay.work_status, "done");
+    assert.equal(afterDelayedReplay.payload.execution_attempt_id, afterFirst.payload.execution_attempt_id);
+    assert.equal(reviewNotifyBodies.length, notifyStart + 2, "successful notify must not repeat on delayed replay");
+    assert.equal(Number((await pool.query(
+      "select count(*)::int as count from public.loop_events where loop_id = $1 and event_type = 'loop.review_changes_requested'",
+      [loopId],
+    )).rows[0].count), 1);
+  } finally {
+    reviewNotifyFailuresRemaining = 0;
+    await cleanupLoopGraph(loopId, workItemId);
   }
 });
 
@@ -1005,10 +1164,10 @@ test("request_changes explicitly reopens every non-empty V1 plan step when no de
     await pool.query("update public.loops set status = 'in_review' where id = $1", [loopId]);
     await pool.query("update public.work_items set status = 'done', completed_at = now() where id = $1", [workItemId]);
 
-    const response = await reviewRoute.POST(
-      { json: async () => ({ action: "request_changes", feedback: "Revise the deliverable" }) },
-      { params: Promise.resolve({ id: loopId }) },
-    );
+    const response = await invokeReview(loopId, {
+      action: "request_changes",
+      feedback: "Revise the deliverable",
+    });
 
     assert.equal(response.status, 200);
     const loop = (await pool.query("select status, plan from public.loops where id = $1", [loopId])).rows[0];
@@ -1052,10 +1211,7 @@ test("concurrent completion and request_changes serialize without deadlock and r
         execution_attempt_id: attemptId,
         output: { candidate: "possibly completed before rework" },
       }),
-      reviewRoute.POST(
-        { json: async () => ({ action: "request_changes", feedback: "Run a fresh attempt" }) },
-        { params: Promise.resolve({ id: loopId }) },
-      ),
+      invokeReview(loopId, { action: "request_changes", feedback: "Run a fresh attempt" }),
     ]);
 
     assert.equal(reworkResult.status, "fulfilled");

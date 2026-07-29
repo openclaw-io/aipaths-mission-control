@@ -7,24 +7,61 @@ export const dynamic = "force-dynamic";
 
 type ApprovalAction = "approve" | "rework";
 
-type PersistedDecision = {
-  action?: unknown;
-  queue?: unknown;
-  comment?: unknown;
-  acted_by?: unknown;
-  from_status?: unknown;
-  to_status?: unknown;
+type PlanOperation = {
+  type: "append_step";
+  title: string;
+  notes: string | null;
 };
 
-function isExactReplay(
-  persisted: PersistedDecision | null,
-  request: { action: ApprovalAction; queue: boolean; comment: string | null; actor: string; toStatus: string },
-) {
-  return persisted?.action === request.action
-    && persisted.queue === request.queue
-    && persisted.comment === request.comment
-    && persisted.acted_by === request.actor
-    && persisted.to_status === request.toStatus;
+type DecisionLedgerEntry = {
+  decision_id?: unknown;
+  decision_type?: unknown;
+  request?: unknown;
+  response?: unknown;
+};
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function parseDecisionId(value: unknown) {
+  return typeof value === "string" && UUID_PATTERN.test(value) ? value.toLowerCase() : null;
+}
+
+function parsePlanOperations(value: unknown): PlanOperation[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  const operations: PlanOperation[] = [];
+  for (const candidate of value) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return null;
+    const operation = candidate as Record<string, unknown>;
+    if (operation.type !== "append_step") return null;
+    const title = typeof operation.title === "string" ? operation.title.trim() : "";
+    if (!title) return null;
+    if (operation.notes !== undefined && operation.notes !== null && typeof operation.notes !== "string") return null;
+    const notes = typeof operation.notes === "string" && operation.notes.trim() ? operation.notes.trim() : null;
+    operations.push({ type: "append_step", title, notes });
+  }
+  return operations;
+}
+
+function asDecisionLedger(metadata: Record<string, unknown>) {
+  return Array.isArray(metadata.decision_ledger)
+    ? metadata.decision_ledger.filter((entry): entry is DecisionLedgerEntry => Boolean(entry && typeof entry === "object" && !Array.isArray(entry)))
+    : [];
+}
+
+function canonicalJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, child]) => [key, canonicalJson(child)]),
+    );
+  }
+  return value;
+}
+
+function samePayload(left: unknown, right: unknown) {
+  return JSON.stringify(canonicalJson(left)) === JSON.stringify(canonicalJson(right));
 }
 
 export async function POST(
@@ -53,6 +90,10 @@ export async function POST(
   if (typeof body?.queue !== "boolean") {
     return NextResponse.json({ error: "queue_must_be_boolean" }, { status: 400 });
   }
+  const decisionId = parseDecisionId(body?.decision_id);
+  if (!decisionId) {
+    return NextResponse.json({ error: "decision_id_must_be_uuid" }, { status: 400 });
+  }
 
   const action: ApprovalAction = body.action;
   const queue = body.queue;
@@ -60,8 +101,27 @@ export async function POST(
     return NextResponse.json({ error: "rework_cannot_be_queued" }, { status: 400 });
   }
   const comment = typeof body?.comment === "string" && body.comment.trim() ? body.comment.trim() : null;
+  const planOperations = action === "rework" ? parsePlanOperations(body?.plan_operations) : [];
+  if (action === "rework" && !planOperations) {
+    // Rework is a structured write contract. Never move the Loop to planning
+    // based on prose that a later worker may or may not be able to interpret.
+    return NextResponse.json({ error: "unsupported_plan_operations" }, { status: 400 });
+  }
+  if (action === "approve" && body?.plan_operations !== undefined && body?.plan_operations !== null) {
+    return NextResponse.json({ error: "plan_operations_only_supported_for_rework" }, { status: 400 });
+  }
+
   const now = new Date().toISOString();
   const nextStatus = action === "rework" ? "planning" : queue ? "queued" : "approved";
+  const decisionRequest = {
+    decision_type: "plan_approval",
+    loop_id: id,
+    action,
+    queue,
+    comment,
+    plan_operations: planOperations || [],
+    acted_by: actorIdentity,
+  };
 
   // Supabase REST cannot atomically update the Loop and append its audit event.
   if (!useLocalMode) {
@@ -88,26 +148,19 @@ export async function POST(
     if (!loop) return { kind: "missing" as const };
 
     const loopMetadata = loop.metadata || {};
-    const persistedDecision = loopMetadata.last_plan_decision;
-    const persistedRecord = persistedDecision && typeof persistedDecision === "object" && !Array.isArray(persistedDecision)
-      ? persistedDecision as PersistedDecision
-      : null;
-    if (loop.status === nextStatus) {
-      return isExactReplay(persistedRecord, {
-        action,
-        queue,
-        comment,
-        actor: actorIdentity,
-        toStatus: nextStatus,
-      })
-        ? { kind: "replay" as const }
-        : { kind: "conflict" as const, status: loop.status };
+    const decisionLedger = asDecisionLedger(loopMetadata);
+    const persisted = decisionLedger.find((entry) => entry.decision_id === decisionId);
+    if (persisted) {
+      if (persisted.decision_type !== "plan_approval" || !samePayload(persisted.request, decisionRequest)) {
+        return { kind: "idempotency_conflict" as const };
+      }
+      return { kind: "replay" as const, response: persisted.response as Record<string, unknown> };
     }
 
     const allowed = action === "rework"
       ? ["needs_approval", "approved", "queued"].includes(loop.status)
       : loop.status === "needs_approval" || (queue && loop.status === "approved");
-    if (!allowed) return { kind: "conflict" as const, status: loop.status };
+    if (!allowed) return { kind: "transition_conflict" as const, status: loop.status };
 
     const isInitialApproval = action === "approve" && loop.status === "needs_approval";
     const approvalScope = action === "rework"
@@ -116,26 +169,41 @@ export async function POST(
         ? { ...(loop.approval_scope || {}), approved: true, approved_by: actorIdentity, approved_at: now, can_execute_unattended: true }
         : loop.approval_scope || {};
     const decisionIdentity = {
+      decision_id: decisionId,
       action,
       queue,
       comment,
+      plan_operations: planOperations || [],
       acted_at: now,
       acted_by: actorIdentity,
       from_status: loop.status,
       to_status: nextStatus,
     };
+    const response = { ok: true, id, status: nextStatus, decision_id: decisionId };
     const metadata = {
       ...loopMetadata,
       ...(action === "rework" ? {
         plan_rework_context: {
           status: "pending",
           feedback: comment,
+          plan_operations: planOperations,
           requested_at: now,
           requested_by: actorIdentity,
           source_status: loop.status,
+          decision_id: decisionId,
         },
       } : {}),
       last_plan_decision: decisionIdentity,
+      decision_ledger: [
+        ...decisionLedger,
+        {
+          decision_id: decisionId,
+          decision_type: "plan_approval",
+          request: decisionRequest,
+          response,
+          created_at: now,
+        },
+      ],
     };
     const lastApprovedAt = isInitialApproval ? now : loop.last_approved_at;
 
@@ -162,12 +230,15 @@ export async function POST(
         now,
       ],
     );
-    return { kind: "success" as const };
+    return { kind: "success" as const, response };
   });
 
   if (result.kind === "missing") return NextResponse.json({ error: "Loop not found" }, { status: 404 });
-  if (result.kind === "conflict") {
+  if (result.kind === "idempotency_conflict") {
+    return NextResponse.json({ error: "decision_id_payload_conflict" }, { status: 409 });
+  }
+  if (result.kind === "transition_conflict") {
     return NextResponse.json({ error: "approval_transition_conflict", currentStatus: result.status }, { status: 409 });
   }
-  return NextResponse.json({ ok: true, id, status: nextStatus, replay: result.kind === "replay" });
+  return NextResponse.json(result.response);
 }

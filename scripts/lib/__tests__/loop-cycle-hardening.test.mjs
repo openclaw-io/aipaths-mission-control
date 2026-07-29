@@ -178,7 +178,7 @@ test("explicit plan-pending write path promotes an already planned Loop with its
   assert.match(eventSql, /loop\.ready_for_approval/);
 });
 
-test("plan rework persists reviewer feedback as pending planner context", async () => {
+test("plan rework accepts only explicit supported plan_operations and persists the contract", async () => {
   let updatedMetadata;
   const route = transpileModule(resolve(repoRoot, "src/app/api/loops/[id]/approve/route.ts"), {
     "next/server": { NextResponse: { json: (payload, init = {}) => ({ payload, status: init.status || 200 }) } },
@@ -212,15 +212,57 @@ test("plan rework persists reviewer feedback as pending planner context", async 
   });
 
   const response = await route.POST(
-    { json: async () => ({ action: "rework", queue: false, comment: "Add an explicit rollback validation step" }) },
+    { json: async () => ({
+      decision_id: "11111111-1111-4111-8111-111111111111",
+      action: "rework",
+      queue: false,
+      comment: "Reviewer context only; never parse this text",
+      plan_operations: [{ type: "append_step", title: "Validate rollback", notes: "Run in a disposable database" }],
+    }) },
     { params: Promise.resolve({ id: "loop-rework" }) },
   );
 
   assert.equal(response.status, 200);
   assert.equal(updatedMetadata.original_input, "Keep me");
   assert.equal(updatedMetadata.plan_rework_context.status, "pending");
-  assert.equal(updatedMetadata.plan_rework_context.feedback, "Add an explicit rollback validation step");
+  assert.equal(updatedMetadata.plan_rework_context.feedback, "Reviewer context only; never parse this text");
+  assert.deepEqual(updatedMetadata.plan_rework_context.plan_operations, [
+    { type: "append_step", title: "Validate rollback", notes: "Run in a disposable database" },
+  ]);
   assert.equal(updatedMetadata.plan_rework_context.requested_by, "reviewer@example.test");
+});
+
+test("plan rework fails closed before a transaction when plan_operations is absent or unsupported", async () => {
+  let transactions = 0;
+  const route = transpileModule(resolve(repoRoot, "src/app/api/loops/[id]/approve/route.ts"), {
+    "next/server": { NextResponse: { json: (payload, init = {}) => ({ payload, status: init.status || 200 }) } },
+    "@/lib/auth/local": {
+      getLocalMissionControlUser: () => ({ email: "reviewer@example.test" }),
+      isLocalAuthDisabled: () => true,
+    },
+    "@/lib/db/postgres": { withTransaction: async () => { transactions += 1; } },
+    "@/lib/supabase/server": { createClient: async () => { throw new Error("unexpected cloud auth"); } },
+  });
+  const base = {
+    decision_id: "22222222-2222-4222-8222-222222222222",
+    action: "rework",
+    queue: false,
+    comment: "Add a rollback step",
+  };
+  for (const body of [
+    base,
+    { ...base, plan_operations: [] },
+    { ...base, plan_operations: [{ type: "free_text", text: "Add a rollback step" }] },
+    { ...base, plan_operations: [{ type: "append_step", title: "   " }] },
+  ]) {
+    const response = await route.POST(
+      { json: async () => ({ decision_id: "44444444-4444-4444-8444-444444444444", ...body }) },
+      { params: Promise.resolve({ id: "loop-1" }) },
+    );
+    assert.equal(response.status, 400);
+    assert.equal(response.payload.error, "unsupported_plan_operations");
+  }
+  assert.equal(transactions, 0, "unsupported rework must fail before any database mutation can begin");
 });
 
 test("plan-pending consumes feedback only after a deterministic, verifiable plan operation", async () => {
@@ -239,7 +281,8 @@ test("plan-pending consumes feedback only after a deterministic, verifiable plan
       normalized_at: "2026-07-27T00:00:00.000Z",
       plan_rework_context: {
         status: "pending",
-        feedback: "Add an explicit rollback validation step",
+        feedback: "This text must not be interpreted",
+        plan_operations: [{ type: "append_step", title: "Rollback validation", notes: null }],
         requested_at: "2026-07-28T00:00:00.000Z",
         requested_by: "reviewer@example.test",
       },
@@ -282,14 +325,15 @@ test("plan-pending consumes feedback only after a deterministic, verifiable plan
     type: "append_step",
     step_id: "plan-rework-2",
     title: "Rollback validation",
+    notes: null,
   }]);
   assert.equal(JSON.parse(eventParams[1]).source, "plan_rework_revision");
 });
 
-test("unsupported plan feedback remains needs_attention and is never represented as consumed", async () => {
+test("planner never leaves malformed legacy rework hidden in planning+needs_attention", async () => {
   let updateParams;
   let eventParams;
-  let eventWrites = 0;
+
   const lockedLoop = {
     id: "loop-unsupported-rework",
     status: "planning",
@@ -319,12 +363,10 @@ test("unsupported plan feedback remains needs_attention and is never represented
           if (normalized.startsWith("select id, status") && normalized.includes("for update")) return { rows: [lockedLoop] };
           if (normalized.startsWith("update public.loops")) {
             updateParams = params;
-            lockedLoop.metadata = JSON.parse(params[0]);
             return { rows: [{ id: lockedLoop.id }] };
           }
           if (normalized.startsWith("insert into public.loop_events")) {
             eventParams = params;
-            eventWrites += 1;
             return { rows: [] };
           }
           throw new Error(`Unexpected unsupported rework SQL: ${normalized}`);
@@ -337,16 +379,13 @@ test("unsupported plan feedback remains needs_attention and is never represented
 
   assert.equal(response.status, 200);
   assert.equal(response.payload.promoted, 0);
-  assert.equal(response.payload.details[0].action, "plan_rework_needs_attention");
-  const metadata = JSON.parse(updateParams[0]);
-  assert.equal(metadata.plan_rework_context.status, "needs_attention");
+  assert.equal(response.payload.details[0].action, "malformed_plan_rework_restored_for_approval");
+  assert.equal(updateParams[0], "needs_approval");
+  const metadata = JSON.parse(updateParams[1]);
+  assert.equal(metadata.plan_rework_context.status, "rejected");
+  assert.equal(metadata.plan_rework_context.rejection_reason, "unsupported_plan_operations");
   assert.equal(metadata.plan_rework_context.consumed_at, undefined);
-  assert.equal(JSON.parse(eventParams[1]).reason, "unsupported_feedback_operation");
-
-  const retry = await route.POST({ headers: { get: () => "Bearer test-key" } });
-  assert.equal(retry.payload.promoted, 0);
-  assert.equal(retry.payload.details[0].action, "plan_rework_needs_attention");
-  assert.equal(eventWrites, 1, "needs_attention retries must not write another event or promote");
+  assert.equal(JSON.parse(eventParams[1]).reason, "unsupported_plan_operations");
 });
 
 test("the real queue=false approval route can subsequently transition approved to queued", async () => {
@@ -387,8 +426,13 @@ test("the real queue=false approval route can subsequently transition approved t
     "@/lib/supabase/admin": { createServiceClient: () => { throw new Error("unexpected cloud client"); } },
   });
 
+  let decisionCounter = 0;
   const invoke = (queue) => route.POST(
-    { json: async () => ({ action: "approve", queue }) },
+    { json: async () => ({
+      decision_id: `33333333-3333-4333-8333-${String(++decisionCounter).padStart(12, "0")}`,
+      action: "approve",
+      queue,
+    }) },
     { params: Promise.resolve({ id: "loop-queue" }) },
   );
   const approved = await invoke(false);
@@ -431,7 +475,7 @@ test("plan approval accepts only the exact action allowlist and a boolean queue"
     { action: "rework", queue: 0 },
   ]) {
     const response = await route.POST(
-      { json: async () => body },
+      { json: async () => ({ decision_id: "44444444-4444-4444-8444-444444444444", ...body }) },
       { params: Promise.resolve({ id: "loop-1" }) },
     );
     assert.equal(response.status, 400);
@@ -549,7 +593,11 @@ for (const action of ["approve_deliverable", "request_changes"]) {
     });
 
     const response = await route.POST(
-      { json: async () => ({ action, feedback: "preserve this exact feedback" }) },
+      { json: async () => ({
+        decision_id: "55555555-5555-4555-8555-555555555555",
+        action,
+        feedback: "preserve this exact feedback",
+      }) },
       { params: Promise.resolve({ id: "loop-1" }) },
     );
 
@@ -580,7 +628,11 @@ test("cloud Loop plan approval fails closed before any non-atomic service writes
   });
 
   const response = await route.POST(
-    { json: async () => ({ action: "approve", queue: true }) },
+    { json: async () => ({
+      decision_id: "66666666-6666-4666-8666-666666666666",
+      action: "approve",
+      queue: true,
+    }) },
     { params: Promise.resolve({ id: "loop-1" }) },
   );
 

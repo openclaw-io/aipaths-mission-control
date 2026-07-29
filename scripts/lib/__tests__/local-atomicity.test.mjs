@@ -205,9 +205,17 @@ function makeReviewHarness({ failEvent = false, failWork = false, notifyError = 
             assert.match(normalized, /for update$/);
             return { rows: pending.loop ? [pending.loop] : [] };
           }
+          if (normalized.startsWith("select metadata from loops")) {
+            assert.match(normalized, /for update$/);
+            return { rows: pending.loop ? [{ metadata: pending.loop.metadata }] : [] };
+          }
           if (normalized.includes("from loop_work_items lwi") && normalized.includes("join work_items wi")) {
             assert.match(normalized, /for update of wi$/);
             return { rows: pending.workItem ? [pending.workItem] : [] };
+          }
+          if (normalized.startsWith("update loops set metadata")) {
+            pending.loop.metadata = JSON.parse(params[0]);
+            return { rows: [{ id: pending.loop.id }] };
           }
           if (normalized.startsWith("update loops")) {
             pending.loop.status = params[0];
@@ -275,7 +283,11 @@ function makeReviewHarness({ failEvent = false, failWork = false, notifyError = 
   }, { fetch, console: { ...console, error() {} } });
 
   const request = {
-    json: async () => ({ action: "request_changes", feedback: "Please preserve the execution context" }),
+    json: async () => ({
+      decision_id: "77777777-7777-4777-8777-777777777777",
+      action: "request_changes",
+      feedback: "Please preserve the execution context",
+    }),
   };
 
   return {
