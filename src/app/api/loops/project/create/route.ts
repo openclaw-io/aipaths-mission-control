@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { NextResponse, type NextRequest } from "next/server";
 import { getLocalMissionControlUser, isLocalAuthDisabled } from "@/lib/auth/local";
 import { withTransaction } from "@/lib/db/postgres";
+import { parseQaPolicyInput, type QaPolicy } from "@/lib/loops/qa-policy";
 
 export const dynamic = "force-dynamic";
 
@@ -15,6 +16,7 @@ type TaskInput = {
   description: string | null;
   assigneeAgent: string | null;
   dependencies: Dependency[];
+  qaPolicy?: QaPolicy;
 };
 type StageInput = { key: string; title: string; description: string | null; tasks: TaskInput[] };
 type V2CreateInput = {
@@ -87,10 +89,12 @@ function parseV2Create(value: unknown): { ok: true; value: V2CreateInput } | { o
       const taskTitle = text(task.title, 200);
       const taskDescription = task.description == null ? null : text(task.description, 10_000);
       const assigneeAgent = task.assignee_agent == null ? null : text(task.assignee_agent, 100);
+      const qaPolicy = task.qa_policy === undefined ? undefined : parseQaPolicyInput(task.qa_policy);
       if (!taskKey || !KEY_PATTERN.test(taskKey) || taskKeys.has(taskKey)) return { ok: false, error: "invalid_or_duplicate_task_key" };
       if (!taskTitle || (task.description != null && !taskDescription) || (task.assignee_agent != null && !assigneeAgent)) {
         return { ok: false, error: "invalid_task_text" };
       }
+      if (task.qa_policy !== undefined && !qaPolicy) return { ok: false, error: "invalid_qa_policy" };
       const rawDependencies = task.depends_on ?? task.dependencies ?? [];
       if (!Array.isArray(rawDependencies)) return { ok: false, error: "invalid_dependencies" };
       const dependencies: Dependency[] = [];
@@ -115,7 +119,8 @@ function parseV2Create(value: unknown): { ok: true; value: V2CreateInput } | { o
       taskKeys.add(taskKey);
       taskCount += 1;
       dependencyCount += dependencies.length;
-      tasks.push({ key: taskKey, title: taskTitle, description: taskDescription, assigneeAgent, dependencies });
+      tasks.push({ key: taskKey, title: taskTitle, description: taskDescription, assigneeAgent, dependencies,
+        ...(qaPolicy ? { qaPolicy } : {}) });
     }
     stages.push({ key, title: stageTitle, description, tasks });
   }
@@ -191,6 +196,7 @@ function buildPlanSnapshot(project: V2CreateInput, repository: { id: string; key
         assignee_agent: task.assigneeAgent,
         position: taskPosition,
         dependencies: canonicalDependencies(task.key, task.dependencies),
+        ...(task.qaPolicy ? { qa_policy: task.qaPolicy } : {}),
       })),
     })),
   });
@@ -284,8 +290,9 @@ export async function POST(request: NextRequest) {
         taskIds.set(task.key, taskId);
         await client.query(
           `INSERT INTO public.loop_tasks (id,stage_id,key,title,description,position,status,assignee_agent,metadata,updated_at)
-           VALUES ($1,$2,$3,$4,$5,$6,'pending',$7,'{}'::jsonb,$8)`,
-          [taskId, stageId, task.key, task.title, task.description, taskPosition, task.assigneeAgent, now],
+           VALUES ($1,$2,$3,$4,$5,$6,'pending',$7,$8::jsonb,$9)`,
+          [taskId, stageId, task.key, task.title, task.description, taskPosition, task.assigneeAgent,
+            JSON.stringify(task.qaPolicy ? { qa_policy: task.qaPolicy } : {}), now],
         );
       }
     }

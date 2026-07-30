@@ -31,13 +31,17 @@ function transpileModule(path, mocks, globals = {}) {
     },
     console,
     structuredClone,
+    URL,
     ...globals,
   }, { filename: path });
   return cjsModule.exports;
 }
 
 function loadProjection() {
-  return transpileModule(resolve(repoRoot, "src/lib/loops/read-model-v2-shadow.ts"), {});
+  const qaPolicy = transpileModule(resolve(repoRoot, "src/lib/loops/qa-policy.ts"), {});
+  return transpileModule(resolve(repoRoot, "src/lib/loops/read-model-v2-shadow.ts"), {
+    "@/lib/loops/qa-policy": qaPolicy,
+  });
 }
 
 function loadReadModel({ query, local = true, primary = null, primaryByLoop = new Map(), supabaseAdmin = {} }) {
@@ -93,7 +97,15 @@ function workflowRows({ malformedDependency = false } = {}) {
     ],
     tasks: [
       { id: "task-design", stage_id: "stage-design", key: "design", title: "Design API", description: null, position: 0, status: "completed" },
-      { id: "task-build", stage_id: "stage-build", key: "build", title: "Build UI", description: null, position: 0, status: "in_progress" },
+      { id: "task-build", stage_id: "stage-build", key: "build", title: "Build UI", description: null, position: 0, status: "in_progress", metadata: {
+        qa_policy: {
+          required: true,
+          target_url: "https://staging.example.test/app",
+          viewports: [{ name: "desktop", width: 1440, height: 900 }, { name: "mobile", width: 390, height: 844 }],
+          flows: ["Open dashboard", "Inspect navigation"],
+        },
+        arbitrary_secret: "MUST_NOT_LEAK",
+      } },
     ],
     dependencies: [{ task_id: "task-build", depends_on_task_id: malformedDependency ? "task-outside" : "task-design", dependency_type: "hard" }],
     runs: [{ id: "run-1", task_id: "task-build", attempt_number: 1, status: "running", started_at: "2026-01-02T01:00:00Z", finished_at: null, error: null, output: {}, created_at: "2026-01-02T01:00:00Z" }],
@@ -143,6 +155,13 @@ test("getLoopDetail local builds a V2 workflow from revision-scoped read-only qu
   assert.equal(detail.workflow.stages[1].tasks[0].reviewCount, 1);
   assert.deepEqual(Array.from(detail.workflow.stages[1].tasks[0].reviewStatuses), ["pending"]);
   assert.equal(detail.workflow.stages[1].tasks[0].evidenceCount, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(detail.workflow.stages[1].tasks[0].qaPolicy)), {
+    required: true,
+    targetUrl: "https://staging.example.test/app",
+    viewports: [{ name: "desktop", width: 1440, height: 900 }, { name: "mobile", width: 390, height: 844 }],
+    flowCount: 2,
+  });
+  assert.doesNotMatch(JSON.stringify(detail), /MUST_NOT_LEAK|arbitrary_secret|Open dashboard/);
 
   const revisionCall = calls.find(({ sql }) => /from loop_plan_revisions/i.test(sql));
   assert.deepEqual(Array.from(revisionCall.params), ["rev-2", "loop-v2"]);
@@ -436,6 +455,12 @@ test("LoopDetail renders the V2 Proyecto hierarchy read-only while V1 keeps its 
   assert.match(v2Html, /Depende de:[\s\S]*Design API/);
   assert.match(v2Html, /1 intento/);
   assert.match(v2Html, /1 evidencia/);
+  assert.match(v2Html, /QA requerida/);
+  assert.match(v2Html, /https:\/\/staging\.example\.test\/app/);
+  assert.match(v2Html, /desktop[^<]*1440×900/);
+  assert.match(v2Html, /mobile[^<]*390×844/);
+  assert.match(v2Html, /2 flujos/);
+  assert.doesNotMatch(v2Html, /MUST_NOT_LEAK|arbitrary_secret|Open dashboard/);
   assert.doesNotMatch(v2Html, /Compact Plan|APPROVAL_ACTION|CLARIFICATION_ACTION|REVIEW_ACTION/);
 
   const v1Html = renderToStaticMarkup(React.createElement(LoopDetail, {

@@ -42,7 +42,7 @@ function transpileModule(sourcePath, requires = {}, globals = {}) {
       if (specifier in requires) return requires[specifier];
       throw new Error(`Unexpected require from ${sourcePath}: ${specifier}`);
     },
-    Buffer, Date, Number, Set, Map, JSON, String, RegExp, Object, Array, Math, Promise, Error, console,
+    Buffer, Date, Number, Set, Map, JSON, String, RegExp, Object, Array, Math, Promise, Error, URL, console,
     process: { env: { AGENT_API_KEY: "test-key" } },
     ...globals,
   }, { filename: sourcePath });
@@ -64,6 +64,7 @@ async function postgresTransaction(run) {
 
 const nextServer = { NextResponse: { json: (payload, init = {}) => ({ payload, status: init.status || 200 }) } };
 const localAuth = { isLocalAuthDisabled: () => true, getLocalMissionControlUser: () => ({ email: "reviewer@test" }) };
+const qaPolicy = transpileModule(resolve(repoRoot, "src/lib/loops/qa-policy.ts"));
 const executionInstruction = transpileModule(resolve(repoRoot, "src/lib/loops/execution-instruction.ts"));
 const gitArtifact = transpileModule(resolve(repoRoot, "src/lib/work-items/git-artifact.ts"), {
   "node:child_process": { execFile }, "node:fs/promises": { realpath },
@@ -71,6 +72,7 @@ const gitArtifact = transpileModule(resolve(repoRoot, "src/lib/work-items/git-ar
 const createRoute = transpileModule(resolve(repoRoot, "src/app/api/loops/project/create/route.ts"), {
   "node:crypto": { createHash, randomUUID }, "next/server": nextServer,
   "@/lib/auth/local": localAuth, "@/lib/db/postgres": { withTransaction: postgresTransaction },
+  "@/lib/loops/qa-policy": qaPolicy,
 });
 const approveRoute = transpileModule(resolve(repoRoot, "src/app/api/loops/[id]/approve/route.ts"), {
   "node:crypto": { createHash }, "next/server": nextServer, "@/lib/auth/local": localAuth,

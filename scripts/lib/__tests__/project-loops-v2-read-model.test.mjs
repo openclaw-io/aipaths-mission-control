@@ -8,27 +8,34 @@ import ts from "typescript";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const sourcePath = resolve(repoRoot, "src/lib/loops/read-model-v2-shadow.ts");
+const qaPolicySourcePath = resolve(repoRoot, "src/lib/loops/qa-policy.ts");
 
-function loadShadowReadModel() {
-  const source = readFileSync(sourcePath, "utf8");
-  const transpiled = ts.transpileModule(source, {
+function transpilePureModule(path, requires = {}) {
+  const transpiled = ts.transpileModule(readFileSync(path, "utf8"), {
     compilerOptions: {
       module: ts.ModuleKind.CommonJS,
       target: ts.ScriptTarget.ES2022,
       esModuleInterop: true,
     },
-    fileName: sourcePath,
+    fileName: path,
   }).outputText;
   const cjsModule = { exports: {} };
   vm.runInNewContext(transpiled, {
     module: cjsModule,
     exports: cjsModule.exports,
     require(specifier) {
-      throw new Error(`Pure shadow read model must not import ${specifier}`);
+      if (specifier in requires) return requires[specifier];
+      throw new Error(`Pure module must not import ${specifier}`);
     },
     structuredClone,
-  }, { filename: sourcePath });
+    URL,
+  }, { filename: path });
   return cjsModule.exports;
+}
+
+function loadShadowReadModel() {
+  const qaPolicy = transpilePureModule(qaPolicySourcePath);
+  return transpilePureModule(sourcePath, { "@/lib/loops/qa-policy": qaPolicy });
 }
 
 test("V1 is projected as one synthetic stage with stable synthetic tasks and partial history", () => {
@@ -127,7 +134,15 @@ test("V2 renders only the current real revision and attaches normalized history 
       { id: "stage-1", plan_revision_id: "rev-2", key: "design", title: "Design", description: null, position: 0, status: "completed" },
     ],
     tasks: [
-      { id: "task-build", stage_id: "stage-2", key: "build", title: "Build", description: null, position: 0, status: "in_progress" },
+      { id: "task-build", stage_id: "stage-2", key: "build", title: "Build", description: null, position: 0, status: "in_progress", metadata: {
+        qa_policy: {
+          required: true,
+          target_url: "https://staging.example.test/app",
+          viewports: [{ name: "desktop", width: 1440, height: 900 }, { name: "mobile", width: 390, height: 844 }],
+          flows: ["Open dashboard", "Inspect navigation"],
+        },
+        secret_internal_note: "MUST_NOT_LEAK",
+      } },
       { id: "task-design", stage_id: "stage-1", key: "design", title: "Design", description: null, position: 0, status: "completed" },
       { id: "task-old", stage_id: "stage-old", key: "old", title: "Old", description: null, position: 0, status: "completed" },
     ],
@@ -151,8 +166,79 @@ test("V2 renders only the current real revision and attaches normalized history 
   assert.equal(projected.stages[1].tasks[0].reviewCount, 1);
   assert.deepEqual(Array.from(projected.stages[1].tasks[0].reviewStatuses), ["pending"]);
   assert.equal(projected.stages[1].tasks[0].evidenceCount, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(projected.stages[1].tasks[0].qaPolicy)), {
+    required: true,
+    targetUrl: "https://staging.example.test/app",
+    viewports: [{ name: "desktop", width: 1440, height: 900 }, { name: "mobile", width: 390, height: 844 }],
+    flowCount: 2,
+  });
+  assert.doesNotMatch(JSON.stringify(projected), /MUST_NOT_LEAK|secret_internal_note|Open dashboard/);
   assert.deepEqual(Array.from(projected.stages[1].tasks[0].evidenceKinds), ["artifact"]);
   assert.equal(projected.stages.some((stage) => stage.id === "stage-old"), false);
+});
+
+test("V2 QA summary defaults field-absent historical tasks to not required and rejects malformed policy metadata", () => {
+  const { projectLoopWorkflowShadow } = loadShadowReadModel();
+  const base = {
+    loop: { id: "loop-v2", workflow_version: 2, mode: "dag", current_plan_revision_id: "rev-1", plan: [] },
+    planRevisions: [{ id: "rev-1", loop_id: "loop-v2", revision_number: 1, status: "approved", summary: null, created_at: "x", updated_at: "x" }],
+    stages: [{ id: "stage", plan_revision_id: "rev-1", key: "stage", title: "Stage", description: null, position: 0, status: "pending" }],
+    tasks: [{ id: "task", stage_id: "stage", key: "task", title: "Task", description: null, position: 0, status: "pending" }],
+    dependencies: [], runs: [], reviews: [], evidence: [],
+  };
+  const historical = projectLoopWorkflowShadow(base);
+  assert.deepEqual(JSON.parse(JSON.stringify(historical.stages[0].tasks[0].qaPolicy)), {
+    required: false, targetUrl: null, viewports: [], flowCount: 0,
+  });
+  assert.throws(() => projectLoopWorkflowShadow({
+    ...base,
+    tasks: [{ ...base.tasks[0], metadata: { qa_policy: {
+      required: true, target_url: "https://example.test", viewports: [], flows: [], extra: true,
+    } } }],
+  }), /QA policy metadata.*invalid/i);
+});
+
+test("V2 QA summary rejects every non-canonical persisted QA policy shape without leaking flow text", () => {
+  const { projectLoopWorkflowShadow } = loadShadowReadModel();
+  const task = { id: "task", stage_id: "stage", key: "task", title: "Task", description: null, position: 0, status: "pending" };
+  const base = {
+    loop: { id: "loop-v2", workflow_version: 2, mode: "dag", current_plan_revision_id: "rev-1", plan: [] },
+    planRevisions: [{ id: "rev-1", loop_id: "loop-v2", revision_number: 1, status: "approved", summary: null, created_at: "x", updated_at: "x" }],
+    stages: [{ id: "stage", plan_revision_id: "rev-1", key: "stage", title: "Stage", description: null, position: 0, status: "pending" }],
+    tasks: [task], dependencies: [], runs: [], reviews: [], evidence: [],
+  };
+  const valid = {
+    required: true,
+    target_url: "https://example.test/app",
+    viewports: [{ name: "desktop", width: 1440, height: 900 }],
+    flows: ["Open dashboard"],
+  };
+  const cases = [
+    [{ ...valid, target_url: "https://user:secret@example.test/app" }, "URL credentials"],
+    [{ ...valid, target_url: "https://exa mple.test/app" }, "malformed URL"],
+    [{ ...valid, target_url: "https://example.test/app#secret" }, "URL fragment"],
+    [{ ...valid, target_url: `https://example.test/${"x".repeat(2_100)}` }, "oversized URL"],
+    [{ ...valid, viewports: [] }, "required viewport minimum"],
+    [{ ...valid, viewports: [{ name: "   ", width: 1440, height: 900 }] }, "whitespace viewport name"],
+    [{ ...valid, viewports: [{ name: "x".repeat(81), width: 1440, height: 900 }] }, "oversized viewport name"],
+    [{ ...valid, viewports: [
+      { name: "desktop", width: 1440, height: 900 },
+      { name: " Desktop ", width: 390, height: 844 },
+    ] }, "duplicate canonical viewport name"],
+    [{ ...valid, flows: ["Open dashboard", "Open dashboard"] }, "duplicate flows"],
+    [{ ...valid, flows: ["x".repeat(501)] }, "oversized flow"],
+    [{ ...valid, flows: [" Open dashboard "] }, "non-canonical flow whitespace"],
+  ];
+  for (const [qaPolicy, label] of cases) {
+    let thrown;
+    try {
+      projectLoopWorkflowShadow({ ...base, tasks: [{ ...task, metadata: { qa_policy: qaPolicy } }] });
+    } catch (error) {
+      thrown = error;
+    }
+    assert.match(String(thrown), /QA policy metadata.*invalid/i, label);
+    assert.doesNotMatch(String(thrown), /Open dashboard|secret/, `${label} must not leak policy payload`);
+  }
 });
 
 test("shadow read model rejects inconsistent workflow version, mode, and current revision state", () => {
@@ -215,7 +301,7 @@ test("shadow read model rejects cross-revision dependencies rather than hiding t
 });
 
 test("shadow projection remains pure while the live read model may consume it", () => {
-  const source = readFileSync(sourcePath, "utf8");
+  const source = `${readFileSync(sourcePath, "utf8")}\n${readFileSync(qaPolicySourcePath, "utf8")}`;
   assert.doesNotMatch(source, /@\/lib\/db|supabase|\bfetch\s*\(|\.(?:insert|update|delete)\s*\(/i);
   assert.doesNotMatch(source, /"use client"/);
 });

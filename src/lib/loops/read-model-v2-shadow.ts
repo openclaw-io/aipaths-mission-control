@@ -1,3 +1,5 @@
+import { parsePersistedQaPolicy } from "@/lib/loops/qa-policy";
+
 export type WorkflowMode = "linear" | "dag";
 export type WorkflowItemStatus =
   | "pending"
@@ -51,6 +53,14 @@ export type ShadowTaskRow = {
   description: string | null;
   position: number;
   status: WorkflowItemStatus;
+  metadata?: Record<string, unknown> | null;
+};
+
+export type QaPolicySummary = {
+  required: boolean;
+  targetUrl: string | null;
+  viewports: Array<{ name: string; width: number; height: number }>;
+  flowCount: number;
 };
 
 export type ShadowDependencyRow = {
@@ -122,6 +132,7 @@ export type ShadowTask = {
   reviewStatuses: string[];
   evidenceCount: number;
   evidenceKinds: string[];
+  qaPolicy?: QaPolicySummary;
   qualityCycle?: number;
   qualityState?: "implementation" | "review" | "approved" | "blocked";
   implementationStatus?: string | null;
@@ -170,6 +181,23 @@ function normalizeLegacyStatus(status: string | undefined): WorkflowItemStatus {
     return status as WorkflowItemStatus;
   }
   return "pending";
+}
+
+const NO_QA_POLICY: QaPolicySummary = { required: false, targetUrl: null, viewports: [], flowCount: 0 };
+
+function qaPolicySummary(task: ShadowTaskRow): QaPolicySummary {
+  const metadata = task.metadata;
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)
+    || !Object.hasOwn(metadata, "qa_policy")) return { ...NO_QA_POLICY, viewports: [] };
+  const policy = parsePersistedQaPolicy(metadata.qa_policy);
+  if (!policy) throw new Error(`Task ${task.id} QA policy metadata is invalid`);
+  if (!policy.required) return { ...NO_QA_POLICY, viewports: [] };
+  return {
+    required: true,
+    targetUrl: policy.target_url,
+    viewports: policy.viewports.map((viewport) => ({ ...viewport })),
+    flowCount: policy.flows.length,
+  };
 }
 
 function stageStatusFor(tasks: ShadowTask[]): WorkflowItemStatus {
@@ -381,6 +409,7 @@ function projectV2(input: LoopWorkflowShadowInput): LoopWorkflowShadow {
         reviewStatuses: input.reviews.filter((review) => review.task_id === task.id).map((review) => review.status),
         evidenceCount: evidenceCounts.get(task.id) ?? 0,
         evidenceKinds: input.evidence.filter((item) => item.task_id === task.id).map((item) => item.kind),
+        qaPolicy: qaPolicySummary(task),
         qualityCycle,
         qualityState,
         implementationStatus: latestImplementation?.status ?? null,

@@ -110,6 +110,24 @@ function V2WorkflowPanel({ workflow }: { workflow: LoopDetailV2Payload["workflow
                             <span>Depende de: {dependencyNames.join(", ")}</span>
                           )}
                         </div>
+                        <div className="mt-2 rounded border border-gray-800 bg-[#111118] px-3 py-2 text-xs text-gray-400">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className={`rounded-full border px-2 py-0.5 ${task.qaPolicy?.required
+                              ? "border-emerald-800 bg-emerald-950/30 text-emerald-200"
+                              : "border-gray-700 text-gray-500"}`}>
+                              {task.qaPolicy?.required ? "QA requerida" : "QA no requerida"}
+                            </span>
+                            {task.qaPolicy?.targetUrl && <span className="break-all">{task.qaPolicy.targetUrl}</span>}
+                          </div>
+                          {task.qaPolicy?.required && (
+                            <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1">
+                              {task.qaPolicy.viewports.map((viewport) => (
+                                <span key={viewport.name}>{viewport.name} {viewport.width}×{viewport.height}</span>
+                              ))}
+                              <span>{task.qaPolicy.flowCount} {task.qaPolicy.flowCount === 1 ? "flujo" : "flujos"}</span>
+                            </div>
+                          )}
+                        </div>
                       </div>
                     );
                   })}

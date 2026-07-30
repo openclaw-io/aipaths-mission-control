@@ -34,7 +34,7 @@ function transpileModule(sourcePath, requires = {}, globals = {}) {
       if (specifier in requires) return requires[specifier];
       throw new Error(`Unexpected require from ${sourcePath}: ${specifier}`);
     },
-    Date, Number, Set, Map, JSON, String, RegExp, Object, Array, Math, Promise, Error, console,
+    Date, Number, Set, Map, JSON, String, RegExp, Object, Array, Math, Promise, Error, URL, console,
     process: { env: { AGENT_API_KEY: "test-key" } },
     ...globals,
   };
@@ -63,6 +63,7 @@ const localAuth = {
   isLocalAuthDisabled: () => true,
   getLocalMissionControlUser: () => ({ email: "v2-reviewer@example.test" }),
 };
+const qaPolicy = transpileModule(resolve(repoRoot, "src/lib/loops/qa-policy.ts"));
 const executionInstruction = transpileModule(resolve(repoRoot, "src/lib/loops/execution-instruction.ts"));
 const gitArtifact = transpileModule(resolve(repoRoot, "src/lib/work-items/git-artifact.ts"), {
   "node:child_process": { execFile }, "node:fs/promises": { realpath },
@@ -70,6 +71,7 @@ const gitArtifact = transpileModule(resolve(repoRoot, "src/lib/work-items/git-ar
 const createRoute = transpileModule(resolve(repoRoot, "src/app/api/loops/project/create/route.ts"), {
   "node:crypto": { createHash, randomUUID }, "next/server": nextServer,
   "@/lib/auth/local": localAuth, "@/lib/db/postgres": { withTransaction: postgresTransaction },
+  "@/lib/loops/qa-policy": qaPolicy,
 });
 const approveRoute = transpileModule(resolve(repoRoot, "src/app/api/loops/[id]/approve/route.ts"), {
   "node:crypto": { createHash }, "next/server": nextServer, "@/lib/auth/local": localAuth,
@@ -148,6 +150,15 @@ function chainPayload(overrides = {}) {
 }
 
 async function invokeCreate(body) { return createRoute.POST({ json: async () => body }); }
+
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === "object") return Object.fromEntries(
+    Object.entries(value).sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => [key, canonical(child)]),
+  );
+  return value;
+}
 async function invokeApprove(loopId, body = {}) {
   const revision = (await pool.query(
     "select current_plan_revision_id plan_revision_id, content_hash plan_hash from loops join loop_plan_revisions on loop_plan_revisions.id=loops.current_plan_revision_id where loops.id=$1",
@@ -326,6 +337,222 @@ test("Project create is atomic/idempotent, validates DAGs, creates one pending r
 
   const quickCreate = readFileSync(resolve(repoRoot, "src/app/api/loops/create/route.ts"), "utf8");
   assert.doesNotMatch(quickCreate, /workflow_version\s*[:,].*2/);
+});
+
+test("Project create canonicalizes, hashes, and persists an explicit per-task QA policy while omission stays field-absent", async () => {
+  const required = chainPayload({
+    stages: [{ key: "ui", title: "UI", tasks: [{
+      key: "responsive", title: "Responsive UI",
+      qa_policy: {
+        required: true,
+        target_url: "https://staging.example.test/app?fixture=qa",
+        flows: ["  Open dashboard  ", "Inspect navigation"],
+      },
+    }] }],
+  });
+  const requiredCreated = await invokeCreate(required);
+  assert.equal(requiredCreated.status, 201);
+  const requiredLoopId = requiredCreated.payload.loop.id;
+  const omittedCreated = await invokeCreate(chainPayload({
+    stages: [{ key: "api", title: "API", tasks: [{ key: "server", title: "Server task" }] }],
+  }));
+  assert.equal(omittedCreated.status, 201);
+  const omittedLoopId = omittedCreated.payload.loop.id;
+  try {
+    const requiredState = (await pool.query(`select p.plan_snapshot,t.metadata
+      from loop_plan_revisions p join loop_stages s on s.plan_revision_id=p.id
+      join loop_tasks t on t.stage_id=s.id where p.loop_id=$1`, [requiredLoopId])).rows[0];
+    const policy = {
+      required: true,
+      target_url: "https://staging.example.test/app?fixture=qa",
+      viewports: [
+        { name: "desktop", width: 1440, height: 900 },
+        { name: "mobile", width: 390, height: 844 },
+      ],
+      flows: ["Open dashboard", "Inspect navigation"],
+    };
+    assert.deepEqual(requiredState.plan_snapshot.stages[0].tasks[0].qa_policy, policy);
+    assert.deepEqual(requiredState.metadata.qa_policy, policy);
+    assert.equal(requiredCreated.payload.loop.plan_hash,
+      createHash("sha256").update(JSON.stringify(canonical(requiredState.plan_snapshot))).digest("hex"));
+
+    const replay = await invokeCreate({
+      ...required,
+      stages: [{ ...required.stages[0], tasks: [{
+        ...required.stages[0].tasks[0],
+        qa_policy: { ...required.stages[0].tasks[0].qa_policy, viewports: [] },
+      }] }],
+    });
+    assert.equal(replay.status, 200, "empty required viewports canonicalize to the same defaults");
+    assert.equal(replay.payload.loop.plan_hash, requiredCreated.payload.loop.plan_hash);
+
+    const omittedState = (await pool.query(`select p.plan_snapshot,t.metadata
+      from loop_plan_revisions p join loop_stages s on s.plan_revision_id=p.id
+      join loop_tasks t on t.stage_id=s.id where p.loop_id=$1`, [omittedLoopId])).rows[0];
+    assert.equal(Object.hasOwn(omittedState.plan_snapshot.stages[0].tasks[0], "qa_policy"), false);
+    assert.equal(Object.hasOwn(omittedState.metadata, "qa_policy"), false);
+  } finally {
+    await cleanup(requiredLoopId);
+    await cleanup(omittedLoopId);
+  }
+});
+
+test("Project create rejects malformed QA policy keys, URLs, viewports, flows, and non-required payload", async () => {
+  const validViewport = { name: "desktop", width: 1440, height: 900 };
+  const cases = [
+    [{ required: true, target_url: "https://example.test", viewports: [], flows: [], surprise: true }, "exact keys"],
+    [{ required: true, target_url: "relative/path", viewports: [], flows: [] }, "absolute URL"],
+    [{ required: true, target_url: "ftp://example.test", viewports: [], flows: [] }, "HTTP(S) URL"],
+    [{ required: true, target_url: "https://user:pass@example.test", viewports: [], flows: [] }, "credentials"],
+    [{ required: true, target_url: "https://exa mple.test", viewports: [], flows: [] }, "malformed URL"],
+    [{ required: true, target_url: "https://example.test/#secret", viewports: [], flows: [] }, "fragment"],
+    [{ required: true, target_url: null, viewports: [], flows: [] }, "required target"],
+    [{ required: true, target_url: "https://example.test", viewports: [{ ...validViewport, extra: 1 }], flows: [] }, "viewport exact keys"],
+    [{ required: true, target_url: "https://example.test", viewports: [{ ...validViewport, width: 319 }], flows: [] }, "viewport minimum"],
+    [{ required: true, target_url: "https://example.test", viewports: [validViewport, { ...validViewport }], flows: [] }, "unique viewport names"],
+    [{ required: true, target_url: "https://example.test", viewports: [{ ...validViewport, name: "   " }], flows: [] }, "useful viewport name"],
+    [{ required: true, target_url: "https://example.test", viewports: [{ ...validViewport, name: "x".repeat(81) }], flows: [] }, "viewport name limit"],
+    [{ required: true, target_url: "https://example.test", viewports: [validViewport, { ...validViewport, name: " Desktop " }], flows: [] }, "canonical unique viewport names"],
+    [{ required: true, target_url: "https://example.test", viewports: Array.from({ length: 9 }, (_, i) => ({ name: `v${i}`, width: 320, height: 320 })), flows: [] }, "viewport limit"],
+    [{ required: true, target_url: "https://example.test", viewports: [], flows: ["   "] }, "useful flow"],
+    [{ required: true, target_url: "https://example.test", viewports: [], flows: ["x".repeat(501)] }, "flow text limit"],
+    [{ required: true, target_url: "https://example.test", viewports: [], flows: ["Open dashboard", " Open dashboard "] }, "unique canonical flows"],
+    [{ required: true, target_url: "https://example.test", viewports: [], flows: Array.from({ length: 21 }, (_, i) => `flow ${i}`) }, "flow limit"],
+    [{ required: false, target_url: "https://example.test", viewports: [], flows: [] }, "non-required target"],
+    [{ required: false, target_url: null, viewports: [validViewport], flows: [] }, "non-required viewports"],
+    [{ required: false, target_url: null, viewports: [], flows: ["open"] }, "non-required flows"],
+  ];
+  for (const [qaPolicy, label] of cases) {
+    const response = await invokeCreate(chainPayload({
+      stages: [{ key: "qa", title: "QA", tasks: [{ key: "invalid", title: "Invalid", qa_policy: qaPolicy }] }],
+    }));
+    assert.equal(response.status, 400, label);
+    assert.equal(response.payload.error, "invalid_qa_policy", label);
+  }
+
+  const optional = await invokeCreate(chainPayload({
+    stages: [{ key: "qa", title: "QA", tasks: [{ key: "optional", title: "Optional", qa_policy: { required: false } }] }],
+  }));
+  assert.equal(optional.status, 201);
+  try {
+    const state = (await pool.query(`select p.plan_snapshot,t.metadata
+      from loop_plan_revisions p join loop_stages s on s.plan_revision_id=p.id
+      join loop_tasks t on t.stage_id=s.id where p.loop_id=$1`, [optional.payload.loop.id])).rows[0];
+    const canonicalOptional = { required: false, target_url: null, viewports: [], flows: [] };
+    assert.deepEqual(state.plan_snapshot.stages[0].tasks[0].qa_policy, canonicalOptional);
+    assert.deepEqual(state.metadata.qa_policy, canonicalOptional);
+  } finally { await cleanup(optional.payload.loop.id); }
+});
+
+test("V2 approval rejects QA policy added, removed, or changed before approval", async () => {
+  const policy = {
+    required: true,
+    target_url: "https://example.test/app",
+    viewports: [{ name: "desktop", width: 1440, height: 900 }],
+    flows: ["Open dashboard"],
+  };
+  const fixtures = [
+    { label: "added", task: { key: "added", title: "Added" },
+      assignment: "metadata=jsonb_set(metadata,'{qa_policy}',$2::jsonb,true)", value: policy },
+    { label: "removed", task: { key: "removed", title: "Removed", qa_policy: policy },
+      assignment: "metadata=metadata-'qa_policy'" },
+    { label: "changed", task: { key: "changed", title: "Changed", qa_policy: policy },
+      assignment: "metadata=jsonb_set(metadata,'{qa_policy,target_url}','\"https://changed.example.test\"'::jsonb)" },
+  ];
+  const loopIds = [];
+  try {
+    for (const fixture of fixtures) {
+      const created = await invokeCreate(chainPayload({
+        stages: [{ key: fixture.label, title: fixture.label, tasks: [fixture.task] }],
+      }));
+      assert.equal(created.status, 201, fixture.label);
+      loopIds.push(created.payload.loop.id);
+      await pool.query(`update loop_tasks set ${fixture.assignment}
+        where stage_id in (select s.id from loop_stages s join loop_plan_revisions p on p.id=s.plan_revision_id where p.loop_id=$1)`,
+      fixture.value === undefined ? [created.payload.loop.id] : [created.payload.loop.id, JSON.stringify(fixture.value)]);
+      const approved = await invokeApprove(created.payload.loop.id);
+      assert.equal(approved.status, 409, fixture.label);
+      assert.equal(approved.payload.error, "v2_plan_snapshot_integrity_conflict", fixture.label);
+    }
+  } finally {
+    for (const loopId of loopIds) await cleanup(loopId);
+  }
+});
+
+test("materializer rejects QA policy added, removed, or changed after approval but keeps absent/absent compatible", async () => {
+  const policy = {
+    required: true,
+    target_url: "http://127.0.0.1:3001/fixture",
+    viewports: [{ name: "tablet", width: 768, height: 1024 }],
+    flows: ["Open fixture"],
+  };
+  const fixtures = [
+    { label: "added", task: { key: "added", title: "Added" },
+      assignment: "metadata=jsonb_set(metadata,'{qa_policy}',$2::jsonb,true)", value: policy },
+    { label: "removed", task: { key: "removed", title: "Removed", qa_policy: policy },
+      assignment: "metadata=metadata-'qa_policy'" },
+    { label: "changed", task: { key: "changed", title: "Changed", qa_policy: policy },
+      assignment: "metadata=jsonb_set(metadata,'{qa_policy,flows}','[\"Tampered flow\"]'::jsonb)" },
+  ];
+  const driftedLoopIds = [];
+  const historicalCreated = await invokeCreate(chainPayload({
+    stages: [{ key: "legacy", title: "Legacy", tasks: [{ key: "old", title: "Old task" }] }],
+  }));
+  const historicalLoopId = historicalCreated.payload.loop.id;
+  try {
+    for (const fixture of fixtures) {
+      const created = await invokeCreate(chainPayload({
+        stages: [{ key: fixture.label, title: fixture.label, tasks: [fixture.task] }],
+      }));
+      assert.equal(created.status, 201, fixture.label);
+      driftedLoopIds.push(created.payload.loop.id);
+      assert.equal((await invokeApprove(created.payload.loop.id)).status, 200, fixture.label);
+    }
+    const corrupter = await pool.connect();
+    try {
+      await corrupter.query("begin");
+      await corrupter.query("set local session_replication_role=replica");
+      for (const [index, fixture] of fixtures.entries()) {
+        await corrupter.query(`update loop_tasks set ${fixture.assignment}
+          where stage_id in (select s.id from loop_stages s join loop_plan_revisions p on p.id=s.plan_revision_id where p.loop_id=$1)`,
+        fixture.value === undefined ? [driftedLoopIds[index]] : [driftedLoopIds[index], JSON.stringify(fixture.value)]);
+      }
+      await corrupter.query("commit");
+    } finally {
+      await corrupter.query("rollback").catch(() => {});
+      corrupter.release();
+    }
+    const drifted = await invokeMaterialize();
+    for (const [index, fixture] of fixtures.entries()) {
+      const loopId = driftedLoopIds[index];
+      assert.equal(drifted.payload.details.find((entry) => entry.loopId === loopId)?.reason,
+        "approved_snapshot_graph_drift", fixture.label);
+      assert.equal((await rowsFor(loopId)).rows.filter((row) => row.work_item_id).length, 0, fixture.label);
+    }
+
+    await invokeApprove(historicalLoopId);
+    const historical = await invokeMaterialize();
+    assert.equal(historical.payload.details.find((entry) => entry.loopId === historicalLoopId)?.action, "materialized");
+  } finally {
+    for (const loopId of driftedLoopIds) await cleanup(loopId);
+    await cleanup(historicalLoopId);
+  }
+});
+
+test("approved task trigger rejects an ordinary post-approval metadata mutation", async () => {
+  const created = await invokeCreate(chainPayload());
+  const loopId = created.payload.loop.id;
+  try {
+    assert.equal((await invokeApprove(loopId)).status, 200);
+    await assert.rejects(
+      () => pool.query(`update loop_tasks set metadata=jsonb_set(metadata,'{qa_policy}',
+        '{"required":false,"target_url":null,"viewports":[],"flows":[]}'::jsonb,true)
+        where stage_id in (select s.id from loop_stages s join loop_plan_revisions p on p.id=s.plan_revision_id where p.loop_id=$1)`, [loopId]),
+      /task specification is immutable/i,
+    );
+  } finally {
+    await cleanup(loopId);
+  }
 });
 
 test("V2 approval is exact/atomic and rework fails 501 without partial mutation", async () => {
@@ -821,6 +1048,7 @@ test("cloud/non-local Project create fails closed before any transaction", async
     "node:crypto": { randomUUID }, "next/server": nextServer,
     "@/lib/auth/local": { isLocalAuthDisabled: () => false, getLocalMissionControlUser: () => null },
     "@/lib/db/postgres": { withTransaction: async () => { transactions += 1; } },
+    "@/lib/loops/qa-policy": qaPolicy,
   });
   const response = await cloudRoute.POST({ json: async () => chainPayload() });
   assert.equal(response.status, 503);
