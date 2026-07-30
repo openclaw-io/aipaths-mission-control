@@ -147,7 +147,9 @@ export function parseReviewerResult(stdout: string): ReviewerResult {
   const record = value as Record<string, unknown>;
   if (Object.keys(record).sort().join(",") !== "feedback,findings,verdict") throw new Error("reviewer_result_unknown_or_missing_fields");
   if (record.verdict !== "approved" && record.verdict !== "changes_requested") throw new Error("reviewer_verdict_invalid");
-  if (record.feedback !== null && !usefulText(record.feedback, 20_000)) throw new Error("reviewer_feedback_invalid");
+  if (record.feedback !== null && typeof record.feedback !== "string") throw new Error("reviewer_feedback_invalid");
+  const feedback = typeof record.feedback === "string" ? record.feedback.trim() || null : null;
+  if (feedback !== null && feedback.length > 20_000) throw new Error("reviewer_feedback_invalid");
   if (!Array.isArray(record.findings) || record.findings.length > 100) throw new Error("reviewer_findings_invalid");
   const findings = record.findings.map((raw) => {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("reviewer_finding_invalid");
@@ -160,7 +162,6 @@ export function parseReviewerResult(stdout: string): ReviewerResult {
     if (!title || !evidence || !recommendation) throw new Error("reviewer_finding_not_semantically_useful");
     return { severity: finding.severity, title, evidence, recommendation } as ReviewerFinding;
   });
-  const feedback = record.feedback === null ? null : String(record.feedback).trim();
   if (record.verdict === "approved" && findings.some((finding) => finding.severity === "blocker" || finding.severity === "major")) {
     throw new Error("reviewer_approval_has_blocking_findings");
   }

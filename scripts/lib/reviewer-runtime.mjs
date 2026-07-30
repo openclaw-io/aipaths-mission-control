@@ -145,7 +145,9 @@ export function parseReviewerResult(text) {
   if (!value || typeof value !== "object" || Array.isArray(value)
     || Object.keys(value).sort().join(",") !== "feedback,findings,verdict") throw new Error("reviewer_result_invalid");
   if (!["approved", "changes_requested"].includes(value.verdict)) throw new Error("reviewer_verdict_invalid");
-  if (value.feedback !== null && !useful(value.feedback, 20_000)) throw new Error("reviewer_feedback_invalid");
+  if (value.feedback !== null && typeof value.feedback !== "string") throw new Error("reviewer_feedback_invalid");
+  const feedback = typeof value.feedback === "string" ? value.feedback.trim() || null : null;
+  if (feedback !== null && feedback.length > 20_000) throw new Error("reviewer_feedback_invalid");
   if (!Array.isArray(value.findings) || value.findings.length > 100) throw new Error("reviewer_findings_invalid");
   const findings = value.findings.map((finding) => {
     if (!finding || typeof finding !== "object" || Array.isArray(finding)
@@ -155,7 +157,6 @@ export function parseReviewerResult(text) {
     if (!title || !evidence || !recommendation) throw new Error("reviewer_finding_not_semantically_useful");
     return { severity: finding.severity, title, evidence, recommendation };
   });
-  const feedback = value.feedback === null ? null : value.feedback.trim();
   if (value.verdict === "approved" && findings.some((f) => ["blocker", "major"].includes(f.severity))) throw new Error("reviewer_approval_has_blocking_findings");
   if (value.verdict === "changes_requested" && (!feedback || findings.length === 0)) throw new Error("reviewer_changes_require_feedback_and_finding");
   return { verdict: value.verdict, feedback, findings };

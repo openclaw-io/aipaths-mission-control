@@ -182,6 +182,15 @@ function transpileModule(sourcePath, requires = {}, globals = {}) {
   return cjsModule.exports;
 }
 
+const sourceReviewer = transpileModule(resolve(repoRoot, "src/lib/reviewer/package.ts"), {
+  "node:crypto": { createHash },
+  "@/lib/work-items/git-artifact": {},
+});
+const reviewerResultParsers = [
+  ["detached runtime", parseReviewerResult],
+  ["application", sourceReviewer.parseReviewerResult],
+];
+
 const validApproved = JSON.stringify({ verdict: "approved", feedback: null, findings: [] });
 const usefulFinding = {
   severity: "major",
@@ -197,6 +206,36 @@ function capabilityRequest(token, body) {
   };
 }
 
+test("reviewer accepts the observed approved result with empty feedback", () => {
+  const observedResult = '{"verdict":"approved","feedback":"","findings":[]}';
+  assert.deepEqual(parseReviewerResult(observedResult), { verdict: "approved", feedback: null, findings: [] });
+});
+
+test("reviewer feedback verdict matrix is consistent across runtime parsers", () => {
+  const accepted = [
+    ["approved null", { verdict: "approved", feedback: null, findings: [] }, null],
+    ["approved empty", { verdict: "approved", feedback: "", findings: [] }, null],
+    ["approved whitespace", { verdict: "approved", feedback: " \n\t ", findings: [] }, null],
+    ["approved substantive", { verdict: "approved", feedback: " Looks good. ", findings: [] }, "Looks good."],
+    ["changes_requested substantive", {
+      verdict: "changes_requested", feedback: " Please add coverage. ", findings: [usefulFinding],
+    }, "Please add coverage."],
+  ];
+  const rejected = [
+    ["changes_requested empty", { verdict: "changes_requested", feedback: "", findings: [usefulFinding] }],
+    ["changes_requested whitespace", { verdict: "changes_requested", feedback: " \n\t ", findings: [usefulFinding] }],
+  ];
+  for (const [parserName, parse] of reviewerResultParsers) {
+    for (const [caseName, input, feedback] of accepted) {
+      const result = JSON.parse(JSON.stringify(parse(JSON.stringify(input))));
+      assert.deepEqual(result, { verdict: input.verdict, feedback, findings: input.findings }, `${parserName}: ${caseName}`);
+    }
+    for (const [caseName, input] of rejected) {
+      assert.throws(() => parse(JSON.stringify(input)), /reviewer_changes_require_feedback_and_finding/, `${parserName}: ${caseName}`);
+    }
+  }
+});
+
 test("reviewer result parsing is strict JSON with exact schemas and no repair", () => {
   assert.deepEqual(parseReviewerResult(validApproved), { verdict: "approved", feedback: null, findings: [] });
   for (const [text, error] of [
@@ -205,6 +244,11 @@ test("reviewer result parsing is strict JSON with exact schemas and no repair", 
     [JSON.stringify({ verdict: "approved", feedback: null, findings: [{ ...usefulFinding, extra: true }] }), /reviewer_finding_invalid/],
     [JSON.stringify({ verdict: "approved", feedback: null, findings: [usefulFinding] }), /reviewer_approval_has_blocking_findings/],
     [JSON.stringify({ verdict: "changes_requested", feedback: null, findings: [usefulFinding] }), /reviewer_changes_require_feedback_and_finding/],
+    [JSON.stringify({ verdict: "changes_requested", feedback: "Please add coverage.", findings: [] }), /reviewer_changes_require_feedback_and_finding/],
+    [JSON.stringify({ verdict: "unknown", feedback: null, findings: [] }), /reviewer_verdict_invalid/],
+    [JSON.stringify({ verdict: "approved", findings: [] }), /reviewer_result_invalid/],
+    [JSON.stringify({ verdict: "approved", feedback: 1, findings: [] }), /reviewer_feedback_invalid/],
+    [JSON.stringify({ verdict: "approved", feedback: "x".repeat(20_001), findings: [] }), /reviewer_feedback_invalid/],
   ]) assert.throws(() => parseReviewerResult(text), error);
 });
 
