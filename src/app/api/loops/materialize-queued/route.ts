@@ -128,10 +128,11 @@ async function materializeV2Task(client: TransactionClient, candidate: LoopRow, 
   const graphRows = await client.query<{
     stage_id: string; stage_key: string; stage_title: string; stage_description: string | null; stage_position: number;
     stage_status: string; id: string; key: string; title: string; description: string | null;
-    position: number; status: string; assignee_agent: string | null; dependencies: Array<{ key: string; type: string }>;
+    position: number; status: string; assignee_agent: string | null; metadata: Record<string, unknown> | null;
+    dependencies: Array<{ key: string; type: string }>;
   }>(
     `select s.id stage_id,s.key stage_key,s.title stage_title,s.description stage_description,s.position stage_position,s.status stage_status,
-            t.id,t.key,t.title,t.description,t.position,t.status,t.assignee_agent,
+            t.id,t.key,t.title,t.description,t.position,t.status,t.assignee_agent,t.metadata,
             coalesce(jsonb_agg(jsonb_build_object('key',dt.key,'type',d.dependency_type)
               order by dt.key,d.dependency_type) filter (where d.task_id is not null),'[]'::jsonb) dependencies
        from loop_stages s join loop_tasks t on t.stage_id=s.id
@@ -139,6 +140,7 @@ async function materializeV2Task(client: TransactionClient, candidate: LoopRow, 
       where s.plan_revision_id=$1 group by s.id,t.id order by s.position,s.id,t.position,t.id`,
     [loop.current_plan_revision_id],
   );
+  const graphSnapshotStages = Array.isArray(snapshot.stages) ? snapshot.stages.map(asRecord) : [];
   const graphStages: Array<Record<string, unknown>> = [];
   for (const row of graphRows.rows) {
     let stage = graphStages.find((entry) => entry.key === row.stage_key) as Record<string, unknown> | undefined;
@@ -147,8 +149,16 @@ async function materializeV2Task(client: TransactionClient, candidate: LoopRow, 
         position: row.stage_position, tasks: [] };
       graphStages.push(stage);
     }
-    (stage.tasks as Array<unknown>).push({ key: row.key, title: row.title, description: row.description,
-      assignee_agent: row.assignee_agent, position: row.position, dependencies: row.dependencies });
+    const task: Record<string, unknown> = { key: row.key, title: row.title, description: row.description,
+      assignee_agent: row.assignee_agent, position: row.position, dependencies: row.dependencies };
+    const snapshotStage = graphSnapshotStages.find((entry) => entry.key === row.stage_key);
+    const snapshotTask = (Array.isArray(snapshotStage?.tasks) ? snapshotStage.tasks : []).map(asRecord)
+      .find((entry) => entry.key === row.key);
+    const taskMetadata = asRecord(row.metadata);
+    if ((snapshotTask && Object.hasOwn(snapshotTask, "qa_policy")) || Object.hasOwn(taskMetadata, "qa_policy")) {
+      task.qa_policy = taskMetadata.qa_policy;
+    }
+    (stage.tasks as Array<unknown>).push(task);
   }
   if (!sameJson(graphStages, snapshot.stages)) {
     return { action: "skipped" as const, reason: "approved_snapshot_graph_drift" };

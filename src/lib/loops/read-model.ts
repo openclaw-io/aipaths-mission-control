@@ -416,7 +416,7 @@ export async function buildLoopWorkflowShadow(
   }
 
   const tasksResult = await db.query<ShadowTaskRow>(
-    `select task.id, task.stage_id, task.key, task.title, task.description, task.position, task.status
+    `select task.id, task.stage_id, task.key, task.title, task.description, task.position, task.status, task.metadata
      from loop_tasks as task
      join loop_stages as stage on stage.id = task.stage_id
      where stage.plan_revision_id = $1

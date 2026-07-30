@@ -206,10 +206,12 @@ export async function POST(
       const graphRows = await client.query<{
         stage_key: string; stage_title: string; stage_description: string | null; stage_position: number;
         task_key: string; task_title: string; task_description: string | null; task_position: number;
-        assignee_agent: string | null; dependencies: Array<{ key: string; type: string }>;
+        assignee_agent: string | null; task_metadata: Record<string, unknown> | null;
+        dependencies: Array<{ key: string; type: string }>;
       }>(
         `select s.key stage_key,s.title stage_title,s.description stage_description,s.position stage_position,
                 t.key task_key,t.title task_title,t.description task_description,t.position task_position,t.assignee_agent,
+                t.metadata task_metadata,
                 coalesce(jsonb_agg(jsonb_build_object('key',dt.key,'type',d.dependency_type)
                   order by dt.key,d.dependency_type) filter (where d.task_id is not null),'[]'::jsonb) dependencies
            from loop_stages s join loop_tasks t on t.stage_id=s.id
@@ -219,6 +221,8 @@ export async function POST(
           group by s.id,t.id order by s.position,s.id,t.position,t.id`,
         [revision.id],
       );
+      const snapshot = asRecord(revision.plan_snapshot);
+      const snapshotStages = Array.isArray(snapshot.stages) ? snapshot.stages.map(asRecord) : [];
       const stages: Array<Record<string, unknown>> = [];
       for (const row of graphRows.rows) {
         let stage = stages.find((candidate) => candidate.key === row.stage_key) as Record<string, unknown> | undefined;
@@ -227,11 +231,19 @@ export async function POST(
             position: row.stage_position, tasks: [] };
           stages.push(stage);
         }
-        (stage.tasks as Array<unknown>).push({ key: row.task_key, title: row.task_title,
+        const task: Record<string, unknown> = { key: row.task_key, title: row.task_title,
           description: row.task_description, assignee_agent: row.assignee_agent, position: row.task_position,
-          dependencies: row.dependencies });
+          dependencies: row.dependencies };
+        const snapshotStage = snapshotStages.find((candidate) => candidate.key === row.stage_key);
+        const snapshotTask = (Array.isArray(snapshotStage?.tasks) ? snapshotStage.tasks : []).map(asRecord)
+          .find((candidate) => candidate.key === row.task_key);
+        const taskMetadata = asRecord(row.task_metadata);
+        if ((snapshotTask && Object.hasOwn(snapshotTask, "qa_policy")) || Object.hasOwn(taskMetadata, "qa_policy")) {
+          task.qa_policy = taskMetadata.qa_policy;
+        }
+        (stage.tasks as Array<unknown>).push(task);
       }
-      if (!samePayload(stages, asRecord(revision.plan_snapshot).stages)) {
+      if (!samePayload(stages, snapshot.stages)) {
         return { kind: "v2_plan_integrity_conflict" as const };
       }
       const approvedPolicy = asRecord(asRecord(revision.plan_snapshot).approval_policy);
