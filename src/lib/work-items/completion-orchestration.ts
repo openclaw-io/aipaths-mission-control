@@ -82,7 +82,20 @@ function completePlan(plan: unknown) {
 }
 
 const SHA_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const UUID_SOURCE = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}";
+const UUID_PATTERN = new RegExp(`^${UUID_SOURCE}$`);
+const SCHEDULER_DISPATCH_SESSION_PATTERN = new RegExp(`^${UUID_SOURCE}:attempt-([1-9][0-9]*):${UUID_SOURCE}$`);
+const MAX_IMPLEMENTATION_DISPATCH_SESSION_ID_LENGTH = 128;
+
+/** Accepts only server-owned implementation identities issued by local dispatch or the generic scheduler. */
+export function isTrustedImplementationDispatchSessionId(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > MAX_IMPLEMENTATION_DISPATCH_SESSION_ID_LENGTH) return false;
+  if (UUID_PATTERN.test(value)) return true;
+  const schedulerIdentity = SCHEDULER_DISPATCH_SESSION_PATTERN.exec(value);
+  if (!schedulerIdentity) return false;
+  const attempt = Number(schedulerIdentity[1]);
+  return Number.isSafeInteger(attempt) && attempt > 0;
+}
 
 function usefulFindings(findings: unknown[], feedback: string | null) {
   if (feedback) return findings.length > 0;
@@ -157,7 +170,7 @@ async function reconcileV2TaskExecution(
     || Number(payload.quality_cycle) !== item.quality_cycle) {
     throw new Error("v2_task_execution_identity_mismatch");
   }
-  const dispatchSessionId = readString(payload.dispatch_session_id);
+  const dispatchSessionId = typeof payload.dispatch_session_id === "string" ? payload.dispatch_session_id : null;
   if (item.run_role === "review") throw new Error("fresh_review_dedicated_reviewer_required");
   const now = new Date().toISOString();
   const actor = readString(workItem.owner_agent) || "work-item-completion";
@@ -200,7 +213,10 @@ async function reconcileV2TaskExecution(
   if (item.loop_status !== "in_progress" || !["queued", "running"].includes(item.run_status)) {
     throw new Error("v2_task_completion_state_conflict");
   }
-  if (!dispatchSessionId || !UUID_PATTERN.test(dispatchSessionId)) throw new Error("fresh_review_dispatch_session_required");
+  const trustedDispatchSession = item.run_role === "implementation"
+    ? isTrustedImplementationDispatchSessionId(dispatchSessionId)
+    : Boolean(dispatchSessionId && UUID_PATTERN.test(dispatchSessionId));
+  if (!trustedDispatchSession) throw new Error("fresh_review_dispatch_session_required");
   const output: JsonRecord = { ...asRecord(body.output), ...(body.result !== undefined ? { result: body.result } : {}) };
 
   if (item.run_role === "implementation") {
