@@ -29,7 +29,7 @@ Migration `supabase/migrations/036_create_youtube_playlist_catalog.sql` creates:
 - `youtube_playlists`: YouTube ID, canonical slug, title/description/URL, constrained kind/status, purpose/audience, home placement, aliases/use cases/tags, source/live metadata, and timestamps.
 - `youtube_playlist_videos`: playlist/video identity, evidenced title and position, membership reason/role, metadata, and timestamps.
 
-The same additive tables and indexes are present in `ops/local-postgres/schema.sql` for local bootstrap and disposable tests. Cloud RLS permits authenticated reads and service-role writes. Normal migration review/application remains the deployment path; this feature does not deploy or mutate a live database by itself.
+The same additive tables, indexes, and RLS posture are present in `ops/local-postgres/schema.sql` for local bootstrap and disposable tests. Cloud RLS permits authenticated reads and service-role writes. The local `aipaths_mc_app` API role has SELECT-only RLS policies on both catalog tables: it can serve the API/UI but cannot import or otherwise mutate catalog rows, even though the bootstrap's later broad table grants are preserved. Normal migration review/application remains the deployment path; this feature does not deploy or mutate a live database by itself.
 
 ## Validate and import
 
@@ -45,12 +45,14 @@ npm run import:youtube-playlists -- \
 After migration review, import into an explicitly selected local database:
 
 ```bash
-MISSION_CONTROL_DATABASE_URL='postgres://...@127.0.0.1:5432/aipaths_mission_control_local' \
+MISSION_CONTROL_DATABASE_URL="postgresql://${USER}@127.0.0.1:5432/aipaths_mission_control_local" \
   npm run import:youtube-playlists -- \
   --catalog data/youtube-playlists/2026-07-31-catalog.json \
   --memberships data/youtube-playlists/2026-07-31-memberships.tsv \
   --apply
 ```
+
+The apply connection must be an approved operator/table-owner connection (as in the local example above) or an approved Supabase `service_role` database connection. Never run imports as `aipaths_mc_app`; that API application role is intentionally read-only and RLS will reject INSERT, UPDATE, and DELETE.
 
 Remote targets fail closed unless the operator also passes `--allow-remote`. That flag is an explicit safety acknowledgement, not permission to bypass migration/change-control review. The importer validates the full input before connecting, uses a transaction and advisory lock, and upserts playlists on stable YouTube IDs. Memberships use transactional snapshot replacement: for each playlist included in the input, existing memberships are deleted and the validated snapshot is inserted within the same transaction. This staging allows positions to be reordered without colliding with the unique `(playlist_id, position)` constraint and makes replay converge by removing stale rows. Playlists omitted from the input are outside the replacement scope and retain all memberships.
 

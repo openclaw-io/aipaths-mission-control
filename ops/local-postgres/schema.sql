@@ -2364,6 +2364,18 @@ CREATE INDEX IF NOT EXISTS idx_youtube_playlists_tags ON public.youtube_playlist
 CREATE INDEX IF NOT EXISTS idx_youtube_playlists_aliases ON public.youtube_playlists USING gin(aliases);
 CREATE INDEX IF NOT EXISTS idx_youtube_playlist_videos_order ON public.youtube_playlist_videos(playlist_id, position, video_id);
 
+ALTER TABLE public.youtube_playlists ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.youtube_playlist_videos ENABLE ROW LEVEL SECURITY;
+DO $youtube_playlist_policies$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'aipaths_mc_app') THEN
+    DROP POLICY IF EXISTS "youtube_playlists app read" ON public.youtube_playlists;
+    EXECUTE 'CREATE POLICY "youtube_playlists app read" ON public.youtube_playlists FOR SELECT TO aipaths_mc_app USING (true)';
+    DROP POLICY IF EXISTS "youtube_playlist_videos app read" ON public.youtube_playlist_videos;
+    EXECUTE 'CREATE POLICY "youtube_playlist_videos app read" ON public.youtube_playlist_videos FOR SELECT TO aipaths_mc_app USING (true)';
+  END IF;
+END $youtube_playlist_policies$;
+
 -- Ordinary application SQL keeps existing Mission Control behavior but cannot
 -- read key material or write/re-key/truncate QA authority rows. QA mutations are
 -- exposed only through the exact entry points above.

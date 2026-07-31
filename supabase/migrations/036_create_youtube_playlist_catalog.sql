@@ -69,6 +69,12 @@ ALTER TABLE public.youtube_playlists ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.youtube_playlist_videos ENABLE ROW LEVEL SECURITY;
 DO $policies$
 BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'aipaths_mc_app') THEN
+    DROP POLICY IF EXISTS "youtube_playlists app read" ON public.youtube_playlists;
+    EXECUTE 'CREATE POLICY "youtube_playlists app read" ON public.youtube_playlists FOR SELECT TO aipaths_mc_app USING (true)';
+    DROP POLICY IF EXISTS "youtube_playlist_videos app read" ON public.youtube_playlist_videos;
+    EXECUTE 'CREATE POLICY "youtube_playlist_videos app read" ON public.youtube_playlist_videos FOR SELECT TO aipaths_mc_app USING (true)';
+  END IF;
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
     DROP POLICY IF EXISTS "youtube_playlists authenticated read" ON public.youtube_playlists;
     EXECUTE 'CREATE POLICY "youtube_playlists authenticated read" ON public.youtube_playlists FOR SELECT TO authenticated USING (true)';

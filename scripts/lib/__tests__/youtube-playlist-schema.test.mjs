@@ -43,12 +43,67 @@ test("playlist constraints reject guessed taxonomy and invalid positions", async
   );
 });
 
+test("passwordless local app can read both playlist tables but RLS blocks writes", async () => {
+  await pool.query(`
+    insert into youtube_playlists (playlist_id, canonical_slug, title, url, kind)
+    values ('PL-rls-read', 'rls-read', 'RLS read fixture', 'https://www.youtube.com/playlist?list=PL-rls-read', 'hub')
+  `);
+  await pool.query(`
+    insert into youtube_playlist_videos (playlist_id, video_id, position)
+    values ('PL-rls-read', 'video-rls-read', 1)
+  `);
+
+  const appUrl = new URL(process.env.MISSION_CONTROL_TEST_DATABASE_URL);
+  appUrl.username = "aipaths_mc_app";
+  appUrl.password = "";
+  const app = new pg.Client({ connectionString: appUrl.toString() });
+  await app.connect();
+  try {
+    const identity = await app.query("select current_user");
+    assert.equal(identity.rows[0].current_user, "aipaths_mc_app");
+    assert.equal((await app.query("select count(*)::int count from youtube_playlists where playlist_id='PL-rls-read'")).rows[0].count, 1);
+    assert.equal((await app.query("select count(*)::int count from youtube_playlist_videos where playlist_id='PL-rls-read'")).rows[0].count, 1);
+
+    for (const statement of [
+      `insert into youtube_playlists (playlist_id, canonical_slug, title, url, kind) values ('PL-rls-write', 'rls-write', 'Blocked', 'https://www.youtube.com/playlist?list=PL-rls-write', 'hub')`,
+      `insert into youtube_playlist_videos (playlist_id, video_id, position) values ('PL-rls-read', 'video-rls-write', 2)`,
+    ]) {
+      await assert.rejects(
+        () => app.query(statement),
+        (error) => error.code === "42501" && /row-level security/i.test(error.message),
+      );
+    }
+  } finally {
+    await app.end();
+  }
+});
+
 test("Supabase migration is additive and idempotent when replayed", async () => {
   const migration = readFileSync(resolve(repoRoot, "supabase/migrations/036_create_youtube_playlist_catalog.sql"), "utf8");
   await pool.query(migration);
   await pool.query(migration);
   const preserved = await pool.query("select canonical_slug from youtube_playlists where playlist_id='PL-test'");
   assert.equal(preserved.rows[0].canonical_slug, "test");
-  const rls = await pool.query("select relrowsecurity from pg_class where oid='public.youtube_playlists'::regclass");
-  assert.equal(rls.rows[0].relrowsecurity, true);
+  const rls = await pool.query(`
+    select relname, relrowsecurity
+      from pg_class
+     where oid = any(array['public.youtube_playlists'::regclass, 'public.youtube_playlist_videos'::regclass])
+     order by relname
+  `);
+  assert.deepEqual(rls.rows.map((row) => ({ ...row })), [
+    { relname: "youtube_playlist_videos", relrowsecurity: true },
+    { relname: "youtube_playlists", relrowsecurity: true },
+  ]);
+  const appPolicies = await pool.query(`
+    select tablename, policyname, cmd
+      from pg_policies
+     where schemaname = 'public'
+       and roles @> array['aipaths_mc_app']::name[]
+       and tablename = any(array['youtube_playlists', 'youtube_playlist_videos'])
+     order by tablename, policyname
+  `);
+  assert.deepEqual(appPolicies.rows.map((row) => ({ ...row })), [
+    { tablename: "youtube_playlist_videos", policyname: "youtube_playlist_videos app read", cmd: "SELECT" },
+    { tablename: "youtube_playlists", policyname: "youtube_playlists app read", cmd: "SELECT" },
+  ]);
 });
