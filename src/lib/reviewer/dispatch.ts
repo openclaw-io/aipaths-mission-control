@@ -50,7 +50,7 @@ type DispatchRow = {
   repository_enabled: boolean; max_diff_bytes: number; max_package_bytes: number;
 };
 
-const DEFAULT_DB = "postgres://joaco@127.0.0.1:5432/aipaths_mission_control_local";
+const DEFAULT_DB = "postgres://aipaths_mc_app@127.0.0.1:5432/aipaths_mission_control_local";
 
 export function safeRunnerEnv(): NodeJS.ProcessEnv {
   return {

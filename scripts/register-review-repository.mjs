@@ -2,7 +2,7 @@
 import pg from "pg";
 import { registerReviewRepository } from "./lib/repository-registration.mjs";
 
-const DEFAULT_DATABASE_URL = "postgres://joaco@127.0.0.1:5432/aipaths_mission_control_local";
+const DEFAULT_DATABASE_URL = "postgres://aipaths_mc_app@127.0.0.1:5432/aipaths_mission_control_local";
 
 export function parseArguments(args) {
   const options = { enable: false };

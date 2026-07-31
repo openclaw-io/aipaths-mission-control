@@ -65,6 +65,9 @@ async function postgresTransaction(run) {
 const nextServer = { NextResponse: { json: (payload, init = {}) => ({ payload, status: init.status || 200 }) } };
 const localAuth = { isLocalAuthDisabled: () => true, getLocalMissionControlUser: () => ({ email: "reviewer@test" }) };
 const qaPolicy = transpileModule(resolve(repoRoot, "src/lib/loops/qa-policy.ts"));
+const qaResult = transpileModule(resolve(repoRoot, "src/lib/qa/result.ts"), {
+  "node:crypto": { createHash }, "@/lib/loops/qa-policy": qaPolicy,
+});
 const executionInstruction = transpileModule(resolve(repoRoot, "src/lib/loops/execution-instruction.ts"));
 const gitArtifact = transpileModule(resolve(repoRoot, "src/lib/work-items/git-artifact.ts"), {
   "node:child_process": { execFile }, "node:fs/promises": { realpath },
@@ -109,7 +112,7 @@ const agentCompletion = transpileModule(resolve(repoRoot, "src/lib/work-items/ag
   "@/lib/work-items/completion-orchestration": completion,
 });
 const reviewCompletion = transpileModule(resolve(repoRoot, "src/lib/reviewer/review-completion.ts"), {
-  "node:crypto": { randomUUID },
+  "node:crypto": { randomUUID }, "@/lib/loops/qa-policy": qaPolicy, "@/lib/qa/result": qaResult,
 });
 const reviewerPackage = transpileModule(resolve(repoRoot, "src/lib/reviewer/package.ts"), {
   "node:crypto": { createHash }, "@/lib/work-items/git-artifact": gitArtifact,
@@ -319,7 +322,9 @@ async function withPhase3MigrationDatabase(run) {
     await client.connect();
     try {
       const artifact = resolve(repoRoot, "ops/migrations/20260729_project_loops_v2_phase4");
+      const phase5b = resolve(repoRoot, "ops/migrations/20260730_project_loops_v2_phase5b");
       await client.query(readFileSync(resolve(repoRoot, "ops/local-postgres/schema.sql"), "utf8"));
+      await client.query(readFileSync(resolve(phase5b, "rollback.sql"), "utf8"));
       await client.query(readFileSync(resolve(artifact, "rollback.sql"), "utf8"));
       await run(client, artifact);
     } finally { await client.end(); }
@@ -461,7 +466,9 @@ test("phase 4 forward/verify/guarded rollback rehearse in disposable Postgres", 
     await client.connect();
     try {
       const artifact = resolve(repoRoot, "ops/migrations/20260729_project_loops_v2_phase4");
+      const phase5b = resolve(repoRoot, "ops/migrations/20260730_project_loops_v2_phase5b");
       await client.query(readFileSync(resolve(repoRoot, "ops/local-postgres/schema.sql"), "utf8"));
+      await client.query(readFileSync(resolve(phase5b, "rollback.sql"), "utf8"));
       await client.query(readFileSync(resolve(artifact, "rollback.sql"), "utf8"));
 
       const historicalLoop = (await client.query("insert into loops(name,status) values ('Phase 3 historical review','completed') returning id")).rows[0].id;

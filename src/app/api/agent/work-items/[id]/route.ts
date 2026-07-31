@@ -51,6 +51,10 @@ export async function PATCH(
   }
 
   try {
+    const item = await getWorkItem(id);
+    if (item?.payload?.runtime_contract === "visual_qa_v1" || item?.payload?.run_role === "qa") {
+      return NextResponse.json({ error: "visual_qa_v1 requires dedicated QA API" }, { status: 409 });
+    }
     const data = await patchAgentWorkItemWithCompletion(id, body);
     if (!data) return NextResponse.json({ error: "Work item not found" }, { status: 404 });
     return NextResponse.json(data);

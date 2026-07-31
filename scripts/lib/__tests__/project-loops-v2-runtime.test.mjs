@@ -64,6 +64,9 @@ const localAuth = {
   getLocalMissionControlUser: () => ({ email: "v2-reviewer@example.test" }),
 };
 const qaPolicy = transpileModule(resolve(repoRoot, "src/lib/loops/qa-policy.ts"));
+const qaResult = transpileModule(resolve(repoRoot, "src/lib/qa/result.ts"), {
+  "node:crypto": { createHash }, "@/lib/loops/qa-policy": qaPolicy,
+});
 const executionInstruction = transpileModule(resolve(repoRoot, "src/lib/loops/execution-instruction.ts"));
 const gitArtifact = transpileModule(resolve(repoRoot, "src/lib/work-items/git-artifact.ts"), {
   "node:child_process": { execFile }, "node:fs/promises": { realpath },
@@ -112,7 +115,7 @@ const agentCompletion = transpileModule(resolve(repoRoot, "src/lib/work-items/ag
   "@/lib/work-items/completion-orchestration": completion,
 });
 const reviewCompletion = transpileModule(resolve(repoRoot, "src/lib/reviewer/review-completion.ts"), {
-  "node:crypto": { randomUUID },
+  "node:crypto": { randomUUID }, "@/lib/loops/qa-policy": qaPolicy, "@/lib/qa/result": qaResult,
 });
 
 before(async () => {

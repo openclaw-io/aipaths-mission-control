@@ -116,7 +116,7 @@ async function reconcileV2TaskExecution(
     approval_scope: Record<string, unknown>; revision_status: string; content_hash: string | null;
     task_id: string; task_status: string; task_title: string; task_description: string | null;
     stage_id: string; plan_revision_id: string; run_id: string; run_status: string;
-    run_role: "implementation" | "review"; quality_cycle: number; execution_attempt_id: string | null;
+    run_role: "implementation" | "review" | "qa"; quality_cycle: number; execution_attempt_id: string | null;
     server_session_id: string | null; target_run_id: string | null; target_sha: string | null;
     repository_id: string; base_sha: string; prior_artifact_sha: string | null; prior_repository_id: string | null;
     repository_key: string; canonical_root: string; git_common_dir: string; object_format: "sha1" | "sha256"; repository_enabled: boolean;
@@ -171,6 +171,9 @@ async function reconcileV2TaskExecution(
     throw new Error("v2_task_execution_identity_mismatch");
   }
   const dispatchSessionId = typeof payload.dispatch_session_id === "string" ? payload.dispatch_session_id : null;
+  if (String(payload.runtime_contract) === "visual_qa_v1" || item.run_role === "qa") {
+    throw new Error("visual_qa_v1_dedicated_api_required");
+  }
   if (item.run_role === "review") throw new Error("fresh_review_dedicated_reviewer_required");
   const now = new Date().toISOString();
   const actor = readString(workItem.owner_agent) || "work-item-completion";
