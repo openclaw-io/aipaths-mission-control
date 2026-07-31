@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { parsePersistedQaPolicy } from "@/lib/loops/qa-policy";
+import { hashQaPolicy } from "@/lib/qa/result";
 import type { ReviewerResult } from "@/lib/reviewer/package";
 import type { CompletionQueryClient } from "@/lib/work-items/completion-orchestration";
 
@@ -26,6 +28,9 @@ export type ReviewerExecutionContext = {
   implementer_session_id: string;
   priority: string | null;
   owner_agent: string | null;
+  task_metadata: Record<string, unknown> | null;
+  revision_status: string;
+  current_plan_revision_id: string | null;
 };
 
 export async function applyReviewerResult(
@@ -73,6 +78,50 @@ export async function applyReviewerResult(
   if (completedWork.rowCount !== 1) throw new Error("reviewer_work_item_concurrent_conflict");
 
   if (result.verdict === "approved") {
+    const rawQaPolicy = execution.task_metadata?.qa_policy;
+    const qaPolicy = rawQaPolicy === undefined ? null : parsePersistedQaPolicy(rawQaPolicy);
+    if (rawQaPolicy !== undefined && !qaPolicy) throw new Error("frozen_qa_policy_invalid");
+    if (qaPolicy?.required) {
+      if (execution.revision_status !== "approved" || execution.current_plan_revision_id !== execution.plan_revision_id
+        || !execution.plan_hash) throw new Error("qa_frozen_plan_binding_mismatch");
+      const attemptId = randomUUID();
+      const policyHash = hashQaPolicy(qaPolicy);
+      const work = await client.query<{ id: string }>(
+        `insert into work_items(loop_id,parent_id,kind,source_type,source_id,title,instruction,status,priority,owner_agent,requested_by,payload)
+         values ($1,null,'task','loop',$2,$3,$4,'ready',$5,$6,'system',$7::jsonb) returning id`,
+        [execution.loop_id, execution.task_id, `Visual QA: ${execution.task_title}`,
+          `Dedicated visual QA for quality cycle ${execution.quality_cycle}/3 of exact SHA ${execution.target_sha}. Validate only the frozen policy and return structured evidence descriptors; do not include evidence bytes. Generic agent completion, notification, requeue, and reschedule are forbidden.`,
+          execution.priority || "medium", execution.owner_agent || "systems", JSON.stringify({
+            materialized_from_loop: true, source_loop_id: execution.loop_id, loop_task_id: execution.task_id,
+            plan_revision_id: execution.plan_revision_id, plan_hash: execution.plan_hash, relation_type: "task_execution",
+            runtime_contract: "visual_qa_v1", run_role: "qa", quality_cycle: execution.quality_cycle,
+            target_run_id: execution.implementation_run_id, target_sha: execution.target_sha,
+            policy_hash: policyHash, qa_policy: qaPolicy, execution_attempt_id: attemptId,
+            execution_generation: 1, dispatch_state: "ready",
+          })],
+      );
+      const workItemId = work.rows[0]?.id;
+      if (!workItemId) throw new Error("qa_work_item_insert_failed");
+      await client.query("insert into loop_work_items(loop_id,work_item_id,relation_type) values ($1,$2,'task_execution')", [execution.loop_id, workItemId]);
+      const qaRun = await client.query<{ id: string }>(
+        `insert into loop_task_runs(task_id,work_item_id,execution_attempt_id,run_role,quality_cycle,attempt_number,status,
+           target_run_id,target_sha,repository_id,base_sha,output,updated_at)
+         values ($1,$2,$3,'qa',$4,(select coalesce(max(attempt_number),0)+1 from loop_task_runs where task_id=$1),
+           'queued',$5,$6,$7,$8,'{}'::jsonb,$9) returning id`,
+        [execution.task_id, workItemId, attemptId, execution.quality_cycle, execution.implementation_run_id,
+          execution.target_sha, execution.repository_id, execution.base_sha, now],
+      );
+      const task = await client.query("update loop_tasks set status='qa_pending',updated_at=$2 where id=$1 and status='review_pending' returning id", [execution.task_id, now]);
+      if (task.rowCount !== 1) throw new Error("qa_task_transition_conflict");
+      await client.query(
+        `insert into loop_events(loop_id,event_type,from_status,to_status,actor,payload,created_at)
+         values ($1,'loop.task_qa_pending','in_progress','in_progress','strong-isolation-reviewer',$2::jsonb,$3)`,
+        [execution.loop_id, JSON.stringify({ task_id: execution.task_id, qa_run_id: qaRun.rows[0]?.id,
+          implementation_run_id: execution.implementation_run_id, quality_cycle: execution.quality_cycle,
+          target_sha: execution.target_sha, policy_hash: policyHash }), now],
+      );
+      return { effect: "loop_task_qa_pending" };
+    }
     await client.query("update loop_tasks set status='completed',updated_at=$2 where id=$1 and status='review_pending'", [execution.task_id, now]);
     const stage = (await client.query<{ complete: boolean }>(
       "select bool_and(status in ('completed','skipped')) complete from loop_tasks where stage_id=$1", [execution.stage_id],

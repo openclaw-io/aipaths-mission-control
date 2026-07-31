@@ -1,7 +1,7 @@
 import { Pool, type PoolClient, type QueryResult, type QueryResultRow } from "pg";
 import { requireMissionControlTestDatabaseUrl } from "./test-postgres-guard.mjs";
 
-const DEFAULT_DATABASE_URL = "postgres://joaco@127.0.0.1:5432/aipaths_mission_control_local";
+const DEFAULT_DATABASE_URL = "postgres://aipaths_mc_app@127.0.0.1:5432/aipaths_mission_control_local";
 
 declare global {
   var __missionControlPgPool: Pool | undefined;

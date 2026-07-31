@@ -143,6 +143,9 @@ export async function patchAgentWorkItemWithCompletion(id: string, body: JsonRec
       throw new Error("v2_task_status_transition_conflict");
     }
     const existingPayload = (existing.payload || {}) as JsonRecord;
+    if (existingPayload.runtime_contract === "visual_qa_v1" || existingPayload.run_role === "qa") {
+      throw new Error("visual_qa_v1_dedicated_api_required");
+    }
     const terminalStatuses = new Set(["done", "failed", "canceled"]);
     const expectedAttempt = typeof existingPayload.execution_attempt_id === "string"
       ? existingPayload.execution_attempt_id

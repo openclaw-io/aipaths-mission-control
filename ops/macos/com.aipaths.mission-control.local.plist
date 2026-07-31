@@ -21,7 +21,7 @@
     <key>NODE_ENV</key>
     <string>production</string>
     <key>MISSION_CONTROL_DATABASE_URL</key>
-    <string>postgres://joaco@127.0.0.1:5432/aipaths_mission_control_local</string>
+    <string>postgres://aipaths_mc_app@127.0.0.1:5432/aipaths_mission_control_local</string>
     <key>MISSION_CONTROL_LOCAL_AUTH_DISABLED</key>
     <string>true</string>
     <key>PATH</key>

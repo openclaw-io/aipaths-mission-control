@@ -25,6 +25,9 @@ export async function POST(
       );
       const existing = existingResult.rows[0];
       if (!existing) return { error: "Work item not found", status: 404 as const };
+      if (existing.payload?.runtime_contract === "visual_qa_v1" || existing.payload?.run_role === "qa") {
+        return { error: "visual_qa_v1 cannot be generically requeued", status: 409 as const };
+      }
       if (existing.payload?.runtime_contract === "fresh_review_v1") {
         return { error: "fresh_review_v1 cannot be generically requeued", status: 409 as const };
       }
@@ -93,6 +96,10 @@ export async function POST(
 
   if (existingError || !existing) {
     return NextResponse.json({ error: existingError?.message || "Work item not found" }, { status: 404 });
+  }
+  if ((existing.payload as Record<string, unknown> | null)?.runtime_contract === "visual_qa_v1"
+      || (existing.payload as Record<string, unknown> | null)?.run_role === "qa") {
+    return NextResponse.json({ error: "visual_qa_v1 cannot be generically requeued" }, { status: 409 });
   }
   if ((existing.payload as Record<string, unknown> | null)?.runtime_contract === "fresh_review_v1") {
     return NextResponse.json({ error: "fresh_review_v1 cannot be generically requeued" }, { status: 409 });

@@ -665,6 +665,11 @@ test("materialization creates an attempt identity and notify serializes it in ev
     "@/lib/auth/local": { isLocalAuthDisabled: () => true },
     "@/lib/db/postgres": { query: async () => ({ rows: [] }) },
     "@/lib/loops/execution-instruction": { buildLoopWakeContext: () => "" },
+    "@/lib/work-items/generic-notify-contract": {
+      isVisualQaLikeWorkItem: (row) => row?.payload?.runtime_contract === "visual_qa_v1" || row?.payload?.run_role === "qa",
+      parseGenericNotifyClassificationIdentity: () => null,
+      genericNotifyIdentityMatches: () => true,
+    },
   });
   const executionAttemptId = "attempt-notify-1";
   for (const status of ["in_progress", "done", "failed"]) {

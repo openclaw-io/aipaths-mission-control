@@ -6,6 +6,7 @@ export type WorkflowItemStatus =
   | "ready"
   | "in_progress"
   | "review_pending"
+  | "qa_pending"
   | "rework_required"
   | "blocked"
   | "completed"
@@ -73,7 +74,7 @@ export type ShadowRunRow = {
   id: string;
   task_id: string;
   status: string;
-  run_role?: "implementation" | "review";
+  run_role?: "implementation" | "review" | "qa";
   quality_cycle?: number;
   artifact_sha?: string | null;
   target_sha?: string | null;
@@ -134,7 +135,7 @@ export type ShadowTask = {
   evidenceKinds: string[];
   qaPolicy?: QaPolicySummary;
   qualityCycle?: number;
-  qualityState?: "implementation" | "review" | "approved" | "blocked";
+  qualityState?: "implementation" | "review" | "qa" | "approved" | "blocked";
   implementationStatus?: string | null;
   reviewRunStatus?: string | null;
   artifactSha?: string | null;
@@ -177,7 +178,7 @@ function comparePositionAndId(
 function normalizeLegacyStatus(status: string | undefined): WorkflowItemStatus {
   if (status === "done") return "completed";
   if (status === "cancelled" || status === "canceled") return "cancelled";
-  if (["pending", "ready", "in_progress", "review_pending", "rework_required", "blocked", "completed", "skipped"].includes(status || "")) {
+  if (["pending", "ready", "in_progress", "review_pending", "qa_pending", "rework_required", "blocked", "completed", "skipped"].includes(status || "")) {
     return status as WorkflowItemStatus;
   }
   return "pending";
@@ -386,6 +387,8 @@ function projectV2(input: LoopWorkflowShadowInput): LoopWorkflowShadow {
           .sort((left, right) => right.id.localeCompare(left.id))[0];
         const qualityState: ShadowTask["qualityState"] = task.status === "blocked"
           ? "blocked"
+          : task.status === "qa_pending"
+            ? "qa"
           : latestReview?.status === "approved"
             ? "approved"
             : latestReviewRun || task.status === "review_pending"
