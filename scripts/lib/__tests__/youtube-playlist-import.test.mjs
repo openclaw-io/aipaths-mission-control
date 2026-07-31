@@ -188,17 +188,18 @@ test("catalog provenance references exact committed approved sources", () => {
   }
 });
 
-test("the audited 2026-07-31 seed replays to exactly its evidenced catalog", async () => {
+test("the audited 2026-07-31 seed excludes Shorts and replays only long-form playlists", async () => {
   const catalog = parseCatalogJson(readFileSync(resolve(repoRoot, "data/youtube-playlists/2026-07-31-catalog.json"), "utf8"));
   const memberships = parseMembershipTsv(readFileSync(resolve(repoRoot, "data/youtube-playlists/2026-07-31-memberships.tsv"), "utf8"));
+  assert.equal(catalog.playlists.some((playlist) => playlist.kind === "shorts"), false);
   const first = await upsertPlaylistSnapshot(pool, { ...catalog, memberships });
   const second = await upsertPlaylistSnapshot(pool, { ...catalog, memberships });
-  assert.deepEqual(first, { playlists: 9, memberships: 213 });
+  assert.deepEqual(first, { playlists: 6, memberships: 54 });
   assert.deepEqual(second, first);
   const playlistIds = catalog.playlists.map((playlist) => playlist.playlist_id);
   const counts = await pool.query(`select
     (select count(*)::int from youtube_playlists where playlist_id=any($1::text[])) playlists,
     (select count(*)::int from youtube_playlist_videos where playlist_id=any($1::text[])) memberships`, [playlistIds]);
   assert.deepEqual(counts.rows[0], first);
-  assert.equal((await pool.query("select count(*)::int count from youtube_playlists where playlist_id=any($1::text[]) and source='youtube_playlist_audit_2026-07-31'", [playlistIds])).rows[0].count, 9);
+  assert.equal((await pool.query("select count(*)::int count from youtube_playlists where playlist_id=any($1::text[]) and source='youtube_playlist_audit_2026-07-31'", [playlistIds])).rows[0].count, 6);
 });

@@ -13,8 +13,8 @@ Mission Control owns a **read-mostly canonical catalog** of AIPaths playlists. I
 
 The 2026-07-31 seed artifacts are:
 
-- `data/youtube-playlists/2026-07-31-catalog.json`: nine playlists whose IDs were present in the public audit. The catalog's canonical title, description, purpose, taxonomy, and placement are **approved intended editorial metadata**, not a claim about the current YouTube UI. Each playlist marks this payload as `source_metadata.metadata_kind=approved_editorial_intent`.
-- `data/youtube-playlists/2026-07-31-memberships.tsv`: the observed live membership snapshot, preserved in its original literal-escaped TSV format. `live_metadata` is separately marked `metadata_kind=observed_live_state`; it must not be interpreted as approved intended metadata.
+- `data/youtube-playlists/2026-07-31-catalog.json`: six long-form playlists whose IDs were present in the public audit. Shorts playlists are intentionally excluded from the canonical agent catalog and from all agent-selection workflows. The catalog's canonical title, description, purpose, taxonomy, and placement are **approved intended editorial metadata**, not a claim about the current YouTube UI. Each playlist marks this payload as `source_metadata.metadata_kind=approved_editorial_intent`.
+- `data/youtube-playlists/2026-07-31-memberships.tsv`: the 54 observed long-form playlist memberships. Shorts memberships are excluded. `live_metadata` is separately marked `metadata_kind=observed_live_state`; it must not be interpreted as approved intended metadata.
 - `data/youtube-playlists/sources/architecture-v2.md`: byte-for-byte approved editorial source, SHA-256 `5bc2c3c0b4d1d856cb0b7a00dc0ed58a3dbd2b4d2ddf0fcbf1583048046db622`.
 - `data/youtube-playlists/sources/audit.md`: byte-for-byte live-observation audit, SHA-256 `9368660747bf64665bb99c6251f7add9806bb9406aaa9ea159799ca2218ff894`.
 
