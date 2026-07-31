@@ -13,6 +13,7 @@ export type YouTubeLaunchPackageInput = {
   targetEmailSendAt?: string | null;
   emailTrackingRef?: string | null;
   optionalDiagnosticCta?: string | null;
+  preparedAt?: string | null;
   refs?: unknown;
   requestedBy: string;
 };
@@ -71,9 +72,11 @@ export type ScheduledYouTubeLaunchSpecContext = {
   emailTrackingRef: string;
   optionalDiagnosticCta?: string | null;
   cta?: string | null;
+  preparedAt?: string | null;
   videoPipelineItemId?: string | null;
   communityPipelineItemId?: string | null;
   marketingPipelineItemId?: string | null;
+  pinnedCommentPipelineItemId?: string | null;
 };
 
 export type CommunityLaunchDraftValidationInput = {
@@ -108,6 +111,10 @@ function addMilliseconds(isoDate: string, milliseconds: number) {
 
 function addMinutes(isoDate: string, minutes: number) {
   return addMilliseconds(isoDate, minutes * 60 * 1000);
+}
+
+function maxIsoDate(a: string, b: string) {
+  return new Date(a).getTime() >= new Date(b).getTime() ? a : b;
 }
 
 function addDays(isoDate: string, days: number) {
@@ -201,9 +208,20 @@ export function validateCommunityLaunchDraftOutput(input: CommunityLaunchDraftVa
 function livePublicGuardLines() {
   return [
     "Live/public YouTube guard:",
-    "- Before any customer-facing publish/draft/activation, verify the YouTube URL is live and public.",
+    "- Before any customer-facing publish/send/comment/website activation, verify the YouTube URL is live and public.",
     "- Prefer YouTube Data API when available: privacyStatus must be public; reject private, unlisted, scheduled, removed, or members-only states.",
-    "- If you cannot confirm public/live status, mark this work item blocked with the verification evidence; do not publish or prepare customer-facing copy from an inaccessible URL.",
+    "- If you cannot confirm public/live status, mark this work item blocked with the verification evidence; do not perform the external action.",
+    "- This public gate does not block prepublication internal drafts; it applies only to publish/send/comment/activation.",
+  ];
+}
+
+function prepublicationDraftAuthorizationLines() {
+  return [
+    "Prepublication draft authorization:",
+    "- Private/scheduled YouTube videos are allowed for this draft.",
+    "- This is an internal artifact for Gonza review only.",
+    "- Do not publish, send, schedule externally, or comment on YouTube from this draft task.",
+    "- Public/live gate applies later only to publish/send/comment/website activation.",
   ];
 }
 
@@ -230,6 +248,18 @@ function liveCheckInstruction(input: { title: string; youtubeUrl: string; videoI
     "- Complete with output.live_check = { status, checked_at, public_url, evidence }.",
     "",
     ...livePublicGuardLines(),
+  ].join("\n");
+}
+
+function preflightInstruction(input: { title: string; youtubeUrl: string; videoId: string; publishAt: string; playlistContextUrl?: string | null }) {
+  return [
+    ...packageHeader(input),
+    "",
+    "Task:",
+    "- Run the scheduled launch preflight at T-30m, or immediately if the launch is already inside that window.",
+    "- Check title, thumbnail, description/chapters, CTA/ref links, playlist placement, and scheduled publish time.",
+    "- This is a readiness check only; do not make external customer-facing changes without Gonza approval where applicable.",
+    "- Complete with output.preflight = { status, checked_at, blockers, evidence }.",
   ].join("\n");
 }
 
@@ -264,7 +294,33 @@ function communityDraftInstruction(input: ScheduledYouTubeLaunchSpecContext) {
     "Structured launch context:",
     JSON.stringify(structuredContext, null, 2),
     "",
-    ...livePublicGuardLines(),
+    ...prepublicationDraftAuthorizationLines(),
+  ].join("\n");
+}
+
+function pinnedCommentDraftInstruction(input: ScheduledYouTubeLaunchSpecContext) {
+  const structuredContext = {
+    video_id: input.videoId,
+    watch_url: input.youtubeUrl,
+    playlist_context_url: input.playlistContextUrl || null,
+    publish_at: input.publishAt,
+    cta: input.cta || null,
+    target_publication_rule: "after_gonza_approval_and_live_check_only",
+  };
+
+  return [
+    ...packageHeader(input),
+    "",
+    "Task:",
+    "- Draft a concise Spanish YouTube pinned comment for this scheduled launch.",
+    "- Keep it useful, CTA-oriented, and ready for Gonza review.",
+    "- Produce a pinned comment draft only; do not publish, pin, or call YouTube APIs.",
+    "- Complete with output.pinned_comment_draft = { text, status: 'ready_for_review' }.",
+    "",
+    "Structured launch context:",
+    JSON.stringify(structuredContext, null, 2),
+    "",
+    ...prepublicationDraftAuthorizationLines(),
   ].join("\n");
 }
 
@@ -306,7 +362,7 @@ function marketingEmailInstruction(input: ScheduledYouTubeLaunchSpecContext) {
     "Structured launch context:",
     JSON.stringify(structuredContext, null, 2),
     "",
-    ...livePublicGuardLines(),
+    ...prepublicationDraftAuthorizationLines(),
   ].join("\n");
 }
 
@@ -506,6 +562,9 @@ async function ensureCommunityPipelineItem(db: SupabaseClient, input: {
       target_publish_at: input.targetPublishAt,
       cta: input.cta,
       suppress_link_previews: false,
+      prepublication_draft_authorized: true,
+      public_gate_applies_to: "publish_or_send_only",
+      requires_gonza_approval: true,
       validation_requirements: {
         ready_for_review_status_required: true,
         playlist_context_url_required_when_present: true,
@@ -627,6 +686,8 @@ async function ensureMarketingEmailPipelineItem(db: SupabaseClient, input: {
       email_tracking_ref: input.emailTrackingRef,
       optional_diagnostic_cta: input.optionalDiagnosticCta,
       requires_gonza_approval: true,
+      prepublication_draft_authorized: true,
+      public_gate_applies_to: "publish_or_send_only",
       newsletter_scope: "excluded_v1",
       updated_at: now,
     },
@@ -665,6 +726,101 @@ async function ensureMarketingEmailPipelineItem(db: SupabaseClient, input: {
       source_type: "manual",
       source_id: input.videoItem.id,
       scheduled_for: input.targetSendAt,
+      metadata,
+      updated_at: now,
+    })
+    .select("*")
+    .single();
+
+  if (error) throw error;
+  return { item: data as PipelineItemRow, created: true };
+}
+
+async function ensurePinnedCommentPipelineItem(db: SupabaseClient, input: {
+  videoItem: PipelineItemRow;
+  title: string;
+  youtubeUrl: string;
+  videoId: string;
+  publishAt: string;
+  playlistContextUrl: string | null;
+  cta: string | null;
+  requestedBy: string;
+}) {
+  const { data: existingRows, error: existingError } = await db
+    .from("pipeline_items")
+    .select("*")
+    .eq("pipeline_type", "youtube_pinned_comment")
+    .eq("metadata->launch_package->>video_id", input.videoId)
+    .order("updated_at", { ascending: false, nullsFirst: false })
+    .limit(1);
+
+  if (existingError) throw existingError;
+  const existing = existingRows?.[0] as PipelineItemRow | undefined;
+  const now = new Date().toISOString();
+  const existingMetadata = toRecord(existing?.metadata);
+  const metadata = {
+    ...existingMetadata,
+    kind: "youtube_pinned_comment",
+    source: {
+      ...toRecord(existingMetadata.source),
+      type: "video",
+      pipeline_item_id: input.videoItem.id,
+      title: input.title,
+      watch_url: input.youtubeUrl,
+      video_url: input.youtubeUrl,
+      video_id: input.videoId,
+      playlist_context_url: input.playlistContextUrl,
+      publish_at: input.publishAt,
+    },
+    draft: toRecord(existingMetadata.draft),
+    review: toRecord(existingMetadata.review),
+    launch_package: {
+      ...toRecord(existingMetadata.launch_package),
+      source_video_pipeline_item_id: input.videoItem.id,
+      video_id: input.videoId,
+      youtube_url: input.youtubeUrl,
+      playlist_context_url: input.playlistContextUrl,
+      publish_at: input.publishAt,
+      cta: input.cta,
+      prepublication_draft_authorized: true,
+      public_gate_applies_to: "publish_or_send_only",
+      requires_gonza_approval: true,
+      requires_live_check_passed: true,
+      updated_at: now,
+    },
+  };
+
+  if (existing) {
+    const { data, error } = await db
+      .from("pipeline_items")
+      .update({
+        title: `Pinned comment draft: ${input.title}`,
+        status: TERMINAL_WORK_STATUSES.has(existing.status) || existing.status === "published" ? existing.status : existing.status || "drafting",
+        owner_agent: "youtube",
+        requested_by: existing.requested_by || input.requestedBy,
+        source_type: "manual",
+        source_id: input.videoItem.id,
+        metadata,
+        updated_at: now,
+      })
+      .eq("id", existing.id)
+      .select("*")
+      .single();
+    if (error) throw error;
+    return { item: data as PipelineItemRow, created: false };
+  }
+
+  const { data, error } = await db
+    .from("pipeline_items")
+    .insert({
+      pipeline_type: "youtube_pinned_comment",
+      title: `Pinned comment draft: ${input.title}`,
+      status: "drafting",
+      priority: input.videoItem.priority || "high",
+      owner_agent: "youtube",
+      requested_by: input.requestedBy,
+      source_type: "manual",
+      source_id: input.videoItem.id,
       metadata,
       updated_at: now,
     })
@@ -781,6 +937,8 @@ export function buildScheduledYouTubeLaunchWorkSpecs(context: ScheduledYouTubeLa
   const videoPipelineItemId = context.videoPipelineItemId || "";
   const communityPipelineItemId = context.communityPipelineItemId || videoPipelineItemId;
   const marketingPipelineItemId = context.marketingPipelineItemId || videoPipelineItemId;
+  const pinnedCommentPipelineItemId = context.pinnedCommentPipelineItemId || videoPipelineItemId;
+  const preparedAt = normalizeIsoDate(context.preparedAt || new Date().toISOString(), "prepared_at");
   const commonInstructionInput = {
     title: context.title,
     youtubeUrl: context.youtubeUrl,
@@ -788,8 +946,34 @@ export function buildScheduledYouTubeLaunchWorkSpecs(context: ScheduledYouTubeLa
     publishAt: context.publishAt,
     playlistContextUrl: context.playlistContextUrl || null,
   };
+  const preflightAt = maxIsoDate(addMinutes(context.publishAt, -30), preparedAt);
+  const draftGatePayload = {
+    prepublication_draft_authorized: true,
+    public_gate_applies_to: "publish_or_send_only",
+    requires_gonza_approval: true,
+    customer_facing_guard: false,
+  };
+  const publicActionGatePayload = {
+    customer_facing_guard: true,
+    public_gate_applies_to: "activation_only",
+    requires_live_check_passed: true,
+    live_check_relation_type: "video_launch_activate",
+  };
 
   return [
+    {
+      relationType: "youtube_launch_preflight",
+      mapRelationType: "followup",
+      mapPipelineItemId: videoPipelineItemId,
+      sourcePipelineItemId: videoPipelineItemId,
+      pipelineType: "video",
+      title: `Preflight YouTube launch: ${context.title}`,
+      instruction: preflightInstruction(commonInstructionInput),
+      ownerAgent: "youtube",
+      action: "youtube_launch_preflight",
+      scheduledFor: preflightAt,
+      payloadExtra: { launch_step: "preflight", scheduled_preflight_at: addMinutes(context.publishAt, -30), playlist_context_url: context.playlistContextUrl || null },
+    },
     {
       relationType: "video_launch_activate",
       mapRelationType: "followup",
@@ -813,10 +997,10 @@ export function buildScheduledYouTubeLaunchWorkSpecs(context: ScheduledYouTubeLa
       instruction: communityDraftInstruction(context),
       ownerAgent: "community",
       action: "develop_community_post",
-      scheduledFor: addMinutes(context.publishAt, 5),
+      scheduledFor: preparedAt,
       payloadExtra: {
         launch_step: "community_draft",
-        customer_facing_guard: true,
+        ...draftGatePayload,
         target_publish_at_after_approval: context.targetCommunityPublishAt,
         playlist_context_url: context.playlistContextUrl || null,
         cta: context.cta || null,
@@ -830,6 +1014,24 @@ export function buildScheduledYouTubeLaunchWorkSpecs(context: ScheduledYouTubeLa
       },
     },
     {
+      relationType: "youtube_pinned_comment_draft",
+      mapRelationType: "pinned_comment",
+      mapPipelineItemId: pinnedCommentPipelineItemId,
+      sourcePipelineItemId: pinnedCommentPipelineItemId,
+      pipelineType: "youtube_pinned_comment",
+      title: `Draft YouTube pinned comment: ${context.title}`,
+      instruction: pinnedCommentDraftInstruction(context),
+      ownerAgent: "youtube",
+      action: "draft_youtube_pinned_comment",
+      scheduledFor: preparedAt,
+      payloadExtra: {
+        launch_step: "pinned_comment_draft",
+        ...draftGatePayload,
+        playlist_context_url: context.playlistContextUrl || null,
+        cta: context.cta || null,
+      },
+    },
+    {
       relationType: "website_publish_video",
       mapRelationType: "publish",
       mapPipelineItemId: videoPipelineItemId,
@@ -840,7 +1042,7 @@ export function buildScheduledYouTubeLaunchWorkSpecs(context: ScheduledYouTubeLa
       ownerAgent: "dev",
       action: "website_publish_video",
       scheduledFor: addMinutes(context.publishAt, 15),
-      payloadExtra: { launch_step: "website_publish", customer_facing_guard: true, playlist_context_url: context.playlistContextUrl || null },
+      payloadExtra: { launch_step: "website_publish", ...publicActionGatePayload, playlist_context_url: context.playlistContextUrl || null },
     },
     {
       relationType: "marketing_email_campaign",
@@ -852,11 +1054,10 @@ export function buildScheduledYouTubeLaunchWorkSpecs(context: ScheduledYouTubeLa
       instruction: marketingEmailInstruction(context),
       ownerAgent: "marketing",
       action: "draft_video_announcement",
-      scheduledFor: context.targetEmailSendAt,
+      scheduledFor: preparedAt,
       payloadExtra: {
         launch_step: "marketing_email_campaign",
-        customer_facing_guard: true,
-        requires_gonza_approval: true,
+        ...draftGatePayload,
         target_send_at: context.targetEmailSendAt,
         email_tracking_ref: context.emailTrackingRef,
         optional_diagnostic_cta: context.optionalDiagnosticCta || null,
@@ -913,6 +1114,7 @@ export async function createScheduledYouTubeLaunchPackage(db: SupabaseClient, in
   const youtubeUrl = trimToNull(input.youtubeUrl) || youtubeWatchUrl(videoId);
   const title = trimToNull(input.title) || `Scheduled YouTube video ${videoId}`;
   const requestedBy = trimToNull(input.requestedBy) || "mission-control";
+  const preparedAt = input.preparedAt ? normalizeIsoDate(input.preparedAt, "prepared_at") : new Date().toISOString();
   const targetCommunityPublishAt = addMinutes(publishAt, 30);
   const refs = toRecord(input.refs);
   const existingVideoContext = await findExistingVideoItem(db, videoId, youtubeUrl);
@@ -982,6 +1184,17 @@ export async function createScheduledYouTubeLaunchPackage(db: SupabaseClient, in
     requestedBy,
   });
 
+  const pinnedComment = await ensurePinnedCommentPipelineItem(db, {
+    videoItem: video.item,
+    title,
+    youtubeUrl,
+    videoId,
+    publishAt,
+    playlistContextUrl,
+    cta,
+    requestedBy,
+  });
+
   const common = { videoId, videoPipelineItemId: video.item.id, youtubeUrl, publishAt, requestedBy };
   const specs = buildScheduledYouTubeLaunchWorkSpecs({
     title,
@@ -994,9 +1207,11 @@ export async function createScheduledYouTubeLaunchPackage(db: SupabaseClient, in
     emailTrackingRef,
     optionalDiagnosticCta,
     cta,
+    preparedAt,
     videoPipelineItemId: video.item.id,
     communityPipelineItemId: community.item.id,
     marketingPipelineItemId: marketing.item.id,
+    pinnedCommentPipelineItemId: pinnedComment.item.id,
   });
 
   const workItems = [];
@@ -1014,6 +1229,8 @@ export async function createScheduledYouTubeLaunchPackage(db: SupabaseClient, in
       publish_at: publishAt,
       community_pipeline_item_id: community.item.id,
       marketing_pipeline_item_id: marketing.item.id,
+      pinned_comment_pipeline_item_id: pinnedComment.item.id,
+      prepared_at: preparedAt,
       work_item_ids: workItems.map((entry) => entry.workItem?.id).filter(Boolean),
       newsletter_scope: "excluded_v1",
       email_campaign_handoff: {
@@ -1031,6 +1248,8 @@ export async function createScheduledYouTubeLaunchPackage(db: SupabaseClient, in
     communityItemCreated: community.created,
     marketingItem: marketing.item,
     marketingItemCreated: marketing.created,
+    pinnedCommentItem: pinnedComment.item,
+    pinnedCommentItemCreated: pinnedComment.created,
     publishAt,
     targetCommunityPublishAt,
     targetEmailSendAt,

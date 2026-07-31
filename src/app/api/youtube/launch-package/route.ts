@@ -59,6 +59,8 @@ export async function GET() {
       "community Ready-for-Review draft work item; approval later targets publish_at+30m",
       "dev website publish work item at publish_at+15m",
       "marketing email campaign draft handoff; approval later targets publish_at+3h by default",
+      "YouTube pinned-comment draft handoff for Gonza review",
+      "YouTube launch preflight at T-30m or immediately when inside that window",
       "YouTube snapshot work items at +24h, +7d, +28d",
     ],
     dedupe: "work_items payload video_id + relation_type; reruns update open schedules/instructions and preserve terminal work items",
@@ -87,6 +89,7 @@ export async function POST(request: NextRequest) {
   const targetEmailSendAt = bodyString(body, ["target_email_send_at", "targetEmailSendAt"]);
   const emailTrackingRef = bodyString(body, ["email_tracking_ref", "emailTrackingRef"]);
   const optionalDiagnosticCta = bodyString(body, ["optional_diagnostic_cta", "optionalDiagnosticCta", "diagnostic_cta", "diagnosticCta"]);
+  const preparedAt = bodyString(body, ["prepared_at", "preparedAt"]);
 
   if (!publishAt) return NextResponse.json({ error: "publish_at is required" }, { status: 400 });
   if (!youtubeUrl && !videoId) return NextResponse.json({ error: "youtube_url or video_id is required" }, { status: 400 });
@@ -103,6 +106,7 @@ export async function POST(request: NextRequest) {
       targetEmailSendAt,
       emailTrackingRef,
       optionalDiagnosticCta,
+      preparedAt,
       refs: body.refs ?? body.references ?? null,
       requestedBy: bodyString(body, ["requested_by", "requestedBy"]) || requester,
     };
@@ -115,6 +119,7 @@ export async function POST(request: NextRequest) {
       video_item_id: result.videoItem.id,
       community_item_id: result.communityItem.id,
       marketing_item_id: result.marketingItem.id,
+      pinned_comment_item_id: result.pinnedCommentItem.id,
       video_id: result.videoId,
       youtube_url: result.youtubeUrl,
       playlist_context_url: result.playlistContextUrl,
@@ -124,6 +129,7 @@ export async function POST(request: NextRequest) {
       video_item_created: result.videoItemCreated,
       community_item_created: result.communityItemCreated,
       marketing_item_created: result.marketingItemCreated,
+      pinned_comment_item_created: result.pinnedCommentItemCreated,
       work_items: result.workItems.map((entry) => ({
         relation_type: entry.relationType,
         id: entry.workItem?.id,

@@ -277,6 +277,9 @@ async function ensureCommunityPipelineItem(client: PoolClient, input: {
       target_publish_at: input.targetPublishAt,
       cta: input.cta,
       suppress_link_previews: false,
+      prepublication_draft_authorized: true,
+      public_gate_applies_to: "publish_or_send_only",
+      requires_gonza_approval: true,
       validation_requirements: {
         ready_for_review_status_required: true,
         playlist_context_url_required_when_present: true,
@@ -388,6 +391,8 @@ async function ensureMarketingEmailPipelineItem(client: PoolClient, input: {
       email_tracking_ref: input.emailTrackingRef,
       optional_diagnostic_cta: input.optionalDiagnosticCta,
       requires_gonza_approval: true,
+      prepublication_draft_authorized: true,
+      public_gate_applies_to: "publish_or_send_only",
       newsletter_scope: "excluded_v1",
       updated_at: now,
     },
@@ -430,6 +435,90 @@ async function ensureMarketingEmailPipelineItem(client: PoolClient, input: {
       JSON.stringify(metadata),
       now,
     ],
+  );
+  return { item: pipelineItem(result.rows[0]), created: true };
+}
+
+async function ensurePinnedCommentPipelineItem(client: PoolClient, input: {
+  videoItem: PipelineItemRow;
+  title: string;
+  youtubeUrl: string;
+  videoId: string;
+  publishAt: string;
+  playlistContextUrl: string | null;
+  cta: string | null;
+  requestedBy: string;
+}) {
+  const existingResult = await client.query(
+    `select ${PIPELINE_ITEM_COLUMNS}
+       from public.pipeline_items
+      where pipeline_type = 'youtube_pinned_comment'
+        and metadata -> 'launch_package' ->> 'video_id' = $1
+      order by updated_at desc nulls last
+      limit 1`,
+    [input.videoId],
+  );
+  const existing = existingResult.rows[0] ? pipelineItem(existingResult.rows[0]) : null;
+  const now = new Date().toISOString();
+  const existingMetadata = toRecord(existing?.metadata);
+  const metadata = {
+    ...existingMetadata,
+    kind: "youtube_pinned_comment",
+    source: {
+      ...toRecord(existingMetadata.source),
+      type: "video",
+      pipeline_item_id: input.videoItem.id,
+      title: input.title,
+      watch_url: input.youtubeUrl,
+      video_url: input.youtubeUrl,
+      video_id: input.videoId,
+      playlist_context_url: input.playlistContextUrl,
+      publish_at: input.publishAt,
+    },
+    draft: toRecord(existingMetadata.draft),
+    review: toRecord(existingMetadata.review),
+    launch_package: {
+      ...toRecord(existingMetadata.launch_package),
+      source_video_pipeline_item_id: input.videoItem.id,
+      video_id: input.videoId,
+      youtube_url: input.youtubeUrl,
+      playlist_context_url: input.playlistContextUrl,
+      publish_at: input.publishAt,
+      cta: input.cta,
+      prepublication_draft_authorized: true,
+      public_gate_applies_to: "publish_or_send_only",
+      requires_gonza_approval: true,
+      requires_live_check_passed: true,
+      updated_at: now,
+    },
+  };
+
+  if (existing) {
+    const result = await client.query(
+      `update public.pipeline_items
+          set title = $1, status = $2, owner_agent = 'youtube', requested_by = $3,
+              source_type = 'manual', source_id = $4, metadata = $5::jsonb, updated_at = $6
+        where id = $7
+        returning ${PIPELINE_ITEM_COLUMNS}`,
+      [
+        `Pinned comment draft: ${input.title}`,
+        TERMINAL_WORK_STATUSES.has(existing.status) || existing.status === "published" ? existing.status : existing.status || "drafting",
+        existing.requested_by || input.requestedBy,
+        input.videoItem.id,
+        JSON.stringify(metadata),
+        now,
+        existing.id,
+      ],
+    );
+    return { item: pipelineItem(result.rows[0]), created: false };
+  }
+
+  const result = await client.query(
+    `insert into public.pipeline_items (
+       pipeline_type, title, status, priority, owner_agent, requested_by, source_type, source_id, metadata, updated_at
+     ) values ('youtube_pinned_comment', $1, 'drafting', $2, 'youtube', $3, 'manual', $4, $5::jsonb, $6)
+     returning ${PIPELINE_ITEM_COLUMNS}`,
+    [`Pinned comment draft: ${input.title}`, input.videoItem.priority || "high", input.requestedBy, input.videoItem.id, JSON.stringify(metadata), now],
   );
   return { item: pipelineItem(result.rows[0]), created: true };
 }
@@ -552,6 +641,7 @@ export async function createScheduledYouTubeLaunchPackageLocal(input: YouTubeLau
   const youtubeUrl = trimToNull(input.youtubeUrl) || youtubeWatchUrl(videoId);
   const title = trimToNull(input.title) || `Scheduled YouTube video ${videoId}`;
   const requestedBy = trimToNull(input.requestedBy) || "mission-control";
+  const preparedAt = input.preparedAt ? normalizeIsoDate(input.preparedAt, "prepared_at") : new Date().toISOString();
   const targetCommunityPublishAt = addMinutes(publishAt, 30);
   const refs = toRecord(input.refs);
 
@@ -628,6 +718,16 @@ export async function createScheduledYouTubeLaunchPackageLocal(input: YouTubeLau
       optionalDiagnosticCta,
       requestedBy,
     });
+    const pinnedComment = await ensurePinnedCommentPipelineItem(client, {
+      videoItem: video.item,
+      title,
+      youtubeUrl,
+      videoId,
+      publishAt,
+      playlistContextUrl,
+      cta,
+      requestedBy,
+    });
 
     const common = { videoId, videoPipelineItemId: video.item.id, youtubeUrl, publishAt, requestedBy };
     const specs = buildScheduledYouTubeLaunchWorkSpecs({
@@ -641,9 +741,11 @@ export async function createScheduledYouTubeLaunchPackageLocal(input: YouTubeLau
       emailTrackingRef,
       optionalDiagnosticCta,
       cta,
+      preparedAt,
       videoPipelineItemId: video.item.id,
       communityPipelineItemId: community.item.id,
       marketingPipelineItemId: marketing.item.id,
+      pinnedCommentPipelineItemId: pinnedComment.item.id,
     });
     const workItems = [];
     for (const spec of specs) {
@@ -662,6 +764,8 @@ export async function createScheduledYouTubeLaunchPackageLocal(input: YouTubeLau
           publish_at: publishAt,
           community_pipeline_item_id: community.item.id,
           marketing_pipeline_item_id: marketing.item.id,
+          pinned_comment_pipeline_item_id: pinnedComment.item.id,
+          prepared_at: preparedAt,
           work_item_ids: workItems.map((entry) => entry.workItem?.id).filter(Boolean),
           newsletter_scope: "excluded_v1",
           email_campaign_handoff: {
@@ -680,6 +784,8 @@ export async function createScheduledYouTubeLaunchPackageLocal(input: YouTubeLau
       communityItemCreated: community.created,
       marketingItem: marketing.item,
       marketingItemCreated: marketing.created,
+      pinnedCommentItem: pinnedComment.item,
+      pinnedCommentItemCreated: pinnedComment.created,
       publishAt,
       targetCommunityPublishAt,
       targetEmailSendAt,

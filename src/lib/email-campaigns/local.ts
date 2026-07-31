@@ -103,7 +103,7 @@ function buildRevisionInstruction(input: { title: string; feedback: string; kind
   ].join("\n");
 }
 
-function buildSendInstruction(input: { title: string; kind: string | null; scheduledFor: string; draft: JsonRecord }) {
+function buildSendInstruction(input: { title: string; kind: string | null; scheduledFor: string; draft: JsonRecord; requiresYouTubeLiveGate?: boolean }) {
   return [
     `Email campaign pipeline item: ${input.title}`,
     `Campaign type: ${input.kind || "email_campaign"}`,
@@ -113,6 +113,9 @@ function buildSendInstruction(input: { title: string; kind: string | null; sched
     "- Prepare/send this approved email campaign at the scheduled time using the current AIPaths email-send workflow.",
     "- Use only the approved draft below. Do not rewrite unless there is a blocking formatting issue.",
     "- If real sending infrastructure is not available yet, complete the work item as blocked/failed with the exact blocker; do not invent a send result.",
+    ...(input.requiresYouTubeLiveGate ? [
+      "- YouTube launch gate: before sending, verify privacyStatus=public/live and that Gonza approved this campaign; block if not confirmed.",
+    ] : []),
     "- When sent, complete this work item with output.sent_at and any provider/campaign URL or ID available.",
     "",
     "Approved draft JSON:",
@@ -508,7 +511,9 @@ export async function scheduleEmailCampaignLocalAtomic(input: {
     let workItem = existingResult.rows[0];
     const terminalWork = workItem ? TERMINAL_WORK_STATUSES.has(workItem.status) : false;
     const effectiveScheduledFor = terminalWork ? toIso(workItem?.scheduled_for) || input.scheduledFor : input.scheduledFor;
-    const instruction = buildSendInstruction({ title: item.title, kind, scheduledFor: input.scheduledFor, draft });
+    const source = asObject(metadata.source);
+    const requiresYouTubeLiveGate = kind === "video_announcement" || readString(source.video_id) !== null;
+    const instruction = buildSendInstruction({ title: item.title, kind, scheduledFor: input.scheduledFor, draft, requiresYouTubeLiveGate });
     const payloadPatch = {
       trigger: "email_campaign_scheduled",
       pipeline_type: "email_campaign",
@@ -518,6 +523,12 @@ export async function scheduleEmailCampaignLocalAtomic(input: {
       action: "send_email_campaign",
       email_campaign_kind: kind,
       schedule_kind: "email_send",
+      ...(requiresYouTubeLiveGate ? {
+        public_gate_applies_to: "publish_or_send_only",
+        requires_live_check_passed: true,
+        requires_gonza_approval: true,
+        source_video_id: readString(source.video_id),
+      } : {}),
     };
 
     if (!workItem) {

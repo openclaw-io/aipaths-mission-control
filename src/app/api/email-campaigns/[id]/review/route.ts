@@ -52,6 +52,7 @@ function buildSendInstruction(input: {
   kind: string | null;
   scheduledFor: string;
   draft: JsonRecord;
+  requiresYouTubeLiveGate?: boolean;
 }) {
   return [
     `Email campaign pipeline item: ${input.title}`,
@@ -62,6 +63,9 @@ function buildSendInstruction(input: {
     "- Prepare/send this approved email campaign at the scheduled time using the current AIPaths email-send workflow.",
     "- Use only the approved draft below. Do not rewrite unless there is a blocking formatting issue.",
     "- If real sending infrastructure is not available yet, complete the work item as blocked/failed with the exact blocker; do not invent a send result.",
+    ...(input.requiresYouTubeLiveGate ? [
+      "- YouTube launch gate: before sending, verify privacyStatus=public/live and that Gonza approved this campaign; block if not confirmed.",
+    ] : []),
     "- When sent, complete this work item with output.sent_at and any provider/campaign URL or ID available.",
     "",
     "Approved draft JSON:",
@@ -270,6 +274,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         kind: readString(metadata.kind),
         scheduledFor,
         draft,
+        requiresYouTubeLiveGate: readString(metadata.kind) === "video_announcement" || readString(asObject(metadata.source).video_id) !== null,
       }),
       priority: item.priority || "medium",
       ownerAgent: "marketing",
@@ -281,6 +286,12 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       payloadExtra: {
         email_campaign_kind: readString(metadata.kind),
         schedule_kind: "email_send",
+        ...(readString(metadata.kind) === "video_announcement" || readString(asObject(metadata.source).video_id) !== null ? {
+          public_gate_applies_to: "publish_or_send_only",
+          requires_live_check_passed: true,
+          requires_gonza_approval: true,
+          source_video_id: readString(asObject(metadata.source).video_id),
+        } : {}),
       },
     };
     const result = await createPipelineWorkItem(db!, workInput);
@@ -296,6 +307,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
           kind: readString(metadata.kind),
           scheduledFor,
           draft,
+          requiresYouTubeLiveGate: readString(metadata.kind) === "video_announcement" || readString(asObject(metadata.source).video_id) !== null,
         }),
         scheduled_for: scheduledFor,
         status: result.workItem.status === "in_progress" ? "in_progress" : "ready",

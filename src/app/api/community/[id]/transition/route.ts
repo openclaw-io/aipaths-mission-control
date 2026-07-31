@@ -293,6 +293,12 @@ export async function POST(
               target_channel_name: target.channelName,
               log_channel_id: "1473660854800224316",
               suppress_link_previews: !allowsYouTubePreview,
+              ...(allowsYouTubePreview ? {
+                public_gate_applies_to: "publish_or_send_only",
+                requires_live_check_passed: true,
+                requires_gonza_approval: true,
+                source_video_id: typeof source.video_id === "string" ? source.video_id : null,
+              } : {}),
             },
           }, client);
           localPublishWorkItemId = workItem?.id || null;
@@ -412,6 +418,12 @@ export async function POST(
           target_channel_name: target.channelName,
           log_channel_id: "1473660854800224316",
           suppress_link_previews: !allowsYouTubePreview,
+          ...(allowsYouTubePreview ? {
+            public_gate_applies_to: "publish_or_send_only",
+            requires_live_check_passed: true,
+            requires_gonza_approval: true,
+            source_video_id: typeof source.video_id === "string" ? source.video_id : null,
+          } : {}),
         },
       };
       const { workItem } = await createPipelineWorkItem(db!, workInput);

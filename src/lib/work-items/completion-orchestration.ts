@@ -1044,6 +1044,35 @@ export async function orchestrateWorkItemCompletion(
     }
   }
 
+  if (pipelineType === "youtube_pinned_comment") {
+    const pinnedDraft = asRecord(asRecord(body.output).pinned_comment_draft);
+    const draftText = readString(pinnedDraft.text)
+      || getNestedString(body.output, ["pinned_comment", "text"])
+      || getNestedString(body.output, ["comment", "text"]);
+    if (action === "draft_youtube_pinned_comment" || draftText) {
+      await updatePipelineItem(client, pipelineItemId, draftText ? "ready_for_review" : "drafting", {
+        ...metadata,
+        draft: {
+          ...asRecord(metadata.draft),
+          text: draftText || readString(asRecord(metadata.draft).text) || "",
+        },
+        review: {
+          ...asRecord(metadata.review),
+          status: draftText ? "ready_for_review" : "needs_redraft",
+          ready_at: draftText ? now : undefined,
+          source_work_item_id: updated.id,
+        },
+        runtime_feedback: {
+          ...asRecord(metadata.runtime_feedback),
+          last_status: draftText ? "pinned_comment_draft_saved" : "completed_without_pinned_comment_text",
+          last_work_item_id: updated.id,
+          updated_at: now,
+        },
+      });
+      return { applied: true, effect: "youtube_pinned_comment_draft" };
+    }
+  }
+
   if (pipelineType === "email_campaign") {
     const emailDraft = asRecord(asRecord(body.output).email_draft);
     if (Object.keys(emailDraft).length) {

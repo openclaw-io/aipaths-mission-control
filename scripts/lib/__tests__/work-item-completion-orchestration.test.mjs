@@ -259,6 +259,35 @@ test("email_draft completion stores the draft and moves email_campaign to ready_
   });
 });
 
+test("YouTube pinned comment draft completion stores text and moves to ready_for_review", async () => {
+  await inRollbackTransaction(async (client) => {
+    const pipelineItem = await insertPipelineItem(client, {
+      pipeline_type: "youtube_pinned_comment",
+      status: "drafting",
+      metadata: { draft: {}, launch_package: { video_id: "PinDraft001" } },
+    });
+    const workItem = await insertWorkItem(client, pipelineItem, {
+      relation_type: "youtube_pinned_comment_draft",
+      action: "draft_youtube_pinned_comment",
+      owner_agent: "youtube",
+    });
+    const pinnedDraft = { text: "Comentá 'IA' y te paso el recurso.", status: "ready_for_review" };
+
+    await orchestrateWorkItemCompletion(client, {
+      existing: workItem,
+      updated: completed(workItem),
+      body: { status: "done", output: { pinned_comment_draft: pinnedDraft } },
+      verifyPublishedContent,
+    });
+
+    const row = (await client.query("select status, metadata from public.pipeline_items where id = $1", [pipelineItem.id])).rows[0];
+    assert.equal(row.status, "ready_for_review");
+    assert.equal(row.metadata.draft.text, pinnedDraft.text);
+    assert.equal(row.metadata.review.status, "ready_for_review");
+    assert.equal(row.metadata.runtime_feedback.last_status, "pinned_comment_draft_saved");
+  });
+});
+
 test("YouTube gate completion updates gate history once and derives terminal completion state", async () => {
   await inRollbackTransaction(async (client) => {
     const gates = Object.fromEntries(youtubePipeline.YOUTUBE_GATE_ORDER.map((key) => [key, { status: key === "postmortem" ? "not_started" : "pass", history: [] }]));

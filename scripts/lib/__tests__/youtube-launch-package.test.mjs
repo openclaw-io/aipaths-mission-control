@@ -55,43 +55,72 @@ function baseContext(overrides = {}) {
     emailTrackingRef: "email-youtube-Dn1pJz5fq-w",
     optionalDiagnosticCta: "https://aipaths.academy/es/diagnostico-ia?ref=email-youtube-Dn1pJz5fq-w",
     cta: "Ver el video y responder con tu caso",
+    preparedAt: "2026-07-07T10:00:00.000Z",
     ...overrides,
   };
 }
 
-test("buildScheduledYouTubeLaunchWorkSpecs includes community, website, marketing and snapshot handoffs", () => {
+test("buildScheduledYouTubeLaunchWorkSpecs includes immediate drafts, preflight, external gates, and snapshots", () => {
   assert.equal(typeof launchPackage.buildScheduledYouTubeLaunchWorkSpecs, "function");
   const specs = launchPackage.buildScheduledYouTubeLaunchWorkSpecs(baseContext());
   const byRelation = new Map(specs.map((spec) => [spec.relationType, spec]));
 
   assert.deepEqual([...byRelation.keys()], [
+    "youtube_launch_preflight",
     "video_launch_activate",
     "launch_community_draft",
+    "youtube_pinned_comment_draft",
     "website_publish_video",
     "marketing_email_campaign",
     "youtube_snapshot_24h",
     "youtube_snapshot_7d",
     "youtube_snapshot_28d",
   ]);
+  assert.equal(byRelation.get("youtube_launch_preflight").scheduledFor, "2026-07-07T13:30:00.000Z");
   assert.equal(byRelation.get("video_launch_activate").scheduledFor, "2026-07-07T14:02:00.000Z");
+  assert.equal(byRelation.get("launch_community_draft").scheduledFor, "2026-07-07T10:00:00.000Z");
+  assert.equal(byRelation.get("youtube_pinned_comment_draft").scheduledFor, "2026-07-07T10:00:00.000Z");
   assert.equal(byRelation.get("website_publish_video").scheduledFor, "2026-07-07T14:15:00.000Z");
-  assert.equal(byRelation.get("marketing_email_campaign").scheduledFor, "2026-07-07T17:00:00.000Z");
+  assert.equal(byRelation.get("marketing_email_campaign").scheduledFor, "2026-07-07T10:00:00.000Z");
   assert.equal(byRelation.get("youtube_snapshot_28d").scheduledFor, "2026-08-04T14:00:00.000Z");
 });
 
-test("launch work specs pass structured context without hardcoding community or marketing copy rules", () => {
+test("preflight runs immediately when a launch is already inside the T-30m window", () => {
+  const specs = launchPackage.buildScheduledYouTubeLaunchWorkSpecs(baseContext({
+    preparedAt: "2026-07-07T13:45:00.000Z",
+  }));
+  const preflight = specs.find((spec) => spec.relationType === "youtube_launch_preflight");
+  assert.equal(preflight.scheduledFor, "2026-07-07T13:45:00.000Z");
+});
+
+test("prepublication drafts are authorized before the video is public and gate only external actions", () => {
   const specs = launchPackage.buildScheduledYouTubeLaunchWorkSpecs(baseContext());
   const community = specs.find((spec) => spec.relationType === "launch_community_draft");
+  const pinned = specs.find((spec) => spec.relationType === "youtube_pinned_comment_draft");
   const marketing = specs.find((spec) => spec.relationType === "marketing_email_campaign");
+  const website = specs.find((spec) => spec.relationType === "website_publish_video");
 
   assert.equal(community.ownerAgent, "community");
   assert.equal(community.payloadExtra.playlist_context_url, "https://www.youtube.com/watch?v=Dn1pJz5fq-w&list=PLabc123");
   assert.equal(community.payloadExtra.suppress_link_previews, false);
+  assert.equal(community.payloadExtra.prepublication_draft_authorized, true);
+  assert.equal(community.payloadExtra.public_gate_applies_to, "publish_or_send_only");
+  assert.equal(community.payloadExtra.requires_gonza_approval, true);
+  assert.equal(community.payloadExtra.customer_facing_guard, false);
   assert.equal(community.payloadExtra.validation_requirements.playlist_context_url_required_when_present, true);
   assert.match(community.instruction, /structured launch context/i);
   assert.match(community.instruction, /Ready for Review/i);
-  assert.match(community.instruction, /Live\/public YouTube guard/i);
+  assert.match(community.instruction, /Private\/scheduled YouTube videos are allowed for this draft/i);
+  assert.doesNotMatch(community.instruction, /Before any customer-facing publish\/draft\/activation/);
   assert.doesNotMatch(community.instruction, /Newsletter\/email: out of scope/);
+
+  assert.equal(pinned.ownerAgent, "youtube");
+  assert.equal(pinned.action, "draft_youtube_pinned_comment");
+  assert.equal(pinned.payloadExtra.prepublication_draft_authorized, true);
+  assert.equal(pinned.payloadExtra.public_gate_applies_to, "publish_or_send_only");
+  assert.equal(pinned.payloadExtra.requires_gonza_approval, true);
+  assert.match(pinned.instruction, /pinned comment draft/i);
+  assert.match(pinned.instruction, /do not publish/i);
 
   assert.equal(marketing.ownerAgent, "marketing");
   assert.equal(marketing.pipelineType, "email_campaign");
@@ -99,10 +128,16 @@ test("launch work specs pass structured context without hardcoding community or 
   assert.equal(marketing.payloadExtra.target_send_at, "2026-07-07T17:00:00.000Z");
   assert.equal(marketing.payloadExtra.email_tracking_ref, "email-youtube-Dn1pJz5fq-w");
   assert.equal(marketing.payloadExtra.requires_gonza_approval, true);
-  assert.equal(marketing.payloadExtra.customer_facing_guard, true);
+  assert.equal(marketing.payloadExtra.prepublication_draft_authorized, true);
+  assert.equal(marketing.payloadExtra.public_gate_applies_to, "publish_or_send_only");
+  assert.equal(marketing.payloadExtra.customer_facing_guard, false);
   assert.match(marketing.instruction, /Marketing owns copy/i);
   assert.match(marketing.instruction, /do not send/i);
-  assert.match(marketing.instruction, /Live\/public YouTube guard/i);
+
+  assert.equal(website.payloadExtra.customer_facing_guard, true);
+  assert.equal(website.payloadExtra.requires_live_check_passed, true);
+  assert.equal(website.payloadExtra.public_gate_applies_to, "activation_only");
+  assert.match(website.instruction, /privacyStatus must be public/i);
 });
 
 test("validateCommunityLaunchDraftOutput enforces playlist context and raw YouTube embed requirements", () => {
