@@ -12,9 +12,10 @@ export async function lockReviewerExecution(client: CompletionQueryClient, execu
     heartbeat_at: string | Date;
   }>(
     `select e.*,r.task_id,r.quality_cycle,r.target_run_id implementation_run_id,
-        impl.server_session_id implementer_session_id,t.status task_status,t.title task_title,
+        impl.server_session_id implementer_session_id,t.status task_status,t.title task_title,t.metadata task_metadata,
         wi.status work_status,
-        s.id stage_id,s.plan_revision_id,p.content_hash plan_hash,l.id loop_id,l.status loop_status,l.priority,l.owner_agent
+        s.id stage_id,s.plan_revision_id,p.content_hash plan_hash,p.status revision_status,
+        l.current_plan_revision_id,l.id loop_id,l.status loop_status,l.priority,l.owner_agent
       from reviewer_executions e join loop_task_runs r on r.id=e.review_run_id
       join loop_task_runs impl on impl.id=r.target_run_id
       join work_items wi on wi.id=e.work_item_id

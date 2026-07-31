@@ -13,7 +13,7 @@ import {
   parseHermesOutput, readCapabilityOnce, runBounded, verifyHermesSession,
 } from "./lib/reviewer-runtime.mjs";
 
-const DEFAULT_DB = "postgres://joaco@127.0.0.1:5432/aipaths_mission_control_local";
+const DEFAULT_DB = "postgres://aipaths_mc_app@127.0.0.1:5432/aipaths_mission_control_local";
 const executionId = process.argv[2] || "";
 if (!/^[0-9a-f-]{36}$/i.test(executionId) || process.argv.length !== 3) {
   process.stderr.write(`${JSON.stringify({ level: "error", event: "reviewer.invalid_execution_id" })}\n`);

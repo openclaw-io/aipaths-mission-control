@@ -38,7 +38,7 @@ cp .env.example .env.local
 Required for the local runtime and local write scripts:
 
 ```dotenv
-MISSION_CONTROL_DATABASE_URL=postgres://joaco@127.0.0.1:5432/aipaths_mission_control_local
+MISSION_CONTROL_DATABASE_URL=postgres://aipaths_mc_app@127.0.0.1:5432/aipaths_mission_control_local
 ```
 
 Supabase variables remain necessary for auth and for the one-time cloud-to-local bootstrap, but `SUPABASE_SERVICE_ROLE_KEY` is never a runtime database fallback:

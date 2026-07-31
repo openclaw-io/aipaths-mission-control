@@ -535,6 +535,11 @@ test("generic notifier rejects fresh review before any spawn", async () => {
       "@/lib/db/postgres": { query: async () => ({ rows: [{ id: randomUUID(), loop_id: randomUUID(), title: "review",
         status: "ready", owner_agent: "systems", target_agent_id: null, payload: { runtime_contract: "fresh_review_v1", run_role: "review" } }] }) },
       "@/lib/loops/execution-instruction": { buildLoopWakeContext: () => "" },
+    "@/lib/work-items/generic-notify-contract": {
+      isVisualQaLikeWorkItem: (row) => row?.payload?.runtime_contract === "visual_qa_v1" || row?.payload?.run_role === "qa",
+      parseGenericNotifyClassificationIdentity: () => null,
+      genericNotifyIdentityMatches: () => true,
+    },
     }, { fetch: async () => { throw new Error("network forbidden"); } });
     const response = await route.POST({ headers: { get: () => "Bearer test-key" }, json: async () => ({ work_item_id: randomUUID(), agent: "systems" }) });
     assert.equal(response.status, 409);

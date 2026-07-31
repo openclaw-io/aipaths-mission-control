@@ -206,17 +206,33 @@ export async function POST(
         `select t.id,t.status task_status,s.status stage_status,impl.quality_cycle latest_cycle,
                 (impl.id is not null and impl.status='succeeded' and impl.artifact_sha is not null
                  and impl.server_session_id is not null and wi.status='done'
-                 and wi.payload->>'execution_attempt_id'=impl.execution_attempt_id::text
-                 and wi.payload->>'runtime_contract'='fresh_review_v1'
-                 and wi.payload->>'run_role'='implementation'
-                 and wi.payload->>'plan_revision_id'=$1::text and wi.payload->>'plan_hash'=$2
-                 and review.status='approved' and review.reviewed_sha=impl.artifact_sha
+                 and wi.payload->>'execution_attempt_id' IS NOT DISTINCT FROM impl.execution_attempt_id::text
+                 and wi.payload->>'runtime_contract' IS NOT DISTINCT FROM 'fresh_review_v1'
+                 and wi.payload->>'run_role' IS NOT DISTINCT FROM 'implementation'
+                 and wi.payload->>'plan_revision_id' IS NOT DISTINCT FROM $1::text
+                 and wi.payload->>'plan_hash' IS NOT DISTINCT FROM $2
+                 and review.status='approved' and review.reviewed_sha IS NOT DISTINCT FROM impl.artifact_sha
                  and review.reviewer_session_id is not null
-                 and review.reviewer_session_id<>impl.server_session_id
+                 and review.reviewer_session_id is distinct from impl.server_session_id
                  and rr.status='succeeded' and rr.run_role='review'
-                 and rr.quality_cycle=impl.quality_cycle and rr.target_run_id=impl.id
-                 and rr.target_sha=impl.artifact_sha and rr.server_session_id=review.reviewer_session_id
-                 and rwi.status='done') valid
+                 and rr.quality_cycle IS NOT DISTINCT FROM impl.quality_cycle and rr.target_run_id IS NOT DISTINCT FROM impl.id
+                 and rr.target_sha IS NOT DISTINCT FROM impl.artifact_sha and rr.server_session_id IS NOT DISTINCT FROM review.reviewer_session_id
+                 and rwi.status='done'
+                 and (not (t.metadata ? 'qa_policy') or (public.qa_policy_is_valid(t.metadata->'qa_policy') and (
+                   t.metadata->'qa_policy'->'required'='false'::jsonb or exists (
+                   select 1 from loop_task_runs qr join qa_executions qe on qe.qa_run_id=qr.id and qe.task_id=t.id
+                   join work_items qwi on qwi.id=qr.work_item_id
+                   where qr.run_role='qa' and qr.quality_cycle IS NOT DISTINCT FROM impl.quality_cycle
+                     and qr.target_run_id IS NOT DISTINCT FROM impl.id
+                     and qr.target_sha IS NOT DISTINCT FROM impl.artifact_sha and qr.status='succeeded' and qwi.status='done'
+                     and qe.status='succeeded' and qe.target_run_id IS NOT DISTINCT FROM impl.id
+                     and qe.target_sha IS NOT DISTINCT FROM impl.artifact_sha
+                     and jsonb_typeof(qe.result->'verdict')='string' and qe.result->>'verdict' IS NOT DISTINCT FROM 'pass'
+                     and jsonb_typeof(qe.result->'tested_sha')='string' and qe.result->>'tested_sha' IS NOT DISTINCT FROM impl.artifact_sha
+                     and qe.policy_hash IS NOT DISTINCT FROM qwi.payload->>'policy_hash'
+                     and qwi.payload->'qa_policy' IS NOT DISTINCT FROM t.metadata->'qa_policy'
+                     and public.qa_result_is_valid(qe.result,qe.target_sha,qwi.payload->'qa_policy')
+                     and qe.result_hash IS NOT DISTINCT FROM public.qa_jsonb_sha256(qe.result)))))) valid
            from loop_tasks t join loop_stages s on s.id=t.stage_id
            left join lateral (
              select candidate.* from loop_task_runs candidate where candidate.task_id=t.id and candidate.run_role='implementation'

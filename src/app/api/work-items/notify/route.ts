@@ -4,8 +4,13 @@ import { NextResponse, type NextRequest } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { AGENT_ROUTING, isRoutedAgent } from "@/lib/agent-routing";
 import { isLocalAuthDisabled } from "@/lib/auth/local";
-import { query } from "@/lib/db/postgres";
+import { query, withTransaction } from "@/lib/db/postgres";
 import { buildLoopWakeContext } from "@/lib/loops/execution-instruction";
+import {
+  genericNotifyIdentityMatches,
+  isVisualQaLikeWorkItem,
+  parseGenericNotifyClassificationIdentity,
+} from "@/lib/work-items/generic-notify-contract";
 
 export const dynamic = "force-dynamic";
 
@@ -53,6 +58,7 @@ type WorkItemRow = {
   title: string;
   instruction: string | null;
   status: string;
+  updated_at: string | Date;
   priority: string | null;
   owner_agent: string | null;
   target_agent_id: string | null;
@@ -281,7 +287,14 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { workItemId, agent, action } = await request.json();
+  const { workItemId, agent, action, caller, expectedClassificationIdentity } = await request.json();
+  const isGenericSchedulerCall = caller === "generic_scheduler_v1";
+  const schedulerClassificationIdentity = isGenericSchedulerCall
+    ? parseGenericNotifyClassificationIdentity(expectedClassificationIdentity)
+    : null;
+  if (isGenericSchedulerCall && !schedulerClassificationIdentity) {
+    return NextResponse.json({ error: "generic_notify_classification_identity_required" }, { status: 400 });
+  }
 
   if (!isRoutedAgent(agent)) {
     return NextResponse.json({ error: `Unknown agent: ${agent}` }, { status: 400 });
@@ -295,7 +308,7 @@ export async function POST(request: NextRequest) {
   if (useLocalMode) {
     const { rows } = await query(
       `select id, loop_id, title, instruction, status, priority, owner_agent, target_agent_id, requested_by,
-              scheduled_for, source_type, source_id, payload
+              scheduled_for, source_type, source_id, payload, updated_at
          from public.work_items
         where id = $1
         limit 1`,
@@ -305,7 +318,7 @@ export async function POST(request: NextRequest) {
   } else {
     const { data, error } = await (db as ReturnType<typeof createServiceClient>)
       .from("work_items")
-      .select("id, loop_id, title, instruction, status, priority, owner_agent, target_agent_id, requested_by, scheduled_for, source_type, source_id, payload")
+      .select("id, loop_id, title, instruction, status, priority, owner_agent, target_agent_id, requested_by, scheduled_for, source_type, source_id, payload, updated_at")
       .eq("id", workItemId)
       .single();
     if (error) {
@@ -316,6 +329,9 @@ export async function POST(request: NextRequest) {
 
   if (!item) {
     return NextResponse.json({ error: "work_item not found" }, { status: 404 });
+  }
+  if (isVisualQaLikeWorkItem(item)) {
+    return NextResponse.json({ error: "visual_qa_v1 requires dedicated QA claim" }, { status: 409 });
   }
   if (item.payload?.runtime_contract === "fresh_review_v1" && item.payload?.run_role === "review") {
     return NextResponse.json({ error: "fresh_review_v1 requires dedicated reviewer dispatch" }, { status: 409 });
@@ -455,7 +471,39 @@ Fail it:
 ${failCommand}
 \`\`\``;
 
-  let wake = await wakeAgent(routing.agentId, item.id, message, workPayload);
+  let wake: WakeAgentResult;
+  if (isGenericSchedulerCall) {
+    if (!useLocalMode || !schedulerClassificationIdentity) {
+      return NextResponse.json({ error: "generic_scheduler_notify_requires_local_atomic_guard" }, { status: 503 });
+    }
+    const guarded = await withTransaction(async (client) => {
+      const currentResult = await client.query<WorkItemRow>(
+        `select id,status,updated_at,source_type,source_id,owner_agent,target_agent_id,payload
+           from public.work_items
+          where id=$1
+          for update`,
+        [item.id],
+      );
+      const current = currentResult.rows[0];
+      if (!current || !genericNotifyIdentityMatches(schedulerClassificationIdentity, current)) {
+        return { error: "generic_notify_classification_identity_changed" as const };
+      }
+      if (isVisualQaLikeWorkItem(current)) {
+        return { error: "generic_notify_visual_qa_rejected" as const };
+      }
+      if (agent !== current.owner_agent && agent !== current.target_agent_id) {
+        return { error: "notify_agent_identity_mismatch" as const };
+      }
+      const guardedWake = await wakeAgent(routing.agentId, item.id, message, workPayload);
+      return { wake: guardedWake };
+    });
+    if ("error" in guarded) {
+      return NextResponse.json({ error: guarded.error }, { status: 409 });
+    }
+    wake = guarded.wake;
+  } else {
+    wake = await wakeAgent(routing.agentId, item.id, message, workPayload);
+  }
   if (!wake.ok) {
     let latestStatus: string | null = null;
     if (useLocalMode) {
