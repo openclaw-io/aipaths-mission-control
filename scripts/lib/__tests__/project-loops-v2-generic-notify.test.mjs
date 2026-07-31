@@ -78,6 +78,7 @@ test("generic scheduler notify does not wake a live-gate blocked row", async () 
   const contract = transpile(resolve(repoRoot, "src/lib/work-items/generic-notify-contract.ts"), {
     "node:crypto": { createHash },
   });
+  const statusPayload = transpile(resolve(repoRoot, "src/lib/work-items/status-payload.ts"));
   const row = {
     id: "10000000-0000-4000-8000-000000000010",
     loop_id: null,
@@ -113,6 +114,7 @@ test("generic scheduler notify does not wake a live-gate blocked row", async () 
     },
     "@/lib/loops/execution-instruction": { buildLoopWakeContext: () => "" },
     "@/lib/work-items/generic-notify-contract": contract,
+    "@/lib/work-items/status-payload": statusPayload,
   }, {
     process: { env: { AGENT_API_KEY: "test-key" }, cwd: () => repoRoot },
     console: { ...console, error() {}, log() {} },

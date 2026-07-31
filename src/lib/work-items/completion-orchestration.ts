@@ -9,7 +9,10 @@ import {
   type YouTubeGateKey,
   type YouTubeGateStatus,
 } from "@/lib/youtube-pipeline";
-import { validateCommunityLaunchDraftOutput } from "@/lib/youtube-launch-package";
+import {
+  extractYouTubeVideoId,
+  validateCommunityLaunchDraftOutput,
+} from "@/lib/youtube-launch-package";
 import { verifyRepositoryCommit } from "@/lib/work-items/git-artifact";
 
 export type JsonRecord = Record<string, unknown>;
@@ -627,6 +630,36 @@ function extractYouTubeEvidenceSummary(body: JsonRecord) {
     || null;
 }
 
+function extractYouTubeLiveCheck(body: JsonRecord) {
+  const output = asRecord(body.output);
+  const liveCheck = asRecord(output.live_check);
+  const equivalent = Object.keys(liveCheck).length
+    ? liveCheck
+    : asRecord(output.youtube_live_check || asRecord(output.activation).live_check || body.live_check);
+  const status = readString(equivalent.status)?.toLowerCase() || "";
+  const publicUrl = readString(equivalent.public_url)
+    || readString(equivalent.publicUrl)
+    || readString(equivalent.url);
+  const evidence = asRecord(equivalent.evidence ?? equivalent.verification ?? equivalent.proof);
+  const evidenceSource = readString(evidence.source)?.toLowerCase() || "";
+  const evidenceVideoId = readString(evidence.video_id) || readString(evidence.videoId);
+  const evidenceVisibility = (readString(evidence.visibility) || readString(evidence.privacy_status))?.toLowerCase() || "";
+  const evidenceUrl = readString(evidence.public_url) || readString(evidence.url);
+  const confirmsPublic = ["public", "live", "published", "verified_public"].includes(status);
+  return {
+    liveCheck: equivalent,
+    confirmsPublic,
+    publicUrl,
+    evidenceSource,
+    evidenceVideoId,
+    evidenceVisibility,
+    evidenceUrl,
+    launchGeneration: readString(equivalent.launch_generation) || readString(equivalent.launchGeneration),
+    hasEvidence: Boolean(evidenceSource && evidenceVideoId && evidenceVisibility === "public" && evidenceUrl),
+    checkedAt: readString(equivalent.checked_at) || readString(equivalent.checkedAt),
+  };
+}
+
 function communityPublishTarget(metadata: JsonRecord) {
   const destinationKey = readString(metadata.intel_destination_key);
   const destinationLabel = readString(metadata.destination_label)?.toLowerCase() || "";
@@ -646,7 +679,7 @@ function communityPublishTarget(metadata: JsonRecord) {
 }
 
 function isPublished(item: JsonRecord) {
-  return item.status === "published" || item.status === "live" || Boolean(item.published_at) || Boolean(item.current_url);
+  return item.status === "published" || item.status === "live" || Boolean(item.published_at);
 }
 
 async function ensureMappedWorkItem(client: CompletionQueryClient, input: {
@@ -888,11 +921,14 @@ export async function orchestrateWorkItemCompletion(
 
   const loopCompletion = await reconcilePrimaryLoopCompletion(client, updated);
 
-  const payload = asRecord(updated.payload);
-  const sourcePipelineItemId = ["pipeline_item", "service"].includes(String(updated.source_type || ""))
-    ? readString(updated.source_id)
+  const payload = asRecord(existing.payload);
+  const sourcePipelineItemId = ["pipeline_item", "service"].includes(String(existing.source_type || ""))
+    ? readString(existing.source_id)
     : null;
-  const pipelineItemId = readString(payload.pipeline_item_id) || sourcePipelineItemId;
+  const payloadAction = readString(payload.action);
+  const pipelineItemId = payloadAction === "video_launch_activate"
+    ? readString(payload.source_video_pipeline_item_id) || readString(payload.pipeline_item_id) || sourcePipelineItemId
+    : readString(payload.pipeline_item_id) || sourcePipelineItemId;
   if (!pipelineItemId) {
     return loopCompletion.applied
       ? loopCompletion
@@ -906,12 +942,149 @@ export async function orchestrateWorkItemCompletion(
   const pipelineItem = pipelineResult.rows[0];
   if (!pipelineItem) return { applied: false, reason: "pipeline_item_not_found" };
 
-  const { pipelineType, action, relationType } = resolvePipelineAction(updated, pipelineItem);
+  const { pipelineType, action, relationType } = resolvePipelineAction(existing, pipelineItem);
 
   const now = new Date().toISOString();
   const metadata = asRecord(pipelineItem.metadata);
+  const activeScheduledYouTubeLaunch = pipelineType === "video"
+    && asRecord(metadata.launch_package).kind === "scheduled_youtube_launch_package_v1"
+    && asRecord(metadata.launch_package).status === "scheduled";
+
+  if (pipelineType === "video" && action === "video_launch_activate") {
+    const youtubeV0 = asRecord(metadata.youtube_v0);
+    const launchPackage = asRecord(metadata.launch_package);
+    const launchGeneration = readString(launchPackage.launch_generation);
+    const activationWorkItemId = readString(launchPackage.activation_work_item_id);
+    if (readString(payload.trigger) !== "youtube_launch_package_v1"
+      || relationType !== "video_launch_activate"
+      || readString(payload.source_video_pipeline_item_id) !== pipelineItemId
+      || readString(payload.pipeline_item_id) !== pipelineItemId
+      || readString(existing.source_id) !== pipelineItemId
+      || readString(existing.source_type) !== "pipeline_item") {
+      throw new Error("YouTube live-check work-item identity is invalid");
+    }
+    if (!launchGeneration
+      || readString(payload.launch_generation) !== launchGeneration
+      || !activationWorkItemId
+      || activationWorkItemId !== existing.id) {
+      throw new Error("YouTube live-check launch generation or activation identity is stale");
+    }
+    const currentActivationSet = await client.query(
+      `select id from public.work_items
+        where payload ->> 'source_video_pipeline_item_id' = $1
+          and payload ->> 'relation_type' = 'video_launch_activate'
+          and (status not in ('done','failed','canceled','cancelled') or id = $2)
+        order by id`,
+      [pipelineItemId, existing.id],
+    );
+    if (currentActivationSet.rows.length !== 1 || currentActivationSet.rows[0].id !== existing.id) {
+      throw new Error("YouTube live-check requires exactly one current activation identity");
+    }
+    const mappedActivation = await client.query(
+      `select 1 from public.pipeline_work_map
+        where pipeline_item_id = $1 and work_item_id = $2 and relation_type = 'followup'
+        limit 1`,
+      [pipelineItemId, existing.id],
+    );
+    if (!mappedActivation.rows[0]) throw new Error("YouTube live-check activation mapping is missing");
+    if (pipelineItem.status !== "scheduled"
+      || launchPackage.kind !== "scheduled_youtube_launch_package_v1"
+      || launchPackage.status !== "scheduled") {
+      throw new Error("YouTube live-check requires an active scheduled parent and launch package");
+    }
+
+    const expectedVideoId = readString(launchPackage.video_id) || readString(youtubeV0.video_id);
+    if (!expectedVideoId || !/^[a-zA-Z0-9_-]{11}$/.test(expectedVideoId)) {
+      throw new Error("YouTube live-check parent is missing its expected video ID");
+    }
+
+    const live = extractYouTubeLiveCheck(body);
+    if (!live.confirmsPublic || !live.publicUrl || !live.hasEvidence) {
+      throw new Error("YouTube live-check completion requires public/live status, a public URL and structured evidence");
+    }
+    const packagePublishAt = readString(launchPackage.publish_at);
+    const payloadPublishAt = readString(payload.publish_at);
+    if (!packagePublishAt
+      || !Number.isFinite(new Date(packagePublishAt).getTime())
+      || payloadPublishAt !== packagePublishAt
+      || live.launchGeneration !== launchGeneration) {
+      throw new Error("YouTube live-check launch generation or publish time is stale");
+    }
+    const publicVideoId = extractYouTubeVideoId(live.publicUrl);
+    const evidenceUrlVideoId = extractYouTubeVideoId(live.evidenceUrl);
+    if (publicVideoId !== expectedVideoId
+      || live.evidenceVideoId !== expectedVideoId
+      || evidenceUrlVideoId !== expectedVideoId) {
+      throw new Error("YouTube live-check URL/evidence does not match the expected YouTube video");
+    }
+    if (!new Set(["youtube_data_api", "youtube_watch_page"]).has(live.evidenceSource)) {
+      throw new Error("YouTube live-check evidence source is not supported");
+    }
+    const checkedAtMs = live.checkedAt ? new Date(live.checkedAt).getTime() : Number.NaN;
+    const publishAtMs = new Date(packagePublishAt).getTime();
+    const scheduledForValue = pipelineItem.scheduled_for;
+    const parentScheduledAtMs = scheduledForValue instanceof Date
+      ? scheduledForValue.getTime()
+      : new Date(String(scheduledForValue || "")).getTime();
+    if (!live.checkedAt
+      || !/(?:Z|[+-]\d{2}:\d{2})$/i.test(live.checkedAt)
+      || !Number.isFinite(checkedAtMs)) {
+      throw new Error("YouTube live-check requires a timezone-qualified checked_at timestamp");
+    }
+    if (!Number.isFinite(parentScheduledAtMs) || parentScheduledAtMs !== publishAtMs) {
+      throw new Error(`YouTube live-check parent schedule does not match the active launch package (${String(pipelineItem.scheduled_for || "missing")} != ${packagePublishAt})`);
+    }
+    const serverClock = await client.query<{ current_time: Date | string }>(
+      "select clock_timestamp() as current_time",
+    );
+    const serverNowMs = new Date(serverClock.rows[0]?.current_time || Number.NaN).getTime();
+    if (!Number.isFinite(serverNowMs) || serverNowMs < publishAtMs) {
+      throw new Error("YouTube live-check cannot activate before the scheduled publish time");
+    }
+    if (checkedAtMs > serverNowMs + (30 * 1000)) {
+      throw new Error("YouTube live-check checked_at cannot be in the future");
+    }
+    if (checkedAtMs < publishAtMs - (5 * 60 * 1000)
+      || checkedAtMs > publishAtMs + (6 * 60 * 60 * 1000)) {
+      throw new Error("YouTube live-check evidence is outside the current launch verification window");
+    }
+
+    const verifiedAt = new Date(checkedAtMs).toISOString();
+    await updatePipelineItem(client, pipelineItemId, "published", {
+      ...metadata,
+      youtube_v0: {
+        ...youtubeV0,
+        stage: "published",
+        youtube_url: live.publicUrl,
+        published_at: pipelineItem.published_at ? String(pipelineItem.published_at) : verifiedAt,
+        launch_package_status: "activated",
+      },
+      launch_package: {
+        ...launchPackage,
+        status: "activated",
+        public_verified: true,
+        public_url: live.publicUrl,
+        activated_at: verifiedAt,
+        activation_work_item_id: existing.id,
+        live_check: live.liveCheck,
+      },
+      runtime_feedback: {
+        ...asRecord(metadata.runtime_feedback),
+        last_status: "youtube_launch_activated",
+        last_work_item_id: updated.id,
+        updated_at: now,
+      },
+    }, {
+      publishedAt: pipelineItem.published_at ? String(pipelineItem.published_at) : verifiedAt,
+      currentUrl: live.publicUrl,
+    });
+    return { applied: true, effect: "youtube_launch_activated", verified: true };
+  }
 
   if (pipelineType === "video" && action.startsWith("youtube_gate_")) {
+    if (activeScheduledYouTubeLaunch) {
+      throw new Error("Active scheduled YouTube launch packages reject legacy gate transitions");
+    }
     const candidateGate = relationType || action.replace("youtube_gate_", "");
     if (isYouTubeGateKey(candidateGate)) {
       const youtubeMetadata = getYouTubeMetadata(metadata);

@@ -47,9 +47,13 @@ function transpileModule(sourcePath, requires = {}, globals = {}) {
 }
 
 const youtubePipeline = transpileModule(resolve(repoRoot, "src/lib/youtube-pipeline.ts"));
+const youtubeLaunchPackage = transpileModule(resolve(repoRoot, "src/lib/youtube-launch-package.ts"));
 const completion = transpileModule(resolve(repoRoot, "src/lib/work-items/completion-orchestration.ts"), {
   "@/lib/youtube-pipeline": youtubePipeline,
-  "@/lib/youtube-launch-package": { validateCommunityLaunchDraftOutput: () => ({ ok: true, errors: [] }) },
+  "@/lib/youtube-launch-package": {
+    ...youtubeLaunchPackage,
+    validateCommunityLaunchDraftOutput: () => ({ ok: true, errors: [] }),
+  },
   "@/lib/work-items/git-artifact": {
     verifyRepositoryCommit: async (repositoryPath, sha) => ({ repositoryPath, repositoryRoot: repositoryPath, sha }),
   },

@@ -15,13 +15,13 @@
     "review-repository:register": "node scripts/register-review-repository.mjs",
     "refresh:youtube-metadata": "node scripts/refresh-youtube-owned-video-metadata.mjs",
     "import:youtube-playlists": "node scripts/import-youtube-playlists.mjs",
-    "test": "node scripts/run-tests-with-disposable-postgres.mjs scripts/lib/__tests__/*.test.mjs",
-    "test:loops": "node scripts/run-tests-with-disposable-postgres.mjs scripts/lib/__tests__/work-item-loop-contract.test.mjs scripts/lib/__tests__/loop-cycle-hardening.test.mjs scripts/lib/__tests__/loop-completion-postgres.test.mjs scripts/lib/__tests__/work-item-completion-orchestration.test.mjs scripts/lib/__tests__/git-artifact.test.mjs scripts/lib/__tests__/repository-registration.test.mjs scripts/lib/__tests__/reviewer-isolation-runtime.test.mjs scripts/lib/__tests__/loops-total-cutover.test.mjs scripts/lib/__tests__/loops-cutover-postgres.test.mjs scripts/lib/__tests__/project-loops-v2-schema.test.mjs scripts/lib/__tests__/project-loops-v2-migration.test.mjs scripts/lib/__tests__/project-loops-v2-read-model.test.mjs scripts/lib/__tests__/project-loops-v2-runtime.test.mjs scripts/lib/__tests__/project-loops-v2-quality-cycles.test.mjs scripts/lib/__tests__/project-loops-v2-ui.test.mjs",
+    "test": "node scripts/run-tests-with-disposable-postgres.mjs --test-concurrency=1 scripts/lib/__tests__/*.test.mjs",
+    "test:loops": "node scripts/run-tests-with-disposable-postgres.mjs --test-concurrency=1 scripts/lib/__tests__/work-item-loop-contract.test.mjs scripts/lib/__tests__/loop-cycle-hardening.test.mjs scripts/lib/__tests__/loop-completion-postgres.test.mjs scripts/lib/__tests__/work-item-completion-orchestration.test.mjs scripts/lib/__tests__/git-artifact.test.mjs scripts/lib/__tests__/repository-registration.test.mjs scripts/lib/__tests__/reviewer-isolation-runtime.test.mjs scripts/lib/__tests__/loops-total-cutover.test.mjs scripts/lib/__tests__/loops-cutover-postgres.test.mjs scripts/lib/__tests__/project-loops-v2-schema.test.mjs scripts/lib/__tests__/project-loops-v2-migration.test.mjs scripts/lib/__tests__/project-loops-v2-read-model.test.mjs scripts/lib/__tests__/project-loops-v2-runtime.test.mjs scripts/lib/__tests__/project-loops-v2-quality-cycles.test.mjs scripts/lib/__tests__/project-loops-v2-ui.test.mjs",
     "rehearse:loops": "node scripts/rehearse-loops-cutover.mjs",
     "rehearse:loops:sql-editor": "node scripts/rehearse-loops-cutover.mjs --sql-editor",
     "rehearse:loops:recovery": "node scripts/rehearse-loops-cutover.mjs --sql-editor --inject-all-checkpoints",
     "guard:loops": "node scripts/guard-no-project-domain.mjs",
-    "test:youtube-statistics": "node scripts/run-tests-with-disposable-postgres.mjs scripts/lib/__tests__/*.test.mjs",
+    "test:youtube-statistics": "node scripts/run-tests-with-disposable-postgres.mjs --test-concurrency=1 scripts/lib/__tests__/*.test.mjs",
     "test:youtube-playlists": "node scripts/run-tests-with-disposable-postgres.mjs scripts/lib/__tests__/youtube-playlist-*.test.mjs"
   },
   "dependencies": {
@@ -30,7 +30,7 @@
     "@types/pg": "^8.20.0",
     "ipaddr.js": "^2.4.0",
     "lucide-react": "^1.0.1",
-    "next": "^16.2.4",
+    "next": "16.2.12",
     "pg": "^8.22.0",
     "react": "19.2.4",
     "react-dom": "19.2.4"
@@ -41,11 +41,13 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
-    "eslint-config-next": "16.2.1",
+    "eslint-config-next": "16.2.12",
     "tailwindcss": "^4",
     "typescript": "^5"
   },
   "overrides": {
-    "postcss": "8.5.12"
+    "postcss": "8.5.25",
+    "sharp": "0.35.3",
+    "ws": "8.21.1"
   }
 }

@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 export type JsonRecord = Record<string, unknown>;
 
 export type YouTubeLaunchPackageInput = {
+  pipelineItemId?: string | null;
   youtubeUrl?: string | null;
   videoId?: string | null;
   publishAt: string;
@@ -66,6 +67,7 @@ export type ScheduledYouTubeLaunchSpecContext = {
   youtubeUrl: string;
   videoId: string;
   publishAt: string;
+  launchGeneration?: string | null;
   playlistContextUrl?: string | null;
   targetCommunityPublishAt: string;
   targetEmailSendAt: string;
@@ -101,6 +103,9 @@ function toRecord(value: unknown): JsonRecord {
 }
 
 function normalizeIsoDate(value: string, fieldName: string) {
+  if (!/(?:Z|[+-]\d{2}:\d{2})$/i.test(value)) {
+    throw new Error(`A timezone-qualified ${fieldName} is required`);
+  }
   const date = new Date(value);
   if (!Number.isFinite(date.getTime())) throw new Error(`Invalid ${fieldName}`);
   return date.toISOString();
@@ -143,17 +148,27 @@ function firstStringFromRecords(records: JsonRecord[], paths: string[][]) {
 export function extractYouTubeVideoId(value: string | null | undefined) {
   const raw = trimToNull(value);
   if (!raw) return null;
-  if (/^[a-zA-Z0-9_-]{11}$/.test(raw)) return raw;
+  const exactVideoId = (candidate: string | null | undefined) => {
+    const normalized = trimToNull(candidate);
+    return normalized && /^[a-zA-Z0-9_-]{11}$/.test(normalized) ? normalized : null;
+  };
+  const rawVideoId = exactVideoId(raw);
+  if (rawVideoId) return rawVideoId;
 
   try {
     const url = new URL(raw);
-    const host = url.hostname.replace(/^www\./, "");
-    if (host === "youtu.be") return url.pathname.split("/").filter(Boolean)[0] || null;
-    if (host.endsWith("youtube.com")) {
-      const watchId = url.searchParams.get("v");
-      if (watchId) return watchId;
+    if (url.protocol !== "https:" || url.username || url.password || url.port || url.hash) return null;
+    const host = url.hostname.toLowerCase();
+    if (host === "youtu.be") {
       const parts = url.pathname.split("/").filter(Boolean);
-      if (["shorts", "embed", "live"].includes(parts[0]) && parts[1]) return parts[1];
+      return parts.length === 1 && url.pathname === `/${parts[0]}` ? exactVideoId(parts[0]) : null;
+    }
+    if (host === "youtube.com" || host.endsWith(".youtube.com")) {
+      const parts = url.pathname.split("/").filter(Boolean);
+      if (url.pathname === "/watch") return exactVideoId(url.searchParams.get("v"));
+      if (parts.length === 2
+        && ["shorts", "embed", "live"].includes(parts[0])
+        && url.pathname === `/${parts[0]}/${parts[1]}`) return exactVideoId(parts[1]);
     }
   } catch {
     return null;
@@ -314,19 +329,20 @@ function prepublicationDraftAuthorizationLines() {
   ];
 }
 
-function packageHeader(input: { title: string; youtubeUrl: string; videoId: string; publishAt: string; playlistContextUrl?: string | null }) {
+function packageHeader(input: { title: string; youtubeUrl: string; videoId: string; publishAt: string; launchGeneration?: string | null; playlistContextUrl?: string | null }) {
   return [
     `Video: ${input.title}`,
     `YouTube URL: ${input.youtubeUrl}`,
     `Video ID: ${input.videoId}`,
     `Scheduled publish_at: ${input.publishAt}`,
+    ...(input.launchGeneration ? [`Launch generation: ${input.launchGeneration}`] : []),
     ...(input.playlistContextUrl ? [`Playlist context URL: ${input.playlistContextUrl}`] : []),
     "Newsletter: out of scope for V1.",
     "Marketing video announcement handoff: in scope; Marketing owns copy, segmentation, and send workflow.",
   ];
 }
 
-function liveCheckInstruction(input: { title: string; youtubeUrl: string; videoId: string; publishAt: string; playlistContextUrl?: string | null }) {
+function liveCheckInstruction(input: { title: string; youtubeUrl: string; videoId: string; publishAt: string; launchGeneration?: string | null; playlistContextUrl?: string | null }) {
   return [
     ...packageHeader(input),
     "",
@@ -334,7 +350,8 @@ function liveCheckInstruction(input: { title: string; youtubeUrl: string; videoI
     "- At publish_at+2m, verify the scheduled video is now public/live.",
     "- If public/live, activate the launch package: note the live URL, confirm title/thumbnail state, and flag any blockers for Community/Dev.",
     "- Do not mark the pipeline item published unless you have verified the public URL.",
-    "- Complete with output.live_check = { status, checked_at, public_url, evidence }.",
+    "- Complete with output.live_check = { status, checked_at, public_url, launch_generation, evidence }.",
+    "- evidence must be { source: 'youtube_data_api' | 'youtube_watch_page', video_id, visibility: 'public', public_url } and must describe the same expected video.",
     "",
     ...livePublicGuardLines(),
   ].join("\n");
@@ -493,7 +510,20 @@ async function findExistingVideoItem(db: SupabaseClient, videoId: string, youtub
   return null;
 }
 
+async function findExactVideoItem(db: SupabaseClient, pipelineItemId: string) {
+  const { data, error } = await db
+    .from("pipeline_items")
+    .select("*")
+    .eq("id", pipelineItemId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) throw new Error("Video pipeline item not found");
+  if (data.pipeline_type !== "video") throw new Error("pipelineItemId must reference a video pipeline item");
+  return data as PipelineItemRow;
+}
+
 async function ensureVideoPipelineItem(db: SupabaseClient, input: Required<Pick<YouTubeLaunchPackageInput, "publishAt" | "requestedBy">> & {
+  pipelineItemId: string | null;
   title: string;
   youtubeUrl: string;
   videoId: string;
@@ -506,11 +536,16 @@ async function ensureVideoPipelineItem(db: SupabaseClient, input: Required<Pick<
   refs: unknown;
 }) {
   const now = new Date().toISOString();
-  const existing = await findExistingVideoItem(db, input.videoId, input.youtubeUrl);
+  const existing = input.pipelineItemId
+    ? await findExactVideoItem(db, input.pipelineItemId)
+    : await findExistingVideoItem(db, input.videoId, input.youtubeUrl);
   const existingMetadata = toRecord(existing?.metadata);
   const existingLaunchPackage = toRecord(existingMetadata.launch_package);
   const existingYoutubeV0 = toRecord(existingMetadata.youtube_v0);
   const existingPublication = toRecord(existingMetadata.publication);
+  if (existing && (Boolean(existing.published_at) || !["recorded", "editing", "scheduled"].includes(existing.status))) {
+    throw new Error(`Cannot schedule video in ${existing.status || "unknown"} state`);
+  }
   const launchPackage = {
     ...existingLaunchPackage,
     kind: "scheduled_youtube_launch_package_v1",
@@ -538,6 +573,7 @@ async function ensureVideoPipelineItem(db: SupabaseClient, input: Required<Pick<
       youtube_url: input.youtubeUrl,
       playlist_context_url: input.playlistContextUrl,
       scheduled_publish_at: input.publishAt,
+      stage: "scheduled",
       launch_package_status: "scheduled",
     },
     publication: {
@@ -555,11 +591,11 @@ async function ensureVideoPipelineItem(db: SupabaseClient, input: Required<Pick<
       .from("pipeline_items")
       .update({
         title: input.title || existing.title,
-        status: existing.published_at || existing.status === "published" ? existing.status : existing.status || "editing",
+        status: "scheduled",
         owner_agent: existing.owner_agent || "youtube",
         requested_by: existing.requested_by || input.requestedBy,
         scheduled_for: input.publishAt,
-        current_url: input.youtubeUrl,
+        current_url: null,
         metadata,
         updated_at: now,
       })
@@ -575,14 +611,13 @@ async function ensureVideoPipelineItem(db: SupabaseClient, input: Required<Pick<
     .insert({
       pipeline_type: "video",
       title: input.title,
-      status: "editing",
+      status: "scheduled",
       priority: "high",
       owner_agent: "youtube",
       requested_by: input.requestedBy,
       source_type: "service",
       source_id: `youtube:${input.videoId}`,
       scheduled_for: input.publishAt,
-      current_url: input.youtubeUrl,
       content_format: "youtube_url",
       metadata,
       updated_at: now,
@@ -920,7 +955,17 @@ async function ensurePinnedCommentPipelineItem(db: SupabaseClient, input: {
   return { item: data as PipelineItemRow, created: true };
 }
 
-async function findExistingWorkItemByVideoRelation(db: SupabaseClient, videoId: string, relationType: string) {
+async function findExistingWorkItemByVideoRelation(db: SupabaseClient, videoPipelineItemId: string, videoId: string, relationType: string) {
+  const exact = await db
+    .from("work_items")
+    .select("id,status,payload")
+    .eq("payload->>source_video_pipeline_item_id", videoPipelineItemId)
+    .eq("payload->>relation_type", relationType)
+    .order("created_at", { ascending: false })
+    .limit(1);
+  if (exact.error) throw exact.error;
+  if (exact.data?.[0]) return exact.data[0] as WorkItemRow;
+
   const { data, error } = await db
     .from("work_items")
     .select("id,status,payload")
@@ -950,7 +995,7 @@ async function upsertLaunchWorkItem(db: SupabaseClient, spec: LaunchWorkSpec, co
   requestedBy: string;
 }) {
   const now = new Date().toISOString();
-  const existing = await findExistingWorkItemByVideoRelation(db, common.videoId, spec.relationType);
+  const existing = await findExistingWorkItemByVideoRelation(db, common.videoPipelineItemId, common.videoId, spec.relationType);
   const payload = {
     ...toRecord(existing?.payload),
     trigger: "youtube_launch_package_v1",
@@ -969,6 +1014,9 @@ async function upsertLaunchWorkItem(db: SupabaseClient, spec: LaunchWorkSpec, co
   };
 
   if (existing?.id) {
+    if (existing.status === "in_progress") {
+      throw new Error("Cannot reschedule a YouTube launch while launch work is in_progress");
+    }
     if (TERMINAL_WORK_STATUSES.has(existing.status)) {
       await mapWorkItem(db, spec.mapPipelineItemId, existing.id, spec.mapRelationType);
       return { workItem: existing, created: false, updated: false, skipped: true };
@@ -979,7 +1027,7 @@ async function upsertLaunchWorkItem(db: SupabaseClient, spec: LaunchWorkSpec, co
       .update({
         title: spec.title,
         instruction: spec.instruction,
-        status: existing.status === "in_progress" ? "in_progress" : "ready",
+        status: "ready",
         scheduled_for: spec.scheduledFor,
         priority: spec.priority || "high",
         owner_agent: spec.ownerAgent,
@@ -1034,6 +1082,7 @@ export function buildScheduledYouTubeLaunchWorkSpecs(context: ScheduledYouTubeLa
     youtubeUrl: context.youtubeUrl,
     videoId: context.videoId,
     publishAt: context.publishAt,
+    launchGeneration: context.launchGeneration || null,
     playlistContextUrl: context.playlistContextUrl || null,
   };
   const preflightAt = maxIsoDate(addMinutes(context.publishAt, -30), preparedAt);
@@ -1199,15 +1248,22 @@ export function buildScheduledYouTubeLaunchWorkSpecs(context: ScheduledYouTubeLa
 
 export async function createScheduledYouTubeLaunchPackage(db: SupabaseClient, input: YouTubeLaunchPackageInput) {
   const publishAt = normalizeIsoDate(input.publishAt, "publish_at");
+  const pipelineItemId = trimToNull(input.pipelineItemId);
   const videoId = trimToNull(input.videoId) || extractYouTubeVideoId(input.youtubeUrl);
-  if (!videoId) throw new Error("A valid YouTube video_id or URL is required");
-  const youtubeUrl = trimToNull(input.youtubeUrl) || youtubeWatchUrl(videoId);
+  if (!videoId || !/^[a-zA-Z0-9_-]{11}$/.test(videoId)) throw new Error("A valid YouTube video_id or URL is required");
+  const suppliedYoutubeUrl = trimToNull(input.youtubeUrl);
+  if (suppliedYoutubeUrl && extractYouTubeVideoId(suppliedYoutubeUrl) !== videoId) {
+    throw new Error("YouTube URL must use HTTPS on youtube.com, a youtube.com subdomain, or youtu.be and match video_id");
+  }
+  const youtubeUrl = suppliedYoutubeUrl || youtubeWatchUrl(videoId);
   const title = trimToNull(input.title) || `Scheduled YouTube video ${videoId}`;
   const requestedBy = trimToNull(input.requestedBy) || "mission-control";
   const preparedAt = input.preparedAt ? normalizeIsoDate(input.preparedAt, "prepared_at") : new Date().toISOString();
   const targetCommunityPublishAt = addMinutes(publishAt, 30);
   const refs = toRecord(input.refs);
-  const existingVideoContext = await findExistingVideoItem(db, videoId, youtubeUrl);
+  const existingVideoContext = pipelineItemId
+    ? await findExactVideoItem(db, pipelineItemId)
+    : await findExistingVideoItem(db, videoId, youtubeUrl);
   const existingVideoMetadata = toRecord(existingVideoContext?.metadata);
   const playlistContextUrl =
     resolveYouTubePlaylistContextUrl(videoId, input.playlistContextUrl, { allowPlaylistOnly: true }) ||
@@ -1240,6 +1296,7 @@ export async function createScheduledYouTubeLaunchPackage(db: SupabaseClient, in
   const cta = trimToNull(input.cta) || firstStringFromRecords([refs], [["cta"], ["community", "cta"]]);
 
   const video = await ensureVideoPipelineItem(db, {
+    pipelineItemId,
     title,
     youtubeUrl,
     videoId,

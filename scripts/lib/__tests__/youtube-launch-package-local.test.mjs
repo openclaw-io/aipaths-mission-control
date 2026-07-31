@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { test } from "node:test";
@@ -61,6 +62,7 @@ function loadTypeScriptModule(relativePath) {
           },
         };
       }
+      if (specifier === "node:crypto") return { randomUUID };
       if (specifier === "@supabase/supabase-js" || specifier === "pg") return {};
       throw new Error(`Unexpected require: ${specifier}`);
     },
@@ -80,6 +82,7 @@ function loadTypeScriptModule(relativePath) {
 }
 
 const { createScheduledYouTubeLaunchPackageLocal } = loadTypeScriptModule("src/lib/youtube-launch-package-local.ts");
+const { extractYouTubeVideoId } = loadTypeScriptModule("src/lib/youtube-launch-package.ts");
 
 async function withClient(run) {
   const client = new Client({ connectionString: process.env.MISSION_CONTROL_TEST_DATABASE_URL || process.env.MISSION_CONTROL_DATABASE_URL });
@@ -108,6 +111,27 @@ async function readLaunchRows(videoId) {
       [videoId],
     );
     return { work: work.rows.map(normalizeValue), pipeline: pipeline.rows.map(normalizeValue) };
+  });
+}
+
+async function insertVideoPipelineItem(overrides = {}) {
+  return withClient(async (client) => {
+    const values = {
+      title: "Exact board card",
+      status: "editing",
+      published_at: null,
+      current_url: null,
+      metadata: { youtube_v0: { stage: "editing" } },
+      ...overrides,
+    };
+    const result = await client.query(
+      `insert into public.pipeline_items
+         (pipeline_type, title, status, published_at, current_url, metadata)
+       values ('video', $1, $2, $3, $4, $5::jsonb)
+       returning *`,
+      [values.title, values.status, values.published_at, values.current_url, JSON.stringify(values.metadata)],
+    );
+    return normalizeValue(result.rows[0]);
   });
 }
 
@@ -228,11 +252,286 @@ test("local scheduled launch package reruns update open schedules without duplic
   });
 
   rows = await readLaunchRows(videoId);
-  byRelation = workByRelation(rows.work);
-  assert.equal(rows.work.length, 9);
-  assert.equal(byRelation.get("website_publish_video").id, websiteWorkId);
-  assert.equal(byRelation.get("website_publish_video").status, "done");
-  assert.equal(byRelation.get("website_publish_video").scheduled_for, "2026-07-08T15:15:00.000Z");
+  const currentGeneration = rows.pipeline.find((row) => row.pipeline_type === "video").metadata.launch_package.launch_generation;
+  assert.match(currentGeneration, new RegExp(`^youtube-launch-v1:${videoId}:2026-07-09T16:00:00\\.000Z:`));
+  const currentWork = rows.work.filter((row) => row.payload.launch_generation === currentGeneration);
+  byRelation = workByRelation(currentWork);
+  assert.equal(rows.work.length, 10);
+  assert.equal(currentWork.length, 9);
+  const preservedTerminal = rows.work.find((row) => row.id === websiteWorkId);
+  assert.equal(preservedTerminal.status, "done");
+  assert.equal(preservedTerminal.scheduled_for, "2026-07-08T15:15:00.000Z");
+  assert.notEqual(byRelation.get("website_publish_video").id, websiteWorkId);
+  assert.equal(byRelation.get("website_publish_video").status, "ready");
+  assert.equal(byRelation.get("website_publish_video").scheduled_for, "2026-07-09T16:15:00.000Z");
   assert.equal(byRelation.get("video_launch_activate").scheduled_for, "2026-07-09T16:02:00.000Z");
   assert.equal(byRelation.get("youtube_launch_preflight").scheduled_for, "2026-07-09T15:30:00.000Z");
+});
+
+test("same-date reconciliation adopts legacy terminal work without duplicating it", async () => {
+  const videoId = "LegacyGen01";
+  const publishAt = "2026-08-04T13:00:00.000Z";
+  const first = await createScheduledYouTubeLaunchPackageLocal({
+    videoId,
+    title: "Legacy generation reconciliation",
+    publishAt,
+    playlistId: "PLabc123",
+    requestedBy: "test:dev",
+  });
+  const terminalId = first.workItems.find((entry) => entry.relationType === "launch_community_draft").workItem.id;
+  await withClient(async (client) => {
+    await client.query("update public.work_items set status='done', payload=payload-'launch_generation' where id=$1", [terminalId]);
+    await client.query(
+      "update public.pipeline_items set metadata=jsonb_set(metadata,'{launch_package}',(metadata->'launch_package')-'launch_generation'-'activation_work_item_id') where id=$1",
+      [first.videoItem.id],
+    );
+    await client.query("update public.work_items set payload=payload-'launch_generation' where payload->>'video_id'=$1", [videoId]);
+  });
+
+  const reconciled = await createScheduledYouTubeLaunchPackageLocal({
+    pipelineItemId: first.videoItem.id,
+    videoId,
+    title: "Legacy generation reconciliation",
+    publishAt,
+    playlistId: "PLabc123",
+    requestedBy: "test:dev",
+  });
+  const rows = await readLaunchRows(videoId);
+  assert.equal(rows.work.length, 9);
+  assert.equal(rows.work.find((row) => row.id === terminalId).status, "done");
+  assert.match(reconciled.videoItem.metadata.launch_package.launch_generation, new RegExp(`^youtube-launch-v1:${videoId}:${publishAt.replaceAll(".", "\\.")}:`));
+  assert.ok(reconciled.videoItem.metadata.launch_package.activation_work_item_id);
+});
+
+test("exact pipelineItemId reuses the selected video card, schedules it, and does not expose a private URL", async () => {
+  const videoId = "ExactCard01";
+  const exact = await insertVideoPipelineItem();
+  const decoy = await insertVideoPipelineItem({
+    title: "Heuristic decoy",
+    metadata: { launch_package: { video_id: videoId }, youtube_v0: { stage: "editing" } },
+  });
+
+  const result = await createScheduledYouTubeLaunchPackageLocal({
+    pipelineItemId: exact.id,
+    videoId,
+    youtubeUrl: `https://www.youtube.com/watch?v=${videoId}`,
+    title: exact.title,
+    publishAt: "2026-08-01T12:00:00.000Z",
+    preparedAt: "2026-07-31T12:00:00.000Z",
+    playlistId: "PLabc123",
+    requestedBy: "test:board",
+  });
+
+  assert.equal(result.videoItem.id, exact.id);
+  assert.equal(result.videoItemCreated, false);
+  assert.equal(result.videoItem.status, "scheduled");
+  assert.equal(result.videoItem.scheduled_for, "2026-08-01T12:00:00.000Z");
+  assert.equal(result.videoItem.published_at, null);
+  assert.equal(result.videoItem.current_url, null);
+  assert.equal(result.videoItem.metadata.youtube_v0.stage, "scheduled");
+  assert.equal(result.videoItem.metadata.launch_package.status, "scheduled");
+
+  const rows = await withClient((client) => client.query(
+    "select id, status from public.pipeline_items where pipeline_type='video' and (id=$1 or id=$2)",
+    [exact.id, decoy.id],
+  ));
+  assert.equal(rows.rowCount, 2);
+  assert.equal(rows.rows.find((row) => row.id === decoy.id).status, "editing");
+});
+
+test("a video ID cannot be scheduled onto a second active parent card", async () => {
+  const videoId = "OneParent01";
+  const first = await insertVideoPipelineItem({ title: "First parent" });
+  const second = await insertVideoPipelineItem({ title: "Second parent" });
+  await createScheduledYouTubeLaunchPackageLocal({
+    pipelineItemId: first.id,
+    videoId,
+    title: first.title,
+    publishAt: "2026-08-04T12:00:00.000Z",
+    playlistId: "PLabc123",
+    requestedBy: "test:dev",
+  });
+  await withClient((client) => client.query("update public.pipeline_items set status='editing' where id=$1", [first.id]));
+  await assert.rejects(
+    () => createScheduledYouTubeLaunchPackageLocal({
+      pipelineItemId: second.id,
+      videoId,
+      title: second.title,
+      publishAt: "2026-08-05T12:00:00.000Z",
+      playlistId: "PLabc123",
+      requestedBy: "test:dev",
+    }),
+    /already has an active scheduled parent/i,
+  );
+  const rows = await withClient((client) => client.query(
+    "select id,status from public.pipeline_items where id=any($1::uuid[]) order by id",
+    [[first.id, second.id]],
+  ));
+  assert.equal(rows.rows.find((row) => row.id === first.id).status, "editing");
+  assert.equal(rows.rows.find((row) => row.id === second.id).status, "editing");
+});
+
+test("local scheduled launch package rejects timezone-less schedule timestamps", async () => {
+  await assert.rejects(
+    () => createScheduledYouTubeLaunchPackageLocal({
+      videoId: "NoTimezone1",
+      title: "Invalid local time",
+      publishAt: "2026-08-04T12:00:00",
+      requestedBy: "test:dev",
+    }),
+    /timezone-qualified publish_at/i,
+  );
+});
+
+test("YouTube URL parsing is HTTPS-only and accepts only exact YouTube host boundaries", async () => {
+  const videoId = "StrictHost1";
+  for (const url of [
+    `https://youtube.com/watch?v=${videoId}`,
+    `https://www.youtube.com/watch?v=${videoId}`,
+    `https://music.youtube.com/watch?v=${videoId}`,
+    `https://youtu.be/${videoId}`,
+    `https://youtube.com/shorts/${videoId}`,
+    `https://youtube.com/embed/${videoId}`,
+    `https://youtube.com/live/${videoId}`,
+  ]) assert.equal(extractYouTubeVideoId(url), videoId);
+
+  for (const url of [
+    `http://youtube.com/watch?v=${videoId}`,
+    `https://notyoutube.com/watch?v=${videoId}`,
+    `https://evil-youtube.com/watch?v=${videoId}`,
+    `https://youtube.com.evil.test/watch?v=${videoId}`,
+    `https://sub.youtu.be/${videoId}`,
+    `https://youtube.com/redirect?v=${videoId}`,
+    `https://youtube.com/not-a-video?v=${videoId}`,
+    `https://user@youtube.com/watch?v=${videoId}`,
+    `https://youtube.com:444/watch?v=${videoId}`,
+    `https://youtube.com/watch?v=${videoId}#fragment`,
+    `https://youtu.be/${videoId}/extra`,
+  ]) {
+    assert.equal(extractYouTubeVideoId(url), null);
+    await assert.rejects(
+      () => createScheduledYouTubeLaunchPackageLocal({
+        videoId,
+        youtubeUrl: url,
+        publishAt: "2026-08-04T12:00:00.000Z",
+        requestedBy: "test:host",
+      }),
+      /YouTube URL must use HTTPS/i,
+    );
+  }
+});
+
+test("generation recovery is idempotent but A to B to A never reuses terminal activation evidence", async () => {
+  const videoId = "GenCycle001";
+  const scheduleA = "2026-08-10T12:00:00.000Z";
+  const scheduleB = "2026-08-11T12:00:00.000Z";
+  const first = await createScheduledYouTubeLaunchPackageLocal({
+    videoId, publishAt: scheduleA, playlistId: "PLabc123", requestedBy: "test:generation",
+  });
+  const firstGeneration = first.videoItem.metadata.launch_package.launch_generation;
+  const firstActivationId = first.videoItem.metadata.launch_package.activation_work_item_id;
+
+  const replay = await createScheduledYouTubeLaunchPackageLocal({
+    videoId, publishAt: scheduleA, playlistId: "PLabc123", requestedBy: "test:generation",
+  });
+  assert.equal(replay.videoItem.metadata.launch_package.launch_generation, firstGeneration);
+  assert.equal(replay.videoItem.metadata.launch_package.activation_work_item_id, firstActivationId);
+
+  await withClient((client) => client.query("update public.work_items set status='done' where id=$1", [firstActivationId]));
+  const scheduleBResult = await createScheduledYouTubeLaunchPackageLocal({
+    videoId, publishAt: scheduleB, playlistId: "PLabc123", requestedBy: "test:generation",
+  });
+  const generationB = scheduleBResult.videoItem.metadata.launch_package.launch_generation;
+  const activationB = scheduleBResult.videoItem.metadata.launch_package.activation_work_item_id;
+  assert.notEqual(generationB, firstGeneration);
+  assert.notEqual(activationB, firstActivationId);
+
+  const backToA = await createScheduledYouTubeLaunchPackageLocal({
+    videoId, publishAt: scheduleA, playlistId: "PLabc123", requestedBy: "test:generation",
+  });
+  const generationA2 = backToA.videoItem.metadata.launch_package.launch_generation;
+  assert.notEqual(generationA2, firstGeneration);
+  assert.notEqual(generationA2, generationB);
+  assert.notEqual(backToA.videoItem.metadata.launch_package.activation_work_item_id, firstActivationId);
+
+  const rows = await readLaunchRows(videoId);
+  const currentActivations = rows.work.filter((row) => row.status !== "done"
+    && row.payload.relation_type === "video_launch_activate"
+    && row.payload.launch_generation === generationA2);
+  assert.equal(currentActivations.length, 1);
+  assert.equal(rows.work.find((row) => row.id === firstActivationId).status, "done");
+});
+
+test("reschedule rejects in_progress launch work before mutating the parent", async () => {
+  const videoId = "InProgress1";
+  const first = await createScheduledYouTubeLaunchPackageLocal({
+    videoId,
+    publishAt: "2026-08-12T12:00:00.000Z",
+    playlistId: "PLabc123",
+    requestedBy: "test:in-progress",
+  });
+  const workId = first.workItems.find((entry) => entry.relationType === "youtube_launch_preflight").workItem.id;
+  await withClient((client) => client.query("update public.work_items set status='in_progress' where id=$1", [workId]));
+
+  await assert.rejects(
+    () => createScheduledYouTubeLaunchPackageLocal({
+      pipelineItemId: first.videoItem.id,
+      videoId,
+      publishAt: "2026-08-13T12:00:00.000Z",
+      playlistId: "PLabc123",
+      requestedBy: "test:in-progress",
+    }),
+    /while launch work is in_progress/i,
+  );
+  const preserved = await withClient((client) => client.query(
+    "select scheduled_for,metadata from pipeline_items where id=$1",
+    [first.videoItem.id],
+  ));
+  assert.equal(normalizeValue(preserved.rows[0].scheduled_for), "2026-08-12T12:00:00.000Z");
+  assert.equal(preserved.rows[0].metadata.launch_package.launch_generation, first.videoItem.metadata.launch_package.launch_generation);
+});
+
+test("reschedule lock-order contract is work rows before pipeline row", () => {
+  const source = readFileSync(resolve(repoRoot, "src/lib/youtube-launch-package-local.ts"), "utf8");
+  const lockCall = source.indexOf("lockLaunchWorkBeforePipeline(client");
+  const pipelineLock = source.indexOf("findExactVideoItem(client, resolvedPipelineItemId)", lockCall);
+  assert.ok(lockCall >= 0 && pipelineLock > lockCall);
+  assert.match(source, /order by id\s+for update/);
+  assert.match(source, /global work ->[\s\S]*pipeline row-lock order/);
+});
+
+test("scheduling an exact published parent fails closed without creating launch work", async () => {
+  const videoId = "ExactPub001";
+  const publicUrl = `https://www.youtube.com/watch?v=${videoId}`;
+  const exact = await insertVideoPipelineItem({
+    status: "published",
+    published_at: "2026-07-01T10:00:00.000Z",
+    current_url: publicUrl,
+    metadata: { youtube_v0: { stage: "published" } },
+  });
+  const input = {
+    pipelineItemId: exact.id,
+    videoId,
+    youtubeUrl: publicUrl,
+    publishAt: "2026-08-02T12:00:00.000Z",
+    preparedAt: "2026-07-31T12:00:00.000Z",
+    playlistId: "PLabc123",
+    requestedBy: "test:board",
+  };
+
+  await assert.rejects(
+    () => createScheduledYouTubeLaunchPackageLocal(input),
+    /cannot schedule.*published/i,
+  );
+
+  const rows = await readLaunchRows(videoId);
+  assert.equal(rows.work.length, 0);
+  const preserved = await withClient((client) => client.query(
+    "select status, published_at, current_url from public.pipeline_items where id = $1",
+    [exact.id],
+  ));
+  assert.equal(preserved.rowCount, 1);
+  assert.equal(preserved.rows[0].status, "published");
+  assert.equal(normalizeValue(preserved.rows[0].published_at), "2026-07-01T10:00:00.000Z");
+  assert.equal(preserved.rows[0].current_url, publicUrl);
 });

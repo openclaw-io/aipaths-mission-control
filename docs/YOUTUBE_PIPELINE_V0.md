@@ -25,9 +25,11 @@ Main stages:
 4. `bullets` — Chapter bullets / recording structure
 5. `ready_to_record` — Ready to record
 6. `recorded` / `editing` — Editing
-7. `published` — Published
-8. `learning` — Post-publication learning
+7. `scheduled` — Launch package prepared; waiting for the scheduled public release
+8. `published` — Public URL verified
 9. `parked` / `rejected` / `archived` — inactive
+
+`learning` is no longer a workflow stage. Postmortems, manual review, and performance learning remain attached to Published videos through metadata and `/statistics`.
 
 ## UI layout
 
@@ -38,8 +40,8 @@ The `/youtube` board has three working views:
    - Bottom: Ideas full-width, because Ideas can have much higher volume.
 2. **Bullets → Ready**
    - Production preparation view.
-3. **Editing → Published → Learning**
-   - Output and post-publication view.
+3. **Editing → Scheduled → Published**
+   - Scheduling, public verification, release, and post-publication measurement.
 
 Parked/archived items appear in a collapsed section below the main board.
 
@@ -64,8 +66,10 @@ This section changes by stage:
 - `bullets`: intro and chapter/recording bullets
 - `ready_to_record`: final title, hook/intro, locked bullets, CTA
 - `recorded` / `editing`: edit status, assets, production notes
+- `scheduled`: launch time, URL/video ID, preflight, drafts, approvals, and pending live-check
 - `published`: YouTube URL, video ID, published date, publication notes
-- `learning`: learning notes and publication context
+
+Learning notes remain visible in the metadata and Statistics surfaces for Published videos.
 
 Collapsed by default:
 
@@ -97,6 +101,20 @@ Behavior:
 - appends lightweight `metadata.youtube_v0.history[]`
 - preserves older transition actions for compatibility
 
+`scheduled` is intentionally not accepted by the generic stage transition. Scheduling is an orchestration command because it must reconcile the exact card and its launch package:
+
+`POST /api/youtube/launch-package`
+
+```json
+{
+  "pipeline_item_id": "exact video pipeline UUID",
+  "youtube_url": "https://youtube.com/watch?v=...",
+  "publish_at": "2026-08-04T13:00:00Z"
+}
+```
+
+The command moves a nonpublished video to `scheduled`, creates or reconciles the nine launch work items, and keeps `current_url`/`published_at` empty until the live-check proves the video public. Completion of `video_launch_activate` is the canonical `scheduled → published` transition. Manual Published is blocked for scheduled launch packages to prevent duplicate email/snapshot fan-out.
+
 Stage transitions also create deduped YouTube Director work items for the main automation handoffs:
 
 - moving to `title_thumbnail` creates `youtube_light_research`
@@ -111,7 +129,7 @@ Stage transitions also create deduped YouTube Director work items for the main a
   - chronological chapters and recording bullets
   - not a full script
 
-When transitioning to `published`, the route can create scheduled follow-up work items for:
+For legacy videos without a launch package, transitioning to `published` can create scheduled follow-up work items for:
 
 - `youtube_snapshot_24h`
 - `youtube_snapshot_7d`
@@ -132,7 +150,7 @@ On 2026-05-01, historical Notion Video Pipeline rows were imported into `pipelin
   - `idea`: 15
   - `draft`: 1
   - `ready_to_record`: 1
-  - `learning`: 2
+  - `learning`: 2 (historical import value; migrated to `published` in the 2026-07-31 stage cutover)
   - `title_thumbnail`: 1
 
 Notion DB access found during import:

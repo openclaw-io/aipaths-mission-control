@@ -604,7 +604,7 @@ function isLongFormCandidate(item: VideoPipelineItem) {
   const learning = getLearningData(item);
   const format = learning.format?.toLowerCase();
   if (format === "short" || format === "shorts") return false;
-  return ["published", "learning"].includes(item.status) || Boolean(item.published_at || item.current_url || learning.updated_at);
+  return ["published", "learning"].includes(item.status) || Boolean(item.published_at || learning.updated_at);
 }
 
 function toSnapshots(value: unknown): Partial<Record<LearningWindow, MetricSnapshot>> {

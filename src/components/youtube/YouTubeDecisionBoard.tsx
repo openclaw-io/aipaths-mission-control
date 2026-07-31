@@ -16,11 +16,11 @@ type WorkflowColumnKey =
   | "bullets"
   | "ready_to_record"
   | "editing"
+  | "scheduled"
   | "published"
-  | "learning"
   | "parked_archived";
 
-type WorkflowViewKey = "prep" | "production" | "learning";
+type WorkflowViewKey = "prep" | "production" | "release";
 
 type StageOption = {
   status: string;
@@ -58,6 +58,7 @@ type StageForm = {
   note: string;
   youtubeUrl: string;
   videoId: string;
+  publishAt: string;
 };
 
 type BoardItemModel = {
@@ -73,15 +74,15 @@ const WORKFLOW_COLUMNS: WorkflowColumn[] = [
   { key: "bullets", title: "Bullets", hint: "Chapters and recording bullets.", statuses: ["bullets"] },
   { key: "ready_to_record", title: "Ready to Record", hint: "Approved package for recording.", statuses: ["ready_to_record"] },
   { key: "editing", title: "Editing", hint: "Recorded footage or active edit.", statuses: ["recorded", "editing"] },
-  { key: "published", title: "Published", hint: "Live videos and snapshots.", statuses: ["published"] },
-  { key: "learning", title: "Learning", hint: "Review notes and postmortems.", statuses: ["learning"] },
+  { key: "scheduled", title: "Scheduled", hint: "Launch package prepared; waiting for public verification.", statuses: ["scheduled"] },
+  { key: "published", title: "Published", hint: "Verified live videos and snapshots.", statuses: ["published"] },
   { key: "parked_archived", title: "Parked / Archived", hint: "Parked, rejected, or closed out.", statuses: ["parked", "rejected", "archived"] },
 ];
 
 const WORKFLOW_VIEWS: Array<{ key: WorkflowViewKey; title: string; hint: string; columns: WorkflowColumnKey[] }> = [
   { key: "prep", title: "1. Ideas → Titles → Research", hint: "Elegir y probar antes de producir.", columns: ["idea_bank", "title_thumbnail", "research"] },
   { key: "production", title: "2. Bullets → Ready", hint: "Convertir en pieza filmable.", columns: ["bullets", "ready_to_record"] },
-  { key: "learning", title: "3. Editing → Published → Learning", hint: "Salida, métricas y aprendizaje.", columns: ["editing", "published", "learning"] },
+  { key: "release", title: "3. Editing → Scheduled → Published", hint: "Programación, verificación pública y salida.", columns: ["editing", "scheduled", "published"] },
 ];
 
 const STAGE_OPTIONS: StageOption[] = [
@@ -94,8 +95,8 @@ const STAGE_OPTIONS: StageOption[] = [
   { status: "ready_to_record", label: "Ready to Record" },
   { status: "recorded", label: "Recorded" },
   { status: "editing", label: "Editing" },
+  { status: "scheduled", label: "Scheduled" },
   { status: "published", label: "Published" },
-  { status: "learning", label: "Learning" },
   { status: "parked", label: "Parked" },
   { status: "archived", label: "Archived" },
   { status: "rejected", label: "Rejected" },
@@ -113,8 +114,8 @@ const STATUS_STYLES: Record<string, string> = {
   ready_to_record: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300",
   recorded: "border-amber-500/30 bg-amber-500/10 text-amber-300",
   editing: "border-orange-500/30 bg-orange-500/10 text-orange-300",
+  scheduled: "border-blue-500/30 bg-blue-500/10 text-blue-300",
   published: "border-green-500/30 bg-green-500/10 text-green-300",
-  learning: "border-lime-500/30 bg-lime-500/10 text-lime-300",
   parked: "border-gray-500/30 bg-gray-500/10 text-gray-300",
   rejected: "border-red-500/30 bg-red-500/10 text-red-300",
   archived: "border-gray-600/30 bg-gray-600/10 text-gray-400",
@@ -127,7 +128,7 @@ export function YouTubeDecisionBoard({ initialItems, initialWorkItems }: { initi
   const [items, setItems] = useRealtimeYouTube(initialItems);
   const realtimeWorkItems = useRealtimeWorkItems(initialWorkItems);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [stageForm, setStageForm] = useState<StageForm>({ status: "draft", note: "", youtubeUrl: "", videoId: "" });
+  const [stageForm, setStageForm] = useState<StageForm>({ status: "draft", note: "", youtubeUrl: "", videoId: "", publishAt: "" });
   const [activeView, setActiveView] = useState<WorkflowViewKey>("prep");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -167,7 +168,7 @@ export function YouTubeDecisionBoard({ initialItems, initialWorkItems }: { initi
   const selectedModel = useMemo(() => itemModels.find((model) => model.item.id === selectedId) || null, [itemModels, selectedId]);
   const activeViewConfig = WORKFLOW_VIEWS.find((view) => view.key === activeView) || WORKFLOW_VIEWS[0];
   const activeCount = items.filter((item) => !["parked", "rejected", "archived"].includes(item.status)).length;
-  const publishedCount = items.filter((item) => ["published", "learning"].includes(item.status)).length;
+  const publishedCount = items.filter((item) => item.status === "published").length;
   const openWorkCount = videoWorkItems.filter((workItem) => OPEN_WORK_STATUSES.has(workItem.status)).length;
 
   useEffect(() => {
@@ -177,6 +178,7 @@ export function YouTubeDecisionBoard({ initialItems, initialWorkItems }: { initi
       note: "",
       youtubeUrl: selectedModel.details.youtubeUrl || "",
       videoId: selectedModel.details.videoId || "",
+      publishAt: toDateTimeLocalValue(selectedModel.item.scheduled_for),
     });
     setError(null);
   }, [selectedModel]);
@@ -184,19 +186,33 @@ export function YouTubeDecisionBoard({ initialItems, initialWorkItems }: { initi
   async function submitStageChange() {
     if (!selectedModel) return;
 
+    if (stageForm.status === "scheduled" && ((!stageForm.youtubeUrl.trim() && !stageForm.videoId.trim()) || !stageForm.publishAt)) {
+      setError("Scheduled requires a YouTube URL or video ID and a publish date.");
+      return;
+    }
+
     setBusy(true);
     setError(null);
     try {
-      const response = await fetch(`/api/youtube/${selectedModel.item.id}/transition`, {
+      const scheduling = stageForm.status === "scheduled";
+      const response = await fetch(scheduling ? "/api/youtube/launch-package" : `/api/youtube/${selectedModel.item.id}/transition`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "set_stage",
-          stage: stageForm.status,
-          note: stageForm.note,
-          youtube_url: stageForm.youtubeUrl,
-          video_id: stageForm.videoId,
-        }),
+        body: JSON.stringify(scheduling
+          ? {
+              pipeline_item_id: selectedModel.item.id,
+              title: selectedModel.item.title,
+              youtube_url: stageForm.youtubeUrl,
+              video_id: stageForm.videoId,
+              publish_at: new Date(stageForm.publishAt).toISOString(),
+            }
+          : {
+              action: "set_stage",
+              stage: stageForm.status,
+              note: stageForm.note,
+              youtube_url: stageForm.youtubeUrl,
+              video_id: stageForm.videoId,
+            }),
       });
 
       if (!response.ok) {
@@ -205,8 +221,8 @@ export function YouTubeDecisionBoard({ initialItems, initialWorkItems }: { initi
         return;
       }
 
-      const payload = (await response.json()) as { item?: VideoPipelineItem };
-      const updatedItem = payload.item;
+      const payload = (await response.json()) as { item?: VideoPipelineItem; video_item?: VideoPipelineItem };
+      const updatedItem = payload.video_item || payload.item;
       if (updatedItem) {
         setItems((current) => current.map((existing) => (existing.id === updatedItem.id ? updatedItem : existing)));
       }
@@ -417,7 +433,7 @@ function VideoCard({
             {details.shortDescription && <p className="line-clamp-3">{details.shortDescription}</p>}
             {details.sourceLabel && <InfoLine label="Source" value={details.sourceLabel} />}
             {details.selectedTitle && <InfoLine label="Selected" value={details.selectedTitle} />}
-            {["published", "learning"].includes(item.status) && details.youtubeUrl && <InfoLine label="YouTube" value={details.youtubeUrl} />}
+            {item.status === "published" && details.youtubeUrl && <InfoLine label="YouTube" value={details.youtubeUrl} />}
             {details.nextAction && <InfoLine label="Next" value={details.nextAction} />}
             {openWorkCount > 0 && <InfoLine label="Work" value={`${openWorkCount} open item${openWorkCount === 1 ? "" : "s"}`} />}
           </div>
@@ -448,7 +464,7 @@ function DetailDrawer({
   onFormChange: (patch: Partial<StageForm>) => void;
   onSubmit: () => void;
 }) {
-  const showPublishFields = form.status === "published";
+  const showPublishFields = form.status === "published" || form.status === "scheduled";
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-black/70 backdrop-blur-sm" onClick={onClose}>
@@ -530,6 +546,16 @@ function DetailDrawer({
                     className="w-full rounded-lg border border-gray-800 bg-[#0a0a0f] px-3 py-2 text-sm text-white outline-none transition placeholder:text-gray-600 focus:border-blue-500"
                   />
                 </Field>
+                {form.status === "scheduled" && (
+                  <Field label="Scheduled publish time">
+                    <input
+                      type="datetime-local"
+                      value={form.publishAt}
+                      onChange={(event) => onFormChange({ publishAt: event.target.value })}
+                      className="w-full rounded-lg border border-gray-800 bg-[#0a0a0f] px-3 py-2 text-sm text-white outline-none transition focus:border-blue-500"
+                    />
+                  </Field>
+                )}
               </div>
             )}
 
@@ -575,7 +601,7 @@ function DetailDrawer({
 function getColumnKey(item: VideoPipelineItem): WorkflowColumnKey {
   const matched = WORKFLOW_COLUMNS.find((column) => column.statuses.includes(item.status));
   if (matched) return matched.key;
-  if (item.published_at || item.current_url) return "published";
+  if (item.published_at) return "published";
   return "idea_bank";
 }
 
@@ -584,7 +610,7 @@ function getSelectableStageStatus(status: string) {
   if (status === "preparing_production") return "bullets";
   if (status === "changes_requested") return "research";
   if (status === "publishing") return "editing";
-  if (status === "live") return "published";
+  if (status === "live" || status === "learning") return "published";
   return "draft";
 }
 
@@ -933,16 +959,6 @@ function getCurrentStageSection(item: VideoPipelineItem, details: ItemDetails) {
     };
   }
 
-  if (item.status === "learning") {
-    return {
-      title: "Extraer aprendizajes",
-      hint: "Performance, comentarios, objeciones y qué hacemos distinto la próxima vez.",
-      blocks: [
-        { label: "Learning notes", value: details.learningSection, wide: true },
-        { label: "Publication", value: details.publicationSection, wide: true },
-      ],
-    };
-  }
 
   return {
     title: "Estado actual",
@@ -1154,6 +1170,14 @@ function formatStatus(status: string) {
 
 function formatKeyLabel(key: string) {
   return key.replaceAll("_", " ");
+}
+
+function toDateTimeLocalValue(value: string | null) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "";
+  const pad = (part: number) => String(part).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 function formatDate(value: string | null) {

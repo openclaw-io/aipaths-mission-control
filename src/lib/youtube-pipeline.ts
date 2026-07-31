@@ -224,8 +224,13 @@ export function getNextDecision(metadata: YouTubePipelineMetadata) {
 
 export function derivePipelineItemStatus(metadata: YouTubePipelineMetadata, options?: { currentStatus?: string | null; publishedAt?: string | null }) {
   if (options?.currentStatus === "parked") return "parked";
+  if (options?.currentStatus === "scheduled") return "scheduled";
 
   const nextDecision = getNextDecision(metadata);
+  if (options?.currentStatus === "published" || options?.currentStatus === "live") {
+    if (nextDecision.type === "completed") return "archived";
+    return options.currentStatus === "live" ? "live" : "published";
+  }
   if (nextDecision.type === "killed") return "rejected";
   if (nextDecision.type === "completed") return options?.publishedAt ? "archived" : "ready_to_record";
 

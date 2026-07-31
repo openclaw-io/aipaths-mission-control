@@ -1,4 +1,5 @@
 import type { PoolClient } from "pg";
+import { randomUUID } from "node:crypto";
 import { normalizeRow } from "@/lib/db/mission-control";
 import { withTransaction } from "@/lib/db/postgres";
 import {
@@ -58,6 +59,9 @@ function toRecord(value: unknown): JsonRecord {
 }
 
 function normalizeIsoDate(value: string, fieldName: string) {
+  if (!/(?:Z|[+-]\d{2}:\d{2})$/i.test(value)) {
+    throw new Error(`A timezone-qualified ${fieldName} is required`);
+  }
   const date = new Date(value);
   if (!Number.isFinite(date.getTime())) throw new Error(`Invalid ${fieldName}`);
   return date.toISOString();
@@ -121,7 +125,96 @@ async function findExistingVideoItem(client: PoolClient, videoId: string, youtub
   return null;
 }
 
+async function findExactVideoItem(client: PoolClient, pipelineItemId: string, forUpdate = true) {
+  const result = await client.query(
+    `select ${PIPELINE_ITEM_COLUMNS}
+       from public.pipeline_items
+      where id = $1
+      ${forUpdate ? "for update" : ""}`,
+    [pipelineItemId],
+  );
+  if (!result.rows[0]) throw new Error("Video pipeline item not found");
+  const item = pipelineItem(result.rows[0]);
+  if (item.pipeline_type !== "video") throw new Error("pipelineItemId must reference a video pipeline item");
+  return item;
+}
+
+type LockedLaunchWorkItem = WorkItemRow & { source_type?: string | null; source_id?: string | null };
+
+/**
+ * Lock-order contract: every YouTube reschedule locks all launch work rows in
+ * stable id order before locking its parent pipeline row. Agent completion
+ * already locks work -> pipeline, so reversing this order here would deadlock.
+ */
+async function lockLaunchWorkBeforePipeline(client: PoolClient, input: {
+  videoPipelineItemId: string | null;
+  videoId: string;
+}) {
+  const result = await client.query(
+    `select id, status, payload, source_type, source_id
+       from public.work_items
+      where (payload ->> 'trigger' = 'youtube_launch_package_v1'
+          or payload ->> 'schedule_kind' = 'youtube_launch_package')
+        and (
+          ($1::text is not null and payload ->> 'source_video_pipeline_item_id' = $1)
+          or (payload ->> 'video_id' = $2 and payload ->> 'source_video_pipeline_item_id' is null)
+        )
+      order by id
+      for update`,
+    [input.videoPipelineItemId, input.videoId],
+  );
+  const rows = result.rows.map((row) => workItem(row) as LockedLaunchWorkItem);
+  if (rows.some((row) => row.status === "in_progress")) {
+    throw new Error("Cannot reschedule a YouTube launch while launch work is in_progress");
+  }
+  return rows;
+}
+
+function currentGenerationCanBeReused(input: {
+  videoItem: PipelineItemRow | null;
+  launchWork: LockedLaunchWorkItem[];
+  videoId: string;
+  publishAt: string;
+}) {
+  if (!input.videoItem || input.videoItem.published_at || input.videoItem.status !== "scheduled") return null;
+  const launch = toRecord(toRecord(input.videoItem.metadata).launch_package);
+  const generation = trimToNull(launch.launch_generation);
+  const activationId = trimToNull(launch.activation_work_item_id);
+  if (launch.kind !== "scheduled_youtube_launch_package_v1"
+    || launch.status !== "scheduled"
+    || launch.video_id !== input.videoId
+    || launch.publish_at !== input.publishAt
+    || !generation
+    || !activationId) return null;
+
+  const openActivations = input.launchWork.filter((row) => {
+    const payload = toRecord(row.payload);
+    return !TERMINAL_WORK_STATUSES.has(row.status)
+      && payload.relation_type === "video_launch_activate"
+      && payload.source_video_pipeline_item_id === input.videoItem?.id;
+  });
+  if (openActivations.length !== 1 || openActivations[0].id !== activationId) return null;
+  const activation = openActivations[0];
+  const payload = toRecord(activation.payload);
+  if (payload.trigger !== "youtube_launch_package_v1"
+    || payload.action !== "video_launch_activate"
+    || payload.pipeline_type !== "video"
+    || payload.pipeline_item_id !== input.videoItem.id
+    || payload.source_video_pipeline_item_id !== input.videoItem.id
+    || payload.launch_generation !== generation
+    || payload.publish_at !== input.publishAt
+    || activation.source_type !== "pipeline_item"
+    || activation.source_id !== input.videoItem.id) return null;
+  return generation;
+}
+
+function newLaunchGeneration(videoId: string, publishAt: string) {
+  return `youtube-launch-v1:${videoId}:${publishAt}:${randomUUID()}`;
+}
+
 async function ensureVideoPipelineItem(client: PoolClient, input: {
+  pipelineItemId: string | null;
+  launchGeneration: string;
   publishAt: string;
   requestedBy: string;
   title: string;
@@ -136,15 +229,21 @@ async function ensureVideoPipelineItem(client: PoolClient, input: {
   refs: unknown;
 }) {
   const now = new Date().toISOString();
-  const existing = await findExistingVideoItem(client, input.videoId, input.youtubeUrl);
+  const existing = input.pipelineItemId
+    ? await findExactVideoItem(client, input.pipelineItemId)
+    : await findExistingVideoItem(client, input.videoId, input.youtubeUrl);
   const existingMetadata = toRecord(existing?.metadata);
   const existingLaunchPackage = toRecord(existingMetadata.launch_package);
   const existingYoutubeV0 = toRecord(existingMetadata.youtube_v0);
   const existingPublication = toRecord(existingMetadata.publication);
+  if (existing && (Boolean(existing.published_at) || !["recorded", "editing", "scheduled"].includes(existing.status))) {
+    throw new Error(`Cannot schedule video in ${existing.status || "unknown"} state`);
+  }
   const launchPackage = {
     ...existingLaunchPackage,
     kind: "scheduled_youtube_launch_package_v1",
     status: "scheduled",
+    launch_generation: input.launchGeneration,
     newsletter_scope: "excluded_v1",
     video_id: input.videoId,
     youtube_url: input.youtubeUrl,
@@ -168,6 +267,7 @@ async function ensureVideoPipelineItem(client: PoolClient, input: {
       youtube_url: input.youtubeUrl,
       playlist_context_url: input.playlistContextUrl,
       scheduled_publish_at: input.publishAt,
+      stage: "scheduled",
       launch_package_status: "scheduled",
     },
     publication: {
@@ -195,11 +295,11 @@ async function ensureVideoPipelineItem(client: PoolClient, input: {
         returning ${PIPELINE_ITEM_COLUMNS}`,
       [
         input.title || existing.title,
-        existing.published_at || existing.status === "published" ? existing.status : existing.status || "editing",
+        "scheduled",
         existing.owner_agent || "youtube",
         existing.requested_by || input.requestedBy,
         input.publishAt,
-        input.youtubeUrl,
+        null,
         JSON.stringify(metadata),
         now,
         existing.id,
@@ -211,10 +311,10 @@ async function ensureVideoPipelineItem(client: PoolClient, input: {
   const result = await client.query(
     `insert into public.pipeline_items (
        pipeline_type, title, status, priority, owner_agent, requested_by, source_type,
-       source_id, scheduled_for, current_url, content_format, metadata, updated_at
-     ) values ('video', $1, 'editing', 'high', 'youtube', $2, 'service', $3, $4, $5, 'youtube_url', $6::jsonb, $7)
+       source_id, scheduled_for, content_format, metadata, updated_at
+     ) values ('video', $1, 'scheduled', 'high', 'youtube', $2, 'service', $3, $4, 'youtube_url', $5::jsonb, $6)
      returning ${PIPELINE_ITEM_COLUMNS}`,
-    [input.title, input.requestedBy, `youtube:${input.videoId}`, input.publishAt, input.youtubeUrl, JSON.stringify(metadata), now],
+    [input.title, input.requestedBy, `youtube:${input.videoId}`, input.publishAt, JSON.stringify(metadata), now],
   );
   return { item: pipelineItem(result.rows[0]), created: true };
 }
@@ -522,18 +622,52 @@ async function ensurePinnedCommentPipelineItem(client: PoolClient, input: {
   return { item: pipelineItem(result.rows[0]), created: true };
 }
 
-async function findExistingWorkItemByVideoRelation(client: PoolClient, videoId: string, relationType: string) {
-  const result = await client.query(
+async function findExistingWorkItemByVideoRelation(client: PoolClient, input: {
+  videoPipelineItemId: string;
+  videoId: string;
+  relationType: string;
+  launchGeneration: string;
+  publishAt: string;
+  allowLegacyVideoFallback: boolean;
+}) {
+  const exact = await client.query(
+    `select ${WORK_ITEM_COLUMNS}
+       from public.work_items
+      where payload ->> 'source_video_pipeline_item_id' = $1
+        and payload ->> 'relation_type' = $2
+      order by created_at desc`,
+    [input.videoPipelineItemId, input.relationType],
+  );
+  const exactItems = exact.rows.map(workItem);
+  const exactOpen = exactItems.filter((item) => !TERMINAL_WORK_STATUSES.has(item.status));
+  if (exactOpen.length > 1) throw new Error(`Duplicate open YouTube launch work for ${input.relationType}`);
+  if (exactOpen[0]) return exactOpen[0];
+  const exactTerminal = exactItems.find((item) => {
+    const itemPayload = toRecord(item.payload);
+    return itemPayload.launch_generation === input.launchGeneration
+      || (!itemPayload.launch_generation && itemPayload.publish_at === input.publishAt);
+  });
+  if (exactTerminal) return exactTerminal;
+  if (!input.allowLegacyVideoFallback) return null;
+
+  const legacy = await client.query(
     `select ${WORK_ITEM_COLUMNS}
        from public.work_items
       where payload ->> 'video_id' = $1
         and payload ->> 'relation_type' = $2
-      order by created_at desc
-      limit 1
-      for update`,
-    [videoId, relationType],
+        and payload ->> 'source_video_pipeline_item_id' is null
+      order by created_at desc`,
+    [input.videoId, input.relationType],
   );
-  return result.rows[0] ? workItem(result.rows[0]) : null;
+  const legacyItems = legacy.rows.map(workItem);
+  const legacyOpen = legacyItems.filter((item) => !TERMINAL_WORK_STATUSES.has(item.status));
+  if (legacyOpen.length > 1) throw new Error(`Duplicate open legacy YouTube launch work for ${input.relationType}`);
+  if (legacyOpen[0]) return legacyOpen[0];
+  return legacyItems.find((item) => {
+    const itemPayload = toRecord(item.payload);
+    return itemPayload.launch_generation === input.launchGeneration
+      || (!itemPayload.launch_generation && itemPayload.publish_at === input.publishAt);
+  }) || null;
 }
 
 async function mapWorkItem(client: PoolClient, pipelineItemId: string, workItemId: string, relationType: string) {
@@ -550,10 +684,19 @@ async function upsertLaunchWorkItem(client: PoolClient, spec: ScheduledYouTubeLa
   videoPipelineItemId: string;
   youtubeUrl: string;
   publishAt: string;
+  launchGeneration: string;
   requestedBy: string;
+  allowLegacyVideoFallback: boolean;
 }) {
   const now = new Date().toISOString();
-  const existing = await findExistingWorkItemByVideoRelation(client, common.videoId, spec.relationType);
+  const existing = await findExistingWorkItemByVideoRelation(client, {
+    videoPipelineItemId: common.videoPipelineItemId,
+    videoId: common.videoId,
+    relationType: spec.relationType,
+    launchGeneration: common.launchGeneration,
+    publishAt: common.publishAt,
+    allowLegacyVideoFallback: common.allowLegacyVideoFallback,
+  });
   const payload = {
     ...toRecord(existing?.payload),
     trigger: "youtube_launch_package_v1",
@@ -567,11 +710,15 @@ async function upsertLaunchWorkItem(client: PoolClient, spec: ScheduledYouTubeLa
     video_id: common.videoId,
     youtube_url: common.youtubeUrl,
     publish_at: common.publishAt,
+    launch_generation: common.launchGeneration,
     newsletter_scope: "excluded_v1",
     ...(spec.payloadExtra || {}),
   };
 
   if (existing) {
+    if (existing.status === "in_progress") {
+      throw new Error("Cannot reschedule a YouTube launch while launch work is in_progress");
+    }
     if (TERMINAL_WORK_STATUSES.has(existing.status)) {
       await mapWorkItem(client, spec.mapPipelineItemId, existing.id, spec.mapRelationType);
       return { workItem: existing, created: false, updated: false, skipped: true };
@@ -588,7 +735,7 @@ async function upsertLaunchWorkItem(client: PoolClient, spec: ScheduledYouTubeLa
       [
         spec.title,
         spec.instruction,
-        existing.status === "in_progress" ? "in_progress" : "ready",
+        "ready",
         spec.scheduledFor,
         spec.priority || "high",
         spec.ownerAgent,
@@ -633,11 +780,16 @@ async function upsertLaunchWorkItem(client: PoolClient, spec: ScheduledYouTubeLa
  */
 export async function createScheduledYouTubeLaunchPackageLocal(input: YouTubeLaunchPackageInput) {
   const publishAt = normalizeIsoDate(input.publishAt, "publish_at");
+  const pipelineItemId = trimToNull(input.pipelineItemId);
   const videoId = trimToNull(input.videoId) || extractYouTubeVideoId(input.youtubeUrl);
   if (!videoId || !/^[a-zA-Z0-9_-]{11}$/.test(videoId)) {
     throw new Error("A valid YouTube video_id or URL is required");
   }
-  const youtubeUrl = trimToNull(input.youtubeUrl) || youtubeWatchUrl(videoId);
+  const suppliedYoutubeUrl = trimToNull(input.youtubeUrl);
+  if (suppliedYoutubeUrl && extractYouTubeVideoId(suppliedYoutubeUrl) !== videoId) {
+    throw new Error("YouTube URL must use HTTPS on youtube.com, a youtube.com subdomain, or youtu.be and match video_id");
+  }
+  const youtubeUrl = suppliedYoutubeUrl || youtubeWatchUrl(videoId);
   const title = trimToNull(input.title) || `Scheduled YouTube video ${videoId}`;
   const requestedBy = trimToNull(input.requestedBy) || "mission-control";
   const preparedAt = input.preparedAt ? normalizeIsoDate(input.preparedAt, "prepared_at") : new Date().toISOString();
@@ -645,9 +797,50 @@ export async function createScheduledYouTubeLaunchPackageLocal(input: YouTubeLau
   const refs = toRecord(input.refs);
 
   return withTransaction(async (client) => {
-    await client.query("select pg_advisory_xact_lock(hashtext($1))", [`youtube-launch-package:${videoId}`]);
+    const lockScopes = [`youtube-launch-package:video:${videoId}`];
+    if (pipelineItemId) lockScopes.push(`youtube-launch-package:parent:${pipelineItemId}`);
+    for (const lockScope of lockScopes.sort()) {
+      await client.query("select pg_advisory_xact_lock(hashtext($1))", [lockScope]);
+    }
 
-    const existingVideoContext = await findExistingVideoItem(client, videoId, youtubeUrl);
+    // Discover identity without a row lock, then follow the global work ->
+    // pipeline row-lock order shared with work-item completion.
+    const discoveredVideoContext = pipelineItemId
+      ? await findExactVideoItem(client, pipelineItemId, false)
+      : await findExistingVideoItem(client, videoId, youtubeUrl);
+    const resolvedPipelineItemId = discoveredVideoContext?.id || pipelineItemId;
+    const lockedLaunchWork = await lockLaunchWorkBeforePipeline(client, {
+      videoPipelineItemId: resolvedPipelineItemId,
+      videoId,
+    });
+    const existingVideoContext = resolvedPipelineItemId
+      ? await findExactVideoItem(client, resolvedPipelineItemId)
+      : null;
+    if (pipelineItemId) {
+      const conflict = await client.query(
+        `select id
+           from public.pipeline_items
+          where pipeline_type = 'video'
+            and id <> $1
+            and published_at is null
+            and metadata #>> '{launch_package,kind}' = 'scheduled_youtube_launch_package_v1'
+            and metadata #>> '{launch_package,status}' = 'scheduled'
+            and metadata #>> '{launch_package,video_id}' = $2
+          order by id
+          limit 1
+          for update`,
+        [pipelineItemId, videoId],
+      );
+      if (conflict.rows[0]) {
+        throw new Error("This YouTube video already has an active scheduled parent card");
+      }
+    }
+    const launchGeneration = currentGenerationCanBeReused({
+      videoItem: existingVideoContext,
+      launchWork: lockedLaunchWork,
+      videoId,
+      publishAt,
+    }) || newLaunchGeneration(videoId, publishAt);
     const existingVideoMetadata = toRecord(existingVideoContext?.metadata);
     const playlistContextUrl =
       resolveYouTubePlaylistContextUrl(videoId, input.playlistContextUrl, { allowPlaylistOnly: true }) ||
@@ -683,6 +876,8 @@ export async function createScheduledYouTubeLaunchPackageLocal(input: YouTubeLau
     const cta = trimToNull(input.cta) || firstStringFromRecords([refs], [["cta"], ["community", "cta"]]);
 
     const video = await ensureVideoPipelineItem(client, {
+      pipelineItemId: resolvedPipelineItemId,
+      launchGeneration,
       title,
       youtubeUrl,
       videoId,
@@ -730,12 +925,21 @@ export async function createScheduledYouTubeLaunchPackageLocal(input: YouTubeLau
       requestedBy,
     });
 
-    const common = { videoId, videoPipelineItemId: video.item.id, youtubeUrl, publishAt, requestedBy };
+    const common = {
+      videoId,
+      videoPipelineItemId: video.item.id,
+      youtubeUrl,
+      publishAt,
+      launchGeneration,
+      requestedBy,
+      allowLegacyVideoFallback: !pipelineItemId,
+    };
     const specs = buildScheduledYouTubeLaunchWorkSpecs({
       title,
       youtubeUrl,
       videoId,
       publishAt,
+      launchGeneration,
       playlistContextUrl,
       targetCommunityPublishAt,
       targetEmailSendAt,
@@ -752,6 +956,58 @@ export async function createScheduledYouTubeLaunchPackageLocal(input: YouTubeLau
     for (const spec of specs) {
       workItems.push({ relationType: spec.relationType, ...(await upsertLaunchWorkItem(client, spec, common)) });
     }
+    const activationWorkItemId = workItems.find((entry) => entry.relationType === "video_launch_activate")?.workItem?.id;
+    if (!activationWorkItemId || workItems.length !== 9) {
+      throw new Error("YouTube launch package did not reconcile exactly nine current work items");
+    }
+    const openActivations = await client.query(
+      `select w.id, w.source_type, w.source_id, w.payload
+         from public.work_items w
+        where w.payload ->> 'source_video_pipeline_item_id' = $1
+          and w.payload ->> 'relation_type' = 'video_launch_activate'
+          and w.status not in ('done','failed','canceled','cancelled')
+        order by w.id`,
+      [video.item.id],
+    );
+    const currentActivation = openActivations.rows[0];
+    const currentActivationPayload = toRecord(currentActivation?.payload);
+    if (openActivations.rowCount !== 1
+      || currentActivation?.id !== activationWorkItemId
+      || currentActivation?.source_type !== "pipeline_item"
+      || currentActivation?.source_id !== video.item.id
+      || currentActivationPayload.trigger !== "youtube_launch_package_v1"
+      || currentActivationPayload.action !== "video_launch_activate"
+      || currentActivationPayload.pipeline_item_id !== video.item.id
+      || currentActivationPayload.source_video_pipeline_item_id !== video.item.id
+      || currentActivationPayload.launch_generation !== launchGeneration
+      || currentActivationPayload.publish_at !== publishAt) {
+      throw new Error("YouTube launch package requires exactly one valid open current-generation activation");
+    }
+    const activationMap = await client.query(
+      `select 1 from public.pipeline_work_map
+        where pipeline_item_id = $1 and work_item_id = $2 and relation_type = 'followup'
+        limit 1`,
+      [video.item.id, activationWorkItemId],
+    );
+    if (!activationMap.rows[0]) {
+      throw new Error("YouTube launch package current activation mapping is missing");
+    }
+    const finalizedMetadata = {
+      ...toRecord(video.item.metadata),
+      launch_package: {
+        ...toRecord(toRecord(video.item.metadata).launch_package),
+        launch_generation: launchGeneration,
+        activation_work_item_id: activationWorkItemId,
+      },
+    };
+    const finalizedVideoResult = await client.query(
+      `update public.pipeline_items
+          set metadata = $1::jsonb, updated_at = $2
+        where id = $3
+        returning ${PIPELINE_ITEM_COLUMNS}`,
+      [JSON.stringify(finalizedMetadata), new Date().toISOString(), video.item.id],
+    );
+    const finalizedVideoItem = pipelineItem(finalizedVideoResult.rows[0]);
 
     await client.query(
       `insert into public.pipeline_events (pipeline_item_id, event_type, actor, payload)
@@ -763,6 +1019,8 @@ export async function createScheduledYouTubeLaunchPackageLocal(input: YouTubeLau
           video_id: videoId,
           youtube_url: youtubeUrl,
           publish_at: publishAt,
+          launch_generation: launchGeneration,
+          activation_work_item_id: activationWorkItemId,
           community_pipeline_item_id: community.item.id,
           marketing_pipeline_item_id: marketing.item.id,
           pinned_comment_pipeline_item_id: pinnedComment.item.id,
@@ -779,7 +1037,7 @@ export async function createScheduledYouTubeLaunchPackageLocal(input: YouTubeLau
     );
 
     return {
-      videoItem: video.item,
+      videoItem: finalizedVideoItem,
       videoItemCreated: video.created,
       communityItem: community.item,
       communityItemCreated: community.created,

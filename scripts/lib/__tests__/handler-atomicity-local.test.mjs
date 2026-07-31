@@ -89,6 +89,7 @@ const schedulingLocal = transpileModule(resolve(repoRoot, "src/lib/publication/s
   "@/lib/db/postgres": postgres,
   "@/lib/publication/scheduling": scheduling,
 });
+const youtubeLaunchPackage = transpileModule(resolve(repoRoot, "src/lib/youtube-launch-package.ts"));
 
 function loadRoute(relativePath, extra = {}) {
   return transpileModule(resolve(repoRoot, relativePath), {
@@ -102,6 +103,7 @@ function loadRoute(relativePath, extra = {}) {
     "@/lib/supabase/server": cloudServer,
     "@/lib/supabase/admin": cloudAdmin,
     "@/lib/work-items/pipeline-materializer": { createPipelineWorkItem: async () => { throw new Error("unexpected cloud materializer"); } },
+    "@/lib/youtube-launch-package": youtubeLaunchPackage,
     "@/lib/youtube-pipeline": youtubePipeline,
     "@/lib/loops/read-model": {},
     ...extra,

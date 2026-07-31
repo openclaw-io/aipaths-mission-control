@@ -2,6 +2,7 @@ import { isLocalAuthDisabled } from "@/lib/auth/local";
 import { normalizeRows } from "@/lib/db/mission-control";
 import { query } from "@/lib/db/postgres";
 import { supabaseAdmin } from "@/lib/supabase/admin";
+import { extractYouTubeVideoId as extractYouTubeVideoIdFromUrl } from "@/lib/youtube-launch-package";
 import type { YouTubeManualLearning, YouTubeMetricSnapshot, YouTubeStatisticsRow } from "@/lib/youtube/statistics-types";
 
 type JsonRecord = Record<string, unknown>;
@@ -107,10 +108,7 @@ export function extractYouTubeVideoId(input: { current_url?: string | null; meta
     if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
   }
   const url = input.current_url;
-  if (typeof url === "string") {
-    const match = url.match(/(?:v=|youtu\.be\/|shorts\/)([A-Za-z0-9_-]{6,})/);
-    if (match?.[1]) return match[1];
-  }
+  if (typeof url === "string") return extractYouTubeVideoIdFromUrl(url);
   return null;
 }
 
@@ -197,7 +195,7 @@ function isLongFormStatisticsCandidate(row: YouTubeStatisticsRow) {
   const metadata = row.item.metadata || {};
   const format = stringOrNull(toRecord(metadata.youtube_learning_v1).format || toRecord(metadata.learning_dashboard).format || metadata.format)?.toLowerCase();
   if (format === "short" || format === "shorts") return false;
-  return ["published", "learning"].includes(status) || Boolean(row.item.published_at || row.item.current_url || row.video);
+  return ["published", "learning"].includes(status) || Boolean(row.item.published_at || row.video);
 }
 
 function hasMetricSnapshot(row: YouTubeStatisticsRow) {

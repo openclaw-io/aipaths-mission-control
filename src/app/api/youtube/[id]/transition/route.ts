@@ -11,6 +11,7 @@ import {
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/admin";
 import { createPipelineWorkItem } from "@/lib/work-items/pipeline-materializer";
+import { extractYouTubeVideoId } from "@/lib/youtube-launch-package";
 import {
   getAgentDeliverableLabel,
   YOUTUBE_GATE_META,
@@ -49,6 +50,12 @@ function toRecord(value: unknown): JsonRecord {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonRecord) : {};
 }
 
+function hasActiveScheduledLaunch(metadata: JsonRecord) {
+  const launchPackage = toRecord(metadata.launch_package);
+  return launchPackage.kind === "scheduled_youtube_launch_package_v1"
+    && launchPackage.status === "scheduled";
+}
+
 const YOUTUBE_V0_STAGE_STATUSES = [
   "idea",
   "draft",
@@ -60,7 +67,6 @@ const YOUTUBE_V0_STAGE_STATUSES = [
   "recorded",
   "editing",
   "published",
-  "learning",
   "parked",
   "rejected",
   "archived",
@@ -94,14 +100,6 @@ function firstStringFromPaths(records: JsonRecord[], paths: string[][]) {
   return null;
 }
 
-function extractYouTubeVideoId(url: string | null) {
-  if (!url) return null;
-  const watchMatch = url.match(/[?&]v=([^&]+)/);
-  if (watchMatch?.[1]) return watchMatch[1];
-  const shortMatch = url.match(/youtu\.be\/([^?&/]+)/);
-  if (shortMatch?.[1]) return shortMatch[1];
-  return null;
-}
 
 function getBodyString(body: JsonRecord, keys: string[]) {
   for (const key of keys) {
@@ -565,6 +563,15 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const metadata = getYouTubeMetadata(item.metadata);
   const requestedAction = typeof body.action === "string" ? body.action : null;
 
+  // There is no generic cancellation action in this route. An active launch
+  // therefore fails closed for every legacy stage/gate transition; activation
+  // completion is the only path that may publish it.
+  if (requestedAction !== "save_learning_review" && hasActiveScheduledLaunch(metadata)) {
+    return NextResponse.json({
+      error: "An active scheduled YouTube launch package cannot use legacy transitions; publication is exclusive to its activation live-check.",
+    }, { status: 409 });
+  }
+
   if (requestedAction === "save_learning_review") {
     const learning = toRecord(body.learning);
     if (useLocalMode) {
@@ -699,6 +706,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       const signature = `set_stage:${requestedStage}:${note || ""}:${youtubeUrl || ""}:${videoId || ""}`;
       const result = await withLockedPipelineItemLocal(id, ["video"], async ({ client, item: lockedItem }) => {
         const lockedMetadata = getYouTubeMetadata(lockedItem.metadata);
+        if (hasActiveScheduledLaunch(lockedMetadata)) {
+          throw new Error("active_scheduled_youtube_launch_legacy_transition_blocked");
+        }
         if (lockedMetadata.local_transition_signature === signature) {
           return { kind: "replay" as const, item: lockedItem, stageAutomationWorkItem: null, snapshotWorkItems: [], emailAnnouncementWorkItem: null };
         }
@@ -882,6 +892,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const signature = `gate:${gateKey}:${actionType}:${nextGateStatus}:${safeReason || ""}:${safeEvidenceSummary || ""}:${safeNextAction || ""}:${shouldCreateWorkItem}`;
     const result = await withLockedPipelineItemLocal(id, ["video"], async ({ client, item: lockedItem }) => {
       const lockedMetadata = getYouTubeMetadata(lockedItem.metadata);
+      if (hasActiveScheduledLaunch(lockedMetadata)) {
+        throw new Error("active_scheduled_youtube_launch_legacy_transition_blocked");
+      }
       if (lockedMetadata.local_transition_signature === signature) return { kind: "replay" as const, item: lockedItem, workItem: null };
       if (String(lockedItem.updated_at || "") !== String(item.updated_at || "") || lockedItem.status !== item.status) return { kind: "stale" as const };
 
