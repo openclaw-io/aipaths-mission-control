@@ -251,3 +251,10 @@ test("schedule rerun updates one open work item but never rewrites terminal work
   assert.equal(rolledBackCampaign.status, "ready_for_review");
   assert.equal(rolledBackCampaign.scheduled_for, null);
 });
+
+test("Email Campaigns UI copy treats approval as auto-scheduled for Scheduled Launch emails", () => {
+  const source = readFileSync(resolve(repoRoot, "src/components/email-campaigns/EmailCampaignsClient.tsx"), "utf8");
+  assert.match(source, /Email aprobado y programado/);
+  assert.match(source, /Aprobar y programar/);
+  assert.doesNotMatch(source, /Email aprobado\. Queda en Aprobados para programar\./);
+});

@@ -102,6 +102,7 @@ const reviewRoute = transpileModule(resolve(repoRoot, "src/app/api/loops/[id]/re
 const youtubePipeline = transpileModule(resolve(repoRoot, "src/lib/youtube-pipeline.ts"));
 const completion = transpileModule(resolve(repoRoot, "src/lib/work-items/completion-orchestration.ts"), {
   "@/lib/youtube-pipeline": youtubePipeline,
+  "@/lib/youtube-launch-package": { validateCommunityLaunchDraftOutput: () => ({ ok: true, errors: [] }) },
   "@/lib/work-items/git-artifact": gitArtifact,
 });
 const { isTrustedImplementationDispatchSessionId } = completion;

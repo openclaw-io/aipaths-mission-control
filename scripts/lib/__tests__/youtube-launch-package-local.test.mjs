@@ -94,7 +94,7 @@ async function withClient(run) {
 async function readLaunchRows(videoId) {
   return withClient(async (client) => {
     const work = await client.query(
-      `select id, status, to_char(scheduled_for at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') as scheduled_for, payload
+      `select id, status, instruction, to_char(scheduled_for at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') as scheduled_for, payload
          from public.work_items
         where payload ->> 'video_id' = $1
         order by payload ->> 'relation_type'`,
@@ -122,6 +122,7 @@ test("local scheduled launch package prepares private-video drafts immediately a
     title: "V2 MVP dry package",
     publishAt: "2026-07-07T14:00:00.000Z",
     preparedAt: "2026-07-07T10:00:00.000Z",
+    playlistId: "PLabc123",
     requestedBy: "test:dev",
   });
   assert.equal(result.videoId, videoId);
@@ -151,6 +152,42 @@ test("local scheduled launch package prepares private-video drafts immediately a
   assert.deepEqual(rows.pipeline.map((row) => row.pipeline_type), ["community_post", "email_campaign", "video", "youtube_pinned_comment"]);
 });
 
+test("local scheduled launch package derives playlist context from a full YouTube URL with list", async () => {
+  const videoId = "V2mvpAAA101";
+  const playlistContextUrl = `https://www.youtube.com/watch?v=${videoId}&list=PLabc123`;
+  const result = await createScheduledYouTubeLaunchPackageLocal({
+    youtubeUrl: playlistContextUrl,
+    title: "V2 MVP playlist URL",
+    publishAt: "2026-07-07T14:00:00.000Z",
+    preparedAt: "2026-07-07T10:00:00.000Z",
+    requestedBy: "test:dev",
+  });
+
+  assert.equal(result.playlistContextUrl, playlistContextUrl);
+  const rows = await readLaunchRows(videoId);
+  const community = workByRelation(rows.work).get("launch_community_draft");
+  assert.equal(community.payload.playlist_context_url, playlistContextUrl);
+  assert.match(community.instruction, /"playlist_context_url": "https:\/\/www\.youtube\.com\/watch\?v=V2mvpAAA101&list=PLabc123"/);
+});
+
+test("local scheduled launch package rejects bare AIPaths YouTube URLs before creating launch rows", async () => {
+  const videoId = "V2mvpAAA102";
+  await assert.rejects(
+    () => createScheduledYouTubeLaunchPackageLocal({
+      youtubeUrl: `https://youtu.be/${videoId}`,
+      title: "V2 MVP bare URL",
+      publishAt: "2026-07-07T14:00:00.000Z",
+      preparedAt: "2026-07-07T10:00:00.000Z",
+      requestedBy: "test:dev",
+    }),
+    /playlist_context_url.*required|playlist_context_url.*list=/i,
+  );
+
+  const rows = await readLaunchRows(videoId);
+  assert.equal(rows.work.length, 0);
+  assert.equal(rows.pipeline.length, 0);
+});
+
 test("local scheduled launch package reruns update open schedules without duplicating and preserve terminal work", async () => {
   const videoId = "V2mvpAAA002";
   await createScheduledYouTubeLaunchPackageLocal({
@@ -158,6 +195,7 @@ test("local scheduled launch package reruns update open schedules without duplic
     title: "V2 MVP reschedule",
     publishAt: "2026-07-07T14:00:00.000Z",
     preparedAt: "2026-07-07T10:00:00.000Z",
+    playlistId: "PLabc123",
     requestedBy: "test:dev",
   });
   await createScheduledYouTubeLaunchPackageLocal({
@@ -165,6 +203,7 @@ test("local scheduled launch package reruns update open schedules without duplic
     title: "V2 MVP reschedule",
     publishAt: "2026-07-08T15:00:00.000Z",
     preparedAt: "2026-07-08T10:00:00.000Z",
+    playlistId: "PLabc123",
     requestedBy: "test:dev",
   });
 
@@ -184,6 +223,7 @@ test("local scheduled launch package reruns update open schedules without duplic
     title: "V2 MVP reschedule",
     publishAt: "2026-07-09T16:00:00.000Z",
     preparedAt: "2026-07-09T10:00:00.000Z",
+    playlistId: "PLabc123",
     requestedBy: "test:dev",
   });
 

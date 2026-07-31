@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getLocalMissionControlUser, isLocalAuthDisabled } from "@/lib/auth/local";
 import { getPipelineItemLocal, updatePipelineItemLocal } from "@/lib/db/pipeline-local";
 import {
+  approveEmailCampaignLocalAtomic,
   EmailCampaignLocalError,
   requestEmailChangesLocalAtomic,
   scheduleEmailCampaignLocalAtomic,
@@ -117,6 +118,20 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       return NextResponse.json(await scheduleEmailCampaignLocalAtomic({
         campaignId: id,
         scheduledFor: new Date(scheduledTimestamp).toISOString(),
+        actorIdentity,
+      }));
+    } catch (error) {
+      if (error instanceof EmailCampaignLocalError) {
+        return NextResponse.json({ error: error.message }, { status: error.status });
+      }
+      throw error;
+    }
+  }
+
+  if (useLocalMode && action === "approve") {
+    try {
+      return NextResponse.json(await approveEmailCampaignLocalAtomic({
+        campaignId: id,
         actorIdentity,
       }));
     } catch (error) {

@@ -13,6 +13,7 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const completionSource = resolve(repoRoot, "src/lib/work-items/completion-orchestration.ts");
 const agentCompletionSource = resolve(repoRoot, "src/lib/work-items/agent-completion-local.ts");
 const youtubeSource = resolve(repoRoot, "src/lib/youtube-pipeline.ts");
+const youtubeLaunchSource = resolve(repoRoot, "src/lib/youtube-launch-package.ts");
 
 function transpileModule(sourcePath, requires = {}) {
   const source = readFileSync(sourcePath, "utf8");
@@ -41,14 +42,17 @@ function transpileModule(sourcePath, requires = {}) {
     Object,
     Array,
     Math,
+    URL,
   };
   vm.runInNewContext(transpiled, sandbox, { filename: sourcePath });
   return cjsModule.exports;
 }
 
 const youtubePipeline = transpileModule(youtubeSource);
+const youtubeLaunchPackage = transpileModule(youtubeLaunchSource, { "@supabase/supabase-js": {} });
 const { orchestrateWorkItemCompletion, buildPublicationVerificationRequest } = transpileModule(completionSource, {
   "@/lib/youtube-pipeline": youtubePipeline,
+  "@/lib/youtube-launch-package": youtubeLaunchPackage,
   "@/lib/work-items/git-artifact": {
     verifyRepositoryCommit: async (repositoryPath, sha) => ({ repositoryPath, repositoryRoot: repositoryPath, sha }),
   },
@@ -186,6 +190,72 @@ test("community completion persists output copy and moves the pipeline card to r
     const row = (await client.query("select status, metadata from public.pipeline_items where id = $1", [pipelineItem.id])).rows[0];
     assert.equal(row.status, "ready_for_review");
     assert.equal(row.metadata.copy.text, "Copy final para Discord");
+    assert.equal(row.metadata.runtime_feedback.last_status, "copy_saved");
+  });
+});
+
+test("community video launch completion stays draft when playlist URL is missing", async () => {
+  await inRollbackTransaction(async (client) => {
+    const videoId = "Dn1pJz5fq-w";
+    const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    const pipelineItem = await insertPipelineItem(client, {
+      metadata: {
+        kind: "video_launch_announcement",
+        source: { video_id: videoId, video_url: watchUrl, playlist_context_url: null },
+        launch_package: {
+          video_id: videoId,
+          youtube_url: watchUrl,
+          playlist_context_url: null,
+          suppress_link_previews: false,
+        },
+        copy: { text: "" },
+      },
+    });
+    const workItem = await insertWorkItem(client, pipelineItem);
+
+    await orchestrateWorkItemCompletion(client, {
+      existing: workItem,
+      updated: completed(workItem),
+      body: { status: "done", output: { copy: { text: `Nuevo video\n${watchUrl}` } } },
+      verifyPublishedContent,
+    });
+
+    const row = (await client.query("select status, metadata from public.pipeline_items where id = $1", [pipelineItem.id])).rows[0];
+    assert.equal(row.status, "draft");
+    assert.match(row.metadata.review.notes, /playlist_context_url.*required/i);
+    assert.equal(row.metadata.runtime_feedback.last_status, "launch_validation_failed");
+  });
+});
+
+test("community video launch completion reaches review with matching raw playlist URL", async () => {
+  await inRollbackTransaction(async (client) => {
+    const videoId = "Dn1pJz5fq-w";
+    const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    const playlistContextUrl = `${watchUrl}&list=PLabc123`;
+    const pipelineItem = await insertPipelineItem(client, {
+      metadata: {
+        kind: "video_launch_announcement",
+        source: { video_id: videoId, video_url: watchUrl, playlist_context_url: playlistContextUrl },
+        launch_package: {
+          video_id: videoId,
+          youtube_url: watchUrl,
+          playlist_context_url: playlistContextUrl,
+          suppress_link_previews: false,
+        },
+        copy: { text: "" },
+      },
+    });
+    const workItem = await insertWorkItem(client, pipelineItem);
+
+    await orchestrateWorkItemCompletion(client, {
+      existing: workItem,
+      updated: completed(workItem),
+      body: { status: "done", output: { copy: { text: `Nuevo video\n${playlistContextUrl}` } } },
+      verifyPublishedContent,
+    });
+
+    const row = (await client.query("select status, metadata from public.pipeline_items where id = $1", [pipelineItem.id])).rows[0];
+    assert.equal(row.status, "ready_for_review");
     assert.equal(row.metadata.runtime_feedback.last_status, "copy_saved");
   });
 });

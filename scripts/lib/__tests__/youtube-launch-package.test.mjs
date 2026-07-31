@@ -107,7 +107,7 @@ test("prepublication drafts are authorized before the video is public and gate o
   assert.equal(community.payloadExtra.public_gate_applies_to, "publish_or_send_only");
   assert.equal(community.payloadExtra.requires_gonza_approval, true);
   assert.equal(community.payloadExtra.customer_facing_guard, false);
-  assert.equal(community.payloadExtra.validation_requirements.playlist_context_url_required_when_present, true);
+  assert.equal(community.payloadExtra.validation_requirements.playlist_context_url_required, true);
   assert.match(community.instruction, /structured launch context/i);
   assert.match(community.instruction, /Ready for Review/i);
   assert.match(community.instruction, /Private\/scheduled YouTube videos are allowed for this draft/i);
@@ -138,6 +138,51 @@ test("prepublication drafts are authorized before the video is public and gate o
   assert.equal(website.payloadExtra.requires_live_check_passed, true);
   assert.equal(website.payloadExtra.public_gate_applies_to, "activation_only");
   assert.match(website.instruction, /privacyStatus must be public/i);
+});
+
+test("buildScheduledYouTubeLaunchWorkSpecs rejects community launch work without a playlist URL", () => {
+  assert.throws(
+    () => launchPackage.buildScheduledYouTubeLaunchWorkSpecs(baseContext({ playlistContextUrl: null })),
+    /playlist_context_url.*required/i,
+  );
+  assert.throws(
+    () => launchPackage.buildScheduledYouTubeLaunchWorkSpecs(baseContext({
+      playlistContextUrl: "https://www.youtube.com/watch?v=Dn1pJz5fq-w",
+    })),
+    /playlist_context_url.*list=/i,
+  );
+  assert.throws(
+    () => launchPackage.buildScheduledYouTubeLaunchWorkSpecs(baseContext({
+      playlistContextUrl: "https://notyoutube.com/watch?v=Dn1pJz5fq-w&list=PLabc123",
+    })),
+    /playlist_context_url.*YouTube watch URL/i,
+  );
+  assert.throws(
+    () => launchPackage.buildScheduledYouTubeLaunchWorkSpecs(baseContext({
+      playlistContextUrl: "http://www.youtube.com/watch?v=Dn1pJz5fq-w&list=PLabc123",
+    })),
+    /playlist_context_url.*YouTube watch URL/i,
+  );
+  assert.throws(
+    () => launchPackage.buildScheduledYouTubeLaunchWorkSpecs(baseContext({
+      playlistContextUrl: "https://www.youtube.com/watch?v=Different01&list=PLabc123",
+    })),
+    /playlist_context_url.*YouTube watch URL/i,
+  );
+});
+
+test("validateCommunityLaunchDraftOutput rejects review when playlist context is missing", () => {
+  const context = baseContext({ playlistContextUrl: null });
+  const result = launchPackage.validateCommunityLaunchDraftOutput({
+    finalCopy: `Nuevo video\n${context.youtubeUrl}`,
+    status: "ready_for_review",
+    playlistContextUrl: null,
+    watchUrl: context.youtubeUrl,
+    suppressLinkPreviews: false,
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.errors.join("\n"), /playlist_context_url.*required/i);
 });
 
 test("validateCommunityLaunchDraftOutput enforces playlist context and raw YouTube embed requirements", () => {

@@ -14,6 +14,21 @@ export const PIPELINE_ITEM_RETURNING = `
 const OPEN_WORK_STATUSES = ["draft", "ready", "blocked", "in_progress"];
 type TransactionClient = Pick<PoolClient, "query">;
 
+function shouldPreserveBlockedLiveGate(item: { status?: string | null; payload?: Record<string, unknown> | null }) {
+  if (item.status !== "blocked") return false;
+  const payload = (item.payload || {}) as Record<string, unknown>;
+  return payload.requires_live_check_passed === true
+    || payload.dispatch_state === "blocked_live_gate"
+    || typeof payload.public_gate_applies_to === "string";
+}
+
+function updateExistingWorkStatus(item: { status?: string | null; payload?: Record<string, unknown> | null }, scheduledFor?: string | null) {
+  if (scheduledFor) return "ready";
+  if (item.status === "in_progress") return "in_progress";
+  if (shouldPreserveBlockedLiveGate(item)) return "blocked";
+  return "ready";
+}
+
 type PipelineItemUpdate = {
   status?: string;
   priority?: string | null;
@@ -146,16 +161,67 @@ async function createPipelineWorkItemWithClient(client: TransactionClient, input
         and status = any($3::text[])
         and payload ->> 'relation_type' = $4
       order by created_at desc
-      limit 1`,
+      limit 1
+      for update`,
     [["pipeline_item", "service"], input.pipelineItemId, OPEN_WORK_STATUSES, payloadRelationType],
   );
 
   if (existing.rows[0]) {
+    if (input.updateExisting) {
+      const nextStatus = updateExistingWorkStatus(existing.rows[0], input.scheduledFor);
+      const existingPayload = (existing.rows[0].payload || {}) as Record<string, unknown>;
+      const payload: Record<string, unknown> = {
+        ...existingPayload,
+        trigger: input.trigger,
+        pipeline_type: input.pipelineType,
+        pipeline_item_id: input.pipelineItemId,
+        relation_type: payloadRelationType,
+        map_relation_type: mapRelationType,
+        action: input.action,
+        review_notes: input.reviewNotes,
+        dedupe_key: dedupeKey,
+        ...(input.payloadExtra || {}),
+      };
+      if (input.scheduledFor && existingPayload.dispatch_state === "blocked_live_gate") {
+        payload.previous_dispatch_state = "blocked_live_gate";
+        payload.dispatch_state = "ready_after_explicit_schedule";
+      }
+      const updated = await client.query(
+        `update work_items
+            set title = $1,
+                instruction = $2,
+                status = $9,
+                priority = $3,
+                owner_agent = $4,
+                target_agent_id = $4,
+                requested_by = $5,
+                scheduled_for = $6::timestamptz,
+                started_at = case when $9 = 'ready' then null else started_at end,
+                completed_at = case when $9 = 'ready' then null else completed_at end,
+                payload = $7::jsonb,
+                updated_at = now()
+          where id = $8
+          returning id, title, status, source_type, owner_agent, target_agent_id, scheduled_for, payload`,
+        [
+          input.title,
+          input.instruction,
+          input.priority || "medium",
+          input.ownerAgent,
+          input.requestedBy,
+          input.scheduledFor || null,
+          JSON.stringify(payload),
+          existing.rows[0].id,
+          nextStatus,
+        ],
+      );
+      await ensureWorkMapAndCreationEvent(client, input, updated.rows[0]);
+      return { workItem: normalizeRow(updated.rows[0]), created: false, updatedExisting: true };
+    }
     await ensureWorkMapAndCreationEvent(client, input, existing.rows[0]);
     return { workItem: normalizeRow(existing.rows[0]), created: false };
   }
 
-  const payload = {
+  const payload: Record<string, unknown> = {
     trigger: input.trigger,
     pipeline_type: input.pipelineType,
     pipeline_item_id: input.pipelineItemId,

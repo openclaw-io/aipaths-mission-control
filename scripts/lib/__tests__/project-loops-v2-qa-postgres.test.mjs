@@ -81,7 +81,7 @@ const reviewRoute = transpile(resolve(repoRoot, "src/app/api/loops/[id]/review/r
   "@/lib/loops/execution-instruction": { buildLoopReworkInstruction: () => "unused" },
 });
 const completionOrchestration = transpile(resolve(repoRoot, "src/lib/work-items/completion-orchestration.ts"), {
-  "@/lib/youtube-pipeline": {}, "@/lib/work-items/git-artifact": {},
+  "@/lib/youtube-pipeline": {}, "@/lib/youtube-launch-package": { validateCommunityLaunchDraftOutput: () => ({ ok: true, errors: [] }) }, "@/lib/work-items/git-artifact": {},
 });
 const agentCompletion = transpile(resolve(repoRoot, "src/lib/work-items/agent-completion-local.ts"), {
   "@/lib/content/live-verification": {}, "@/lib/db/mission-control": { normalizeRow: (row) => row },

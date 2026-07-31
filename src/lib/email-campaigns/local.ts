@@ -59,6 +59,30 @@ function toIso(value: unknown): string | null {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
+function normalizeOptionalIso(value: unknown, label: string): string | null {
+  if (!value) return null;
+  const iso = toIso(value);
+  if (!iso) throw new EmailCampaignLocalError(`${label} must be a valid date`, 400);
+  return iso;
+}
+
+function getSourceVideoId(metadata: JsonRecord) {
+  const source = asObject(metadata.source);
+  return readString(source.video_id) || readString(metadata.video_id) || readString(metadata.source_video_id);
+}
+
+function requiresYouTubeLiveGate(kind: string | null, metadata: JsonRecord) {
+  return kind === "video_announcement" || getSourceVideoId(metadata) !== null;
+}
+
+function getApprovalAutoScheduleTarget(metadata: JsonRecord, itemScheduledFor: unknown) {
+  const launchPackage = asObject(metadata.launch_package);
+  return normalizeOptionalIso(
+    readString(launchPackage.target_send_at) || itemScheduledFor,
+    "metadata.launch_package.target_send_at or scheduled_for",
+  );
+}
+
 function createNewsletterInstruction(input: {
   title: string;
   topics: Array<{ title: string; summary: string | null; sourceUrl: string | null }>;
@@ -203,6 +227,97 @@ async function insertWorkItem(client: QueryClient, input: {
     ],
   );
   return result.rows[0];
+}
+
+async function upsertSendEmailWorkItem(client: QueryClient, input: {
+  item: PipelineItemRow;
+  metadata: JsonRecord;
+  scheduledFor: string;
+  actorIdentity: string;
+  now: string;
+}) {
+  const draft = asObject(input.metadata.draft);
+  const kind = readString(input.metadata.kind);
+  const existingResult = await client.query<WorkItemRow>(
+    `select ${WORK_RETURNING}
+       from public.work_items
+      where source_type = any($1::text[])
+        and source_id = $2
+        and payload ->> 'action' = 'send_email_campaign'
+      order by created_at desc
+      limit 1
+      for update`,
+    [["pipeline_item", "service"], input.item.id],
+  );
+  let workItem = existingResult.rows[0];
+  const terminalWork = workItem ? TERMINAL_WORK_STATUSES.has(workItem.status) : false;
+  const effectiveScheduledFor = terminalWork ? toIso(workItem?.scheduled_for) || input.scheduledFor : input.scheduledFor;
+  const liveGateRequired = requiresYouTubeLiveGate(kind, input.metadata);
+  const sourceVideoId = getSourceVideoId(input.metadata);
+  const instruction = buildSendInstruction({
+    title: input.item.title,
+    kind,
+    scheduledFor: input.scheduledFor,
+    draft,
+    requiresYouTubeLiveGate: liveGateRequired,
+  });
+  const payloadPatch = {
+    trigger: "email_campaign_scheduled",
+    pipeline_type: "email_campaign",
+    pipeline_item_id: input.item.id,
+    relation_type: "send_email_campaign",
+    map_relation_type: "send_email_campaign",
+    action: "send_email_campaign",
+    email_campaign_kind: kind,
+    schedule_kind: "email_send",
+    ...(liveGateRequired ? {
+      public_gate_applies_to: "publish_or_send_only",
+      requires_live_check_passed: true,
+      requires_gonza_approval: true,
+      source_video_id: sourceVideoId,
+    } : {}),
+  };
+
+  if (!workItem) {
+    workItem = await insertWorkItem(client, {
+      pipelineItemId: input.item.id,
+      title: `Send email campaign: ${input.item.title}`,
+      instruction,
+      priority: input.item.priority || "medium",
+      actor: input.actorIdentity,
+      scheduledFor: input.scheduledFor,
+      payload: payloadPatch,
+    });
+  } else if (!terminalWork) {
+    const updated = await client.query<WorkItemRow>(
+      `update public.work_items
+          set title = $1,
+              instruction = $2,
+              scheduled_for = $3::timestamptz,
+              status = case when status = 'in_progress' then status else 'ready' end,
+              priority = $4,
+              owner_agent = 'marketing',
+              target_agent_id = 'marketing',
+              requested_by = $5,
+              payload = coalesce(payload, '{}'::jsonb) || $6::jsonb,
+              updated_at = $7::timestamptz
+        where id = $8
+        returning ${WORK_RETURNING}`,
+      [`Send email campaign: ${input.item.title}`, instruction, input.scheduledFor, input.item.priority || "medium", input.actorIdentity, JSON.stringify(payloadPatch), input.now, workItem.id],
+    );
+    workItem = updated.rows[0];
+  }
+
+  await ensureWorkArtifacts(client, {
+    pipelineItemId: input.item.id,
+    workItem,
+    relationType: "send_email_campaign",
+    actor: input.actorIdentity,
+    trigger: "email_campaign_scheduled",
+    action: "send_email_campaign",
+  });
+
+  return { workItem, effectiveScheduledFor };
 }
 
 export async function assembleNewsletterLocalAtomic(input: {
@@ -494,79 +609,12 @@ export async function scheduleEmailCampaignLocalAtomic(input: {
     const now = input.now || new Date().toISOString();
     const item = await lockCampaign(client, input.campaignId);
     const metadata = asObject(item.metadata);
-    const draft = asObject(metadata.draft);
-    const kind = readString(metadata.kind);
-
-    const existingResult = await client.query<WorkItemRow>(
-      `select ${WORK_RETURNING}
-         from public.work_items
-        where source_type = any($1::text[])
-          and source_id = $2
-          and payload ->> 'action' = 'send_email_campaign'
-        order by created_at desc
-        limit 1
-        for update`,
-      [["pipeline_item", "service"], item.id],
-    );
-    let workItem = existingResult.rows[0];
-    const terminalWork = workItem ? TERMINAL_WORK_STATUSES.has(workItem.status) : false;
-    const effectiveScheduledFor = terminalWork ? toIso(workItem?.scheduled_for) || input.scheduledFor : input.scheduledFor;
-    const source = asObject(metadata.source);
-    const requiresYouTubeLiveGate = kind === "video_announcement" || readString(source.video_id) !== null;
-    const instruction = buildSendInstruction({ title: item.title, kind, scheduledFor: input.scheduledFor, draft, requiresYouTubeLiveGate });
-    const payloadPatch = {
-      trigger: "email_campaign_scheduled",
-      pipeline_type: "email_campaign",
-      pipeline_item_id: item.id,
-      relation_type: "send_email_campaign",
-      map_relation_type: "send_email_campaign",
-      action: "send_email_campaign",
-      email_campaign_kind: kind,
-      schedule_kind: "email_send",
-      ...(requiresYouTubeLiveGate ? {
-        public_gate_applies_to: "publish_or_send_only",
-        requires_live_check_passed: true,
-        requires_gonza_approval: true,
-        source_video_id: readString(source.video_id),
-      } : {}),
-    };
-
-    if (!workItem) {
-      workItem = await insertWorkItem(client, {
-        pipelineItemId: item.id,
-        title: `Send email campaign: ${item.title}`,
-        instruction,
-        priority: item.priority || "medium",
-        actor: input.actorIdentity,
-        scheduledFor: input.scheduledFor,
-        payload: payloadPatch,
-      });
-    } else if (!terminalWork) {
-      const updated = await client.query<WorkItemRow>(
-        `update public.work_items
-            set title = $1,
-                instruction = $2,
-                scheduled_for = $3::timestamptz,
-                status = case when status = 'in_progress' then status else 'ready' end,
-                priority = $4,
-                owner_agent = 'marketing',
-                target_agent_id = 'marketing',
-                requested_by = $5,
-                payload = coalesce(payload, '{}'::jsonb) || $6::jsonb,
-                updated_at = $7::timestamptz
-          where id = $8
-          returning ${WORK_RETURNING}`,
-        [`Send email campaign: ${item.title}`, instruction, input.scheduledFor, item.priority || "medium", input.actorIdentity, JSON.stringify(payloadPatch), now, workItem.id],
-      );
-      workItem = updated.rows[0];
-    }
-    await ensureWorkArtifacts(client, {
-      pipelineItemId: item.id,
-      workItem,
-      relationType: "send_email_campaign",
-      actor: input.actorIdentity,
-      trigger: "email_campaign_scheduled",
-      action: "send_email_campaign",
+    const { workItem, effectiveScheduledFor } = await upsertSendEmailWorkItem(client, {
+      item,
+      metadata,
+      scheduledFor: input.scheduledFor,
+      actorIdentity: input.actorIdentity,
+      now,
     });
 
     const nextMetadata = {
@@ -580,6 +628,84 @@ export async function scheduleEmailCampaignLocalAtomic(input: {
       },
       runtime_feedback: {
         ...asObject(metadata.runtime_feedback),
+        last_status: "scheduled",
+        last_work_item_id: workItem.id,
+        updated_at: now,
+      },
+    };
+    const updatedCampaign = await client.query<PipelineItemRow>(
+      `update public.pipeline_items
+          set status = case when status = any($1::text[]) then status else 'scheduled' end,
+              scheduled_for = case when status = any($1::text[]) then scheduled_for else $2::timestamptz end,
+              metadata = $3::jsonb,
+              updated_at = $4::timestamptz
+        where id = $5
+        returning ${CAMPAIGN_RETURNING}`,
+      [TERMINAL_PIPELINE_STATUSES, effectiveScheduledFor, JSON.stringify(nextMetadata), now, item.id],
+    );
+    return { item: normalizeRow(updatedCampaign.rows[0]), workItem: normalizeRow(workItem) };
+  });
+}
+
+export async function approveEmailCampaignLocalAtomic(input: {
+  campaignId: string;
+  actorIdentity: string;
+  now?: string;
+}) {
+  return withTransaction(async (client) => {
+    const now = input.now || new Date().toISOString();
+    const item = await lockCampaign(client, input.campaignId);
+    const metadata = asObject(item.metadata);
+    const kind = readString(metadata.kind);
+    const approvedMetadata: JsonRecord = {
+      ...metadata,
+      review: {
+        ...asObject(metadata.review),
+        status: "approved",
+        approved_at: now,
+        approved_by: input.actorIdentity,
+      },
+      runtime_feedback: {
+        ...asObject(metadata.runtime_feedback),
+        last_status: "approved",
+        updated_at: now,
+      },
+    };
+    const scheduledFor = kind === "video_announcement"
+      ? getApprovalAutoScheduleTarget(metadata, item.scheduled_for)
+      : null;
+
+    if (!scheduledFor) {
+      const updatedCampaign = await client.query<PipelineItemRow>(
+        `update public.pipeline_items
+            set status = case when status = any($1::text[]) then status else 'approved' end,
+                metadata = $2::jsonb,
+                updated_at = $3::timestamptz
+          where id = $4
+          returning ${CAMPAIGN_RETURNING}`,
+        [TERMINAL_PIPELINE_STATUSES, JSON.stringify(approvedMetadata), now, item.id],
+      );
+      return { item: normalizeRow(updatedCampaign.rows[0]) };
+    }
+
+    const { workItem, effectiveScheduledFor } = await upsertSendEmailWorkItem(client, {
+      item,
+      metadata: approvedMetadata,
+      scheduledFor,
+      actorIdentity: input.actorIdentity,
+      now,
+    });
+    const nextMetadata = {
+      ...approvedMetadata,
+      schedule: {
+        ...asObject(approvedMetadata.schedule),
+        scheduled_for: effectiveScheduledFor,
+        scheduled_at: now,
+        scheduled_by: input.actorIdentity,
+        send_work_item_id: workItem.id,
+      },
+      runtime_feedback: {
+        ...asObject(approvedMetadata.runtime_feedback),
         last_status: "scheduled",
         last_work_item_id: workItem.id,
         updated_at: now,

@@ -254,7 +254,7 @@ function DraftCard({
               disabled={busy}
               className="rounded-lg bg-emerald-300 px-3 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-200 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              Aprobar
+              {draft.kind === "video_announcement" ? "Aprobar y programar" : "Aprobar"}
             </button>
           </div>
         </div>
@@ -415,7 +415,10 @@ export function EmailCampaignsClient({ data }: { data: EmailCampaignPageData }) 
 
       if (action === "approve") {
         setActiveTab("approved");
-        setMessage("Email aprobado. Queda en Aprobados para programar.");
+        setMessage(payload.workItem
+          ? "Email aprobado y programado. Se creó/actualizó el Work Queue con scheduled_for."
+          : "Email aprobado. Queda listo para programar si no tenía fecha de launch."
+        );
       } else if (action === "schedule") {
         setActiveTab("approved");
         setMessage("Email programado. Se creó/actualizó el Work Queue con scheduled_for.");

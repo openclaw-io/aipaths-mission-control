@@ -84,6 +84,7 @@ export type CommunityLaunchDraftValidationInput = {
   status?: string | null;
   playlistContextUrl?: string | null;
   watchUrl?: string | null;
+  videoId?: string | null;
   suppressLinkPreviews?: boolean | null;
 };
 
@@ -169,10 +170,89 @@ function youtubePlaylistContextUrl(videoId: string, playlistId: string | null) {
   return playlistId ? `${youtubeWatchUrl(videoId)}&list=${playlistId}` : null;
 }
 
+function playlistIdFromYouTubeUrl(videoId: string, value: string, allowPlaylistOnly: boolean) {
+  try {
+    const url = new URL(value);
+    const host = url.hostname.replace(/^www\./, "");
+    if (url.protocol !== "https:" || (host !== "youtu.be" && host !== "youtube.com" && !host.endsWith(".youtube.com"))) return null;
+    const playlistId = trimToNull(url.searchParams.get("list"));
+    if (!playlistId) return null;
+
+    if (host === "youtu.be") {
+      const pathVideoId = trimToNull(url.pathname.split("/").filter(Boolean)[0]);
+      return pathVideoId === videoId ? playlistId : null;
+    }
+
+    const pathParts = url.pathname.split("/").filter(Boolean);
+    if (url.pathname === "/watch") {
+      return url.searchParams.get("v") === videoId ? playlistId : null;
+    }
+    if (["embed", "shorts", "live"].includes(pathParts[0]) && pathParts[1] === videoId) {
+      return playlistId;
+    }
+    if (allowPlaylistOnly && url.pathname === "/playlist") return playlistId;
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+export function resolveYouTubePlaylistContextUrl(videoId: string, value: string | null | undefined, options: { allowRawPlaylistId?: boolean; allowPlaylistOnly?: boolean } = {}) {
+  const raw = trimToNull(value);
+  if (!raw) return null;
+  const playlistId =
+    playlistIdFromYouTubeUrl(videoId, raw, options.allowPlaylistOnly === true) ||
+    (options.allowRawPlaylistId === true && /^[a-zA-Z0-9_-]+$/.test(raw) ? raw : null);
+  return youtubePlaylistContextUrl(videoId, playlistId);
+}
+
+export function firstPlaylistContextUrlFromRecords(videoId: string, records: JsonRecord[], paths: string[][], options: { allowRawPlaylistId?: boolean; allowPlaylistOnly?: boolean } = {}) {
+  for (const record of records) {
+    for (const path of paths) {
+      let current: unknown = record;
+      for (const key of path) {
+        if (!current || typeof current !== "object" || Array.isArray(current)) {
+          current = null;
+          break;
+        }
+        current = (current as JsonRecord)[key];
+      }
+      const resolved = resolveYouTubePlaylistContextUrl(videoId, trimToNull(current), options);
+      if (resolved) return resolved;
+    }
+  }
+  return null;
+}
+
+export function requireCommunityPlaylistContextUrl(videoId: string, value: string | null | undefined) {
+  const playlistContextUrl = trimToNull(value);
+  if (!playlistContextUrl) {
+    throw new Error("playlist_context_url is required for AIPaths community video announcements");
+  }
+
+  try {
+    const url = new URL(playlistContextUrl);
+    const host = url.hostname.toLowerCase();
+    if (url.protocol !== "https:" || !["youtube.com", "www.youtube.com"].includes(host)
+      || url.pathname !== "/watch" || url.searchParams.get("v") !== videoId) {
+      throw new Error("invalid watch URL");
+    }
+    if (!trimToNull(url.searchParams.get("list"))) {
+      throw new Error("missing playlist");
+    }
+  } catch {
+    throw new Error("playlist_context_url must be a YouTube watch URL for this video and include list=");
+  }
+
+  return playlistContextUrl;
+}
+
 export function validateCommunityLaunchDraftOutput(input: CommunityLaunchDraftValidationInput) {
   const finalCopy = trimToNull(input.finalCopy) || "";
   const playlistContextUrl = trimToNull(input.playlistContextUrl);
   const watchUrl = trimToNull(input.watchUrl);
+  const videoId = trimToNull(input.videoId) || extractYouTubeVideoId(watchUrl);
   const status = trimToNull(input.status);
   const errors: string[] = [];
 
@@ -185,16 +265,25 @@ export function validateCommunityLaunchDraftOutput(input: CommunityLaunchDraftVa
   if (input.suppressLinkPreviews !== false) {
     errors.push("Video announcements must set suppress_link_previews=false so Discord can render the YouTube preview.");
   }
-  if (playlistContextUrl) {
+  if (!playlistContextUrl) {
+    errors.push("playlist_context_url is required for AIPaths community video announcements.");
+  } else {
+    if (!videoId) {
+      errors.push("A valid video_id is required to validate playlist_context_url.");
+    } else {
+      try {
+        requireCommunityPlaylistContextUrl(videoId, playlistContextUrl);
+      } catch (error) {
+        errors.push(error instanceof Error ? error.message : String(error));
+      }
+    }
     if (!finalCopy.includes(playlistContextUrl)) {
-      errors.push("Community final copy must include playlist_context_url when present.");
+      errors.push("Community final copy must include playlist_context_url.");
     }
     const trailingUrl = finalCopy.match(/https:\/\/www\.youtube\.com\/watch\?v=[a-zA-Z0-9_-]{11}(?:\s*)$/)?.[0]?.trim();
     if (watchUrl && trailingUrl === watchUrl) {
       errors.push("Community final copy must not end with the bare watch URL when playlist_context_url exists.");
     }
-  } else if (watchUrl && !finalCopy.includes(watchUrl)) {
-    errors.push("Community final copy must include the raw YouTube watch URL when no playlist_context_url exists.");
   }
   for (const url of [playlistContextUrl, watchUrl].filter(Boolean) as string[]) {
     if (finalCopy.includes(`<${url}>`)) {
@@ -274,7 +363,7 @@ function communityDraftInstruction(input: ScheduledYouTubeLaunchSpecContext) {
     suppress_link_previews: false,
     validation_requirements: {
       ready_for_review_status_required: true,
-      playlist_context_url_required_when_present: true,
+      playlist_context_url_required: true,
       raw_unwrapped_youtube_url_required: true,
       fail_if_final_copy_ends_with_bare_watch_url_when_playlist_exists: true,
     },
@@ -567,7 +656,7 @@ async function ensureCommunityPipelineItem(db: SupabaseClient, input: {
       requires_gonza_approval: true,
       validation_requirements: {
         ready_for_review_status_required: true,
-        playlist_context_url_required_when_present: true,
+        playlist_context_url_required: true,
         raw_unwrapped_youtube_url_required: true,
         fail_if_final_copy_ends_with_bare_watch_url_when_playlist_exists: true,
       },
@@ -934,6 +1023,7 @@ async function upsertLaunchWorkItem(db: SupabaseClient, spec: LaunchWorkSpec, co
 }
 
 export function buildScheduledYouTubeLaunchWorkSpecs(context: ScheduledYouTubeLaunchSpecContext): ScheduledYouTubeLaunchWorkSpec[] {
+  requireCommunityPlaylistContextUrl(context.videoId, context.playlistContextUrl);
   const videoPipelineItemId = context.videoPipelineItemId || "";
   const communityPipelineItemId = context.communityPipelineItemId || videoPipelineItemId;
   const marketingPipelineItemId = context.marketingPipelineItemId || videoPipelineItemId;
@@ -1007,7 +1097,7 @@ export function buildScheduledYouTubeLaunchWorkSpecs(context: ScheduledYouTubeLa
         suppress_link_previews: false,
         validation_requirements: {
           ready_for_review_status_required: true,
-          playlist_context_url_required_when_present: true,
+          playlist_context_url_required: true,
           raw_unwrapped_youtube_url_required: true,
           fail_if_final_copy_ends_with_bare_watch_url_when_playlist_exists: true,
         },
@@ -1120,8 +1210,8 @@ export async function createScheduledYouTubeLaunchPackage(db: SupabaseClient, in
   const existingVideoContext = await findExistingVideoItem(db, videoId, youtubeUrl);
   const existingVideoMetadata = toRecord(existingVideoContext?.metadata);
   const playlistContextUrl =
-    trimToNull(input.playlistContextUrl) ||
-    firstStringFromRecords([refs], [
+    resolveYouTubePlaylistContextUrl(videoId, input.playlistContextUrl, { allowPlaylistOnly: true }) ||
+    firstPlaylistContextUrlFromRecords(videoId, [refs], [
       ["playlist_context_url"],
       ["playlistContextUrl"],
       ["playlist_url"],
@@ -1130,15 +1220,20 @@ export async function createScheduledYouTubeLaunchPackage(db: SupabaseClient, in
       ["playlist", "url"],
       ["source", "playlist_context_url"],
       ["source", "playlist_url"],
-    ]) ||
-    firstStringFromRecords([existingVideoMetadata], [
+    ], { allowPlaylistOnly: true }) ||
+    firstPlaylistContextUrlFromRecords(videoId, [existingVideoMetadata], [
       ["launch_package", "playlist_context_url"],
+      ["launch_package", "playlist_url"],
       ["source", "playlist_context_url"],
       ["source", "playlist_url"],
       ["youtube_v0", "playlist_context_url"],
+      ["youtube_v0", "playlist_url"],
       ["publication", "playlist_context_url"],
-    ]) ||
-    youtubePlaylistContextUrl(videoId, trimToNull(input.playlistId) || firstStringFromRecords([refs], [["playlist_id"], ["playlistId"], ["playlist", "id"]]));
+      ["publication", "playlist_url"],
+    ], { allowPlaylistOnly: true }) ||
+    resolveYouTubePlaylistContextUrl(videoId, youtubeUrl) ||
+    resolveYouTubePlaylistContextUrl(videoId, trimToNull(input.playlistId) || firstStringFromRecords([refs], [["playlist_id"], ["playlistId"], ["playlist", "id"]]), { allowRawPlaylistId: true });
+  requireCommunityPlaylistContextUrl(videoId, playlistContextUrl);
   const targetEmailSendAt = input.targetEmailSendAt ? normalizeIsoDate(input.targetEmailSendAt, "target_email_send_at") : addMilliseconds(publishAt, 3 * 60 * 60 * 1000);
   const emailTrackingRef = trimToNull(input.emailTrackingRef) || `email-youtube-${videoId}`;
   const optionalDiagnosticCta = trimToNull(input.optionalDiagnosticCta) || firstStringFromRecords([refs], [["optional_diagnostic_cta"], ["diagnostic_cta"]]);

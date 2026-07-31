@@ -9,6 +9,7 @@ import {
   type YouTubeGateKey,
   type YouTubeGateStatus,
 } from "@/lib/youtube-pipeline";
+import { validateCommunityLaunchDraftOutput } from "@/lib/youtube-launch-package";
 import { verifyRepositoryCommit } from "@/lib/work-items/git-artifact";
 
 export type JsonRecord = Record<string, unknown>;
@@ -990,20 +991,40 @@ export async function orchestrateWorkItemCompletion(
     if (draftActions.has(action)) {
       const copyText = extractCommunityCopy(body);
       const copyMetadata = asRecord(metadata.copy);
-      await updatePipelineItem(client, pipelineItemId, copyText ? "ready_for_review" : "draft", {
+      const launchPackage = asRecord(metadata.launch_package);
+      const source = asRecord(metadata.source);
+      const isVideoLaunch = readString(metadata.kind) === "video_launch_announcement";
+      const launchValidation = copyText && isVideoLaunch
+        ? validateCommunityLaunchDraftOutput({
+            finalCopy: copyText,
+            status: "ready_for_review",
+            videoId: readString(launchPackage.video_id) || readString(source.video_id),
+            playlistContextUrl: readString(launchPackage.playlist_context_url) || readString(source.playlist_context_url),
+            watchUrl: readString(launchPackage.youtube_url) || readString(source.video_url) || readString(source.url),
+            suppressLinkPreviews: launchPackage.suppress_link_previews === false ? false : null,
+          })
+        : { ok: true, errors: [] as string[] };
+      const readyForReview = Boolean(copyText) && launchValidation.ok;
+      const reviewNotes = !copyText
+        ? "Community work item completed without announcement copy. Needs a clean re-draft before review."
+        : !launchValidation.ok
+          ? launchValidation.errors.join(" ")
+          : null;
+      await updatePipelineItem(client, pipelineItemId, readyForReview ? "ready_for_review" : "draft", {
         ...metadata,
         copy: { ...copyMetadata, text: copyText || copyMetadata.text || "" },
-        ...(!copyText ? {
+        ...(reviewNotes ? {
           review: {
             ...asRecord(metadata.review),
-            notes: "Community work item completed without announcement copy. Needs a clean re-draft before review.",
+            notes: reviewNotes,
+            validation_errors: launchValidation.errors,
             last_requested_at: now,
             last_requested_by: "system",
           },
         } : {}),
         runtime_feedback: {
           ...asRecord(metadata.runtime_feedback),
-          last_status: copyText ? "copy_saved" : "completed_without_copy",
+          last_status: readyForReview ? "copy_saved" : copyText ? "launch_validation_failed" : "completed_without_copy",
           last_work_item_id: updated.id,
           updated_at: now,
         },

@@ -190,11 +190,11 @@ export async function resolveCommunityPublicationSlot(
     now?: Date;
   } = {}
 ): Promise<PublicationSlotResult | null> {
-  const segment = getCommunityPublicationSegment(input.metadata);
-  if (segment === "content_launch") return null;
-
   if (input.explicitScheduledFor) return { scheduledFor: input.explicitScheduledFor, source: "explicit" };
   if (input.existingScheduledFor) return { scheduledFor: input.existingScheduledFor, source: "existing" };
+
+  const segment = getCommunityPublicationSegment(input.metadata);
+  if (segment === "content_launch") return null;
 
   const now = input.now || new Date();
   const horizon = new Date(now);

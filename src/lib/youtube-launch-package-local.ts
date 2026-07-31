@@ -4,6 +4,9 @@ import { withTransaction } from "@/lib/db/postgres";
 import {
   buildScheduledYouTubeLaunchWorkSpecs,
   extractYouTubeVideoId,
+  firstPlaylistContextUrlFromRecords,
+  requireCommunityPlaylistContextUrl,
+  resolveYouTubePlaylistContextUrl,
   youtubeWatchUrl,
   type JsonRecord,
   type ScheduledYouTubeLaunchWorkSpec,
@@ -84,10 +87,6 @@ function firstStringFromRecords(records: JsonRecord[], paths: string[][]) {
     }
   }
   return null;
-}
-
-function youtubePlaylistContextUrl(videoId: string, playlistId: string | null) {
-  return playlistId ? `${youtubeWatchUrl(videoId)}&list=${playlistId}` : null;
 }
 
 function pipelineItem(row: unknown) {
@@ -282,7 +281,7 @@ async function ensureCommunityPipelineItem(client: PoolClient, input: {
       requires_gonza_approval: true,
       validation_requirements: {
         ready_for_review_status_required: true,
-        playlist_context_url_required_when_present: true,
+        playlist_context_url_required: true,
         raw_unwrapped_youtube_url_required: true,
         fail_if_final_copy_ends_with_bare_watch_url_when_playlist_exists: true,
       },
@@ -651,8 +650,8 @@ export async function createScheduledYouTubeLaunchPackageLocal(input: YouTubeLau
     const existingVideoContext = await findExistingVideoItem(client, videoId, youtubeUrl);
     const existingVideoMetadata = toRecord(existingVideoContext?.metadata);
     const playlistContextUrl =
-      trimToNull(input.playlistContextUrl) ||
-      firstStringFromRecords([refs], [
+      resolveYouTubePlaylistContextUrl(videoId, input.playlistContextUrl, { allowPlaylistOnly: true }) ||
+      firstPlaylistContextUrlFromRecords(videoId, [refs], [
         ["playlist_context_url"],
         ["playlistContextUrl"],
         ["playlist_url"],
@@ -661,18 +660,20 @@ export async function createScheduledYouTubeLaunchPackageLocal(input: YouTubeLau
         ["playlist", "url"],
         ["source", "playlist_context_url"],
         ["source", "playlist_url"],
-      ]) ||
-      firstStringFromRecords([existingVideoMetadata], [
+      ], { allowPlaylistOnly: true }) ||
+      firstPlaylistContextUrlFromRecords(videoId, [existingVideoMetadata], [
         ["launch_package", "playlist_context_url"],
+        ["launch_package", "playlist_url"],
         ["source", "playlist_context_url"],
         ["source", "playlist_url"],
         ["youtube_v0", "playlist_context_url"],
+        ["youtube_v0", "playlist_url"],
         ["publication", "playlist_context_url"],
-      ]) ||
-      youtubePlaylistContextUrl(
-        videoId,
-        trimToNull(input.playlistId) || firstStringFromRecords([refs], [["playlist_id"], ["playlistId"], ["playlist", "id"]]),
-      );
+        ["publication", "playlist_url"],
+      ], { allowPlaylistOnly: true }) ||
+      resolveYouTubePlaylistContextUrl(videoId, youtubeUrl) ||
+      resolveYouTubePlaylistContextUrl(videoId, trimToNull(input.playlistId) || firstStringFromRecords([refs], [["playlist_id"], ["playlistId"], ["playlist", "id"]]), { allowRawPlaylistId: true });
+    requireCommunityPlaylistContextUrl(videoId, playlistContextUrl);
     const targetEmailSendAt = input.targetEmailSendAt
       ? normalizeIsoDate(input.targetEmailSendAt, "target_email_send_at")
       : addMilliseconds(publishAt, 3 * 60 * 60 * 1000);

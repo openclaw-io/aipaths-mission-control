@@ -16,9 +16,25 @@ export type PipelineWorkInput = {
   payloadRelationType?: string;
   scheduledFor?: string | null;
   payloadExtra?: Record<string, unknown>;
+  updateExisting?: boolean;
 };
 
 const OPEN_STATUSES = ["draft", "ready", "blocked", "in_progress"];
+
+function shouldPreserveBlockedLiveGate(item: { status?: string | null; payload?: Record<string, unknown> | null }) {
+  if (item.status !== "blocked") return false;
+  const payload = (item.payload || {}) as Record<string, unknown>;
+  return payload.requires_live_check_passed === true
+    || payload.dispatch_state === "blocked_live_gate"
+    || typeof payload.public_gate_applies_to === "string";
+}
+
+function updateExistingStatus(item: { status?: string | null; payload?: Record<string, unknown> | null }, scheduledFor?: string | null) {
+  if (scheduledFor) return "ready";
+  if (item.status === "in_progress") return "in_progress";
+  if (shouldPreserveBlockedLiveGate(item)) return "blocked";
+  return "ready";
+}
 
 export async function findOpenPipelineWorkItem(
   db: SupabaseClient,
@@ -27,7 +43,7 @@ export async function findOpenPipelineWorkItem(
 ) {
   const { data, error } = await db
     .from("work_items")
-    .select("id, status, source_type, owner_agent, target_agent_id, payload")
+    .select("id, title, instruction, status, source_type, owner_agent, target_agent_id, scheduled_for, payload")
     .in("source_type", ["pipeline_item", "service"])
     .eq("source_id", pipelineItemId)
     .in("status", OPEN_STATUSES)
@@ -41,12 +57,7 @@ export async function findOpenPipelineWorkItem(
 export async function createPipelineWorkItem(db: SupabaseClient, input: PipelineWorkInput) {
   const payloadRelationType = input.payloadRelationType || input.relationType;
   const mapRelationType = input.mapRelationType || input.relationType;
-  const existing = await findOpenPipelineWorkItem(db, input.pipelineItemId, payloadRelationType);
-  if (existing) {
-    return { workItem: existing, created: false };
-  }
-
-  const payload = {
+  const payload: Record<string, unknown> = {
     trigger: input.trigger,
     pipeline_type: input.pipelineType,
     pipeline_item_id: input.pipelineItemId,
@@ -56,6 +67,45 @@ export async function createPipelineWorkItem(db: SupabaseClient, input: Pipeline
     review_notes: input.reviewNotes,
     ...(input.payloadExtra || {}),
   };
+  const existing = await findOpenPipelineWorkItem(db, input.pipelineItemId, payloadRelationType);
+  if (existing) {
+    if (input.updateExisting) {
+      const nextStatus = updateExistingStatus(existing, input.scheduledFor);
+      const existingPayload = (existing.payload || {}) as Record<string, unknown>;
+      const nextPayload = { ...existingPayload, ...payload };
+      if (input.scheduledFor && existingPayload.dispatch_state === "blocked_live_gate") {
+        nextPayload.previous_dispatch_state = "blocked_live_gate";
+        nextPayload.dispatch_state = "ready_after_explicit_schedule";
+      }
+      const patch: Record<string, unknown> = {
+        title: input.title,
+        instruction: input.instruction,
+        status: nextStatus,
+        priority: input.priority || "medium",
+        owner_agent: input.ownerAgent,
+        target_agent_id: input.ownerAgent,
+        requested_by: input.requestedBy,
+        scheduled_for: input.scheduledFor || null,
+        updated_at: new Date().toISOString(),
+        payload: nextPayload,
+      };
+      if (nextStatus === "ready") {
+        patch.started_at = null;
+        patch.completed_at = null;
+      }
+
+      const { data: updated, error } = await db
+        .from("work_items")
+        .update(patch)
+        .eq("id", existing.id)
+        .select("id, title, status, source_type, owner_agent, target_agent_id, scheduled_for, payload")
+        .single();
+
+      if (error) throw error;
+      return { workItem: updated, created: false, updatedExisting: true };
+    }
+    return { workItem: existing, created: false };
+  }
 
   const { data: workItem, error } = await db
     .from("work_items")

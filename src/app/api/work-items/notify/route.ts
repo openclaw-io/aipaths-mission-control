@@ -488,6 +488,12 @@ ${failCommand}
       if (!current || !genericNotifyIdentityMatches(schedulerClassificationIdentity, current)) {
         return { error: "generic_notify_classification_identity_changed" as const };
       }
+      if (current.status !== "ready") {
+        return { error: "generic_notify_status_not_ready" as const };
+      }
+      if ((current.payload as Record<string, unknown> | null)?.dispatch_state === "blocked_live_gate") {
+        return { error: "generic_notify_live_gate_blocked" as const };
+      }
       if (isVisualQaLikeWorkItem(current)) {
         return { error: "generic_notify_visual_qa_rejected" as const };
       }

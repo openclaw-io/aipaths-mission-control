@@ -83,7 +83,7 @@ const findings = [
     dedupe_key: "repo-hygiene:notion-dispatcher:ahead-11-new-workers:2026-04-29",
     proposed_action: "Review and push/commit dispatcher worker changes after safety check.",
     approval_prompt: "notion-dispatcher is ahead by 11 and has new workers. Approve to queue Systems review before pushing runtime worker changes.",
-    instruction: "Review /Users/joaco/openclaw/infra/notion-dispatcher. It was reported ahead 11 plus new workers. Inspect local commits and dirty files, verify runtime safety, commit/push safe batches, and report blockers. Be careful with scheduler/worker behavior.",
+    instruction: "Review /Users/joaco/openclaw/infra/aipaths-runtime-workers. It was reported ahead 11 plus new workers. Inspect local commits and dirty files, verify runtime safety, commit/push safe batches, and report blockers. Be careful with scheduler/worker behavior.",
   },
   {
     title: "Review academy changes — email/types + migration 104 + content submodule",
