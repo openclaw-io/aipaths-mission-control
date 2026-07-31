@@ -2309,6 +2309,61 @@ BEGIN
 END $body$;
 CREATE TRIGGER qa_executions_terminal_immutable BEFORE UPDATE OR DELETE ON public.qa_executions FOR EACH ROW EXECUTE FUNCTION public.reject_terminal_loop_quality_mutation();
 
+-- -----------------------------------------------------------------------------
+-- Canonical YouTube playlist catalog (read-only application surface)
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.youtube_playlists (
+  playlist_id text PRIMARY KEY,
+  canonical_slug text NOT NULL UNIQUE,
+  title text NOT NULL,
+  description text,
+  url text NOT NULL,
+  kind text NOT NULL,
+  purpose text,
+  audience text,
+  status text NOT NULL DEFAULT 'draft',
+  featured boolean NOT NULL DEFAULT false,
+  home_order integer,
+  aliases text[] NOT NULL DEFAULT '{}'::text[],
+  use_cases text[] NOT NULL DEFAULT '{}'::text[],
+  tags text[] NOT NULL DEFAULT '{}'::text[],
+  source text NOT NULL DEFAULT 'manual',
+  source_metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+  live_metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+  source_observed_at timestamptz,
+  last_synced_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT youtube_playlists_id_check CHECK (playlist_id ~ '^[A-Za-z0-9_-]+$'),
+  CONSTRAINT youtube_playlists_slug_check CHECK (canonical_slug ~ '^[a-z0-9]+(?:-[a-z0-9]+)*$'),
+  CONSTRAINT youtube_playlists_kind_check CHECK (kind IN ('hub','official_series','archive','shorts')),
+  CONSTRAINT youtube_playlists_status_check CHECK (status IN ('active','archived','draft')),
+  CONSTRAINT youtube_playlists_home_order_check CHECK (home_order IS NULL OR home_order > 0),
+  CONSTRAINT youtube_playlists_feature_order_check CHECK (NOT featured OR home_order IS NOT NULL),
+  CONSTRAINT youtube_playlists_metadata_check CHECK (jsonb_typeof(source_metadata)='object' AND jsonb_typeof(live_metadata)='object')
+);
+CREATE TABLE IF NOT EXISTS public.youtube_playlist_videos (
+  playlist_id text NOT NULL REFERENCES public.youtube_playlists(playlist_id) ON DELETE CASCADE,
+  video_id text NOT NULL,
+  title text,
+  position integer NOT NULL,
+  membership_reason text,
+  membership_role text,
+  source_metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (playlist_id, video_id),
+  CONSTRAINT youtube_playlist_videos_id_check CHECK (video_id ~ '^[A-Za-z0-9_-]+$'),
+  CONSTRAINT youtube_playlist_videos_position_check CHECK (position > 0),
+  CONSTRAINT youtube_playlist_videos_metadata_check CHECK (jsonb_typeof(source_metadata)='object')
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_youtube_playlist_videos_position ON public.youtube_playlist_videos(playlist_id, position);
+CREATE INDEX IF NOT EXISTS idx_youtube_playlists_status_home ON public.youtube_playlists(status, featured DESC, home_order, canonical_slug);
+CREATE INDEX IF NOT EXISTS idx_youtube_playlists_use_cases ON public.youtube_playlists USING gin(use_cases);
+CREATE INDEX IF NOT EXISTS idx_youtube_playlists_tags ON public.youtube_playlists USING gin(tags);
+CREATE INDEX IF NOT EXISTS idx_youtube_playlists_aliases ON public.youtube_playlists USING gin(aliases);
+CREATE INDEX IF NOT EXISTS idx_youtube_playlist_videos_order ON public.youtube_playlist_videos(playlist_id, position, video_id);
+
 -- Ordinary application SQL keeps existing Mission Control behavior but cannot
 -- read key material or write/re-key/truncate QA authority rows. QA mutations are
 -- exposed only through the exact entry points above.

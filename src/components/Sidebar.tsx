@@ -12,7 +12,8 @@ const NAV_ITEMS = [
   { href: "/suggestions", label: "Suggestions", emoji: "💡" },
   { href: "/email-campaigns", label: "Email Campaigns", emoji: "📧" },
   { href: "/blogs", label: "Blogs", emoji: "✍️" },
-  { href: "/youtube", label: "YouTube", emoji: "🎬" },
+  { href: "/youtube", label: "YouTube Board", emoji: "🎬" },
+  { href: "/youtube/playlists", label: "YouTube Playlists", emoji: "📺" },
   { href: "/statistics", label: "Statistics", emoji: "📈" },
   { href: "/guides", label: "Guías", emoji: "📚" },
   { href: "/community", label: "Community", emoji: "🏘️" },
@@ -47,8 +48,11 @@ export default function Sidebar({ authEnabled }: { authEnabled: boolean }) {
       {/* Navigation */}
       <nav className="flex-1 space-y-1 px-3 py-4">
         {NAV_ITEMS.map(({ href, label, emoji }) => {
-          const isActive =
-            href === "/" ? pathname === "/" : pathname.startsWith(href);
+          const isActive = href === "/"
+            ? pathname === "/"
+            : href === "/youtube"
+              ? pathname === href
+              : pathname.startsWith(href);
 
           return (
             <Link
