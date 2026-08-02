@@ -72,6 +72,18 @@ type WorkItemRow = {
 
 const GENERIC_NOTIFY_LEASE_VERSION = "generic_notify_lease_v1" as const;
 const GENERIC_NOTIFY_IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
+const IMPLEMENTATION_UUID_SOURCE = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}";
+const IMPLEMENTATION_UUID_PATTERN = new RegExp(`^${IMPLEMENTATION_UUID_SOURCE}$`);
+const IMPLEMENTATION_SCHEDULER_SESSION_PATTERN = new RegExp(`^${IMPLEMENTATION_UUID_SOURCE}:attempt-([1-9][0-9]*):${IMPLEMENTATION_UUID_SOURCE}$`);
+
+function isTrustedImplementationDispatchSessionId(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > 128) return false;
+  if (IMPLEMENTATION_UUID_PATTERN.test(value)) return true;
+  const schedulerIdentity = IMPLEMENTATION_SCHEDULER_SESSION_PATTERN.exec(value);
+  if (!schedulerIdentity) return false;
+  const attempt = Number(schedulerIdentity[1]);
+  return Number.isSafeInteger(attempt) && attempt > 0;
+}
 
 type GenericNotifyLease = {
   version: typeof GENERIC_NOTIFY_LEASE_VERSION;
@@ -577,6 +589,13 @@ ${failCommand}
       const current = currentResult.rows[0];
       if (!current) return { error: "generic_notify_classification_identity_changed" as const };
 
+      // Dedicated QA/reviewer rows are never valid generic work, including
+      // replay attempts carrying a pre-existing generic lease.
+      if (isVisualQaLikeWorkItem(current)) return { error: "generic_notify_visual_qa_rejected" as const };
+      if (current.payload?.runtime_contract === "fresh_review_v1" && current.payload?.run_role === "review") {
+        return { error: "generic_notify_fresh_review_rejected" as const };
+      }
+
       const existingLease = parseGenericNotifyLease(current.payload);
       if (existingLease === "invalid") return { error: "generic_notify_lease_invalid" as const };
       const nowMs = Date.now();
@@ -597,10 +616,6 @@ ${failCommand}
       if (current.status !== "ready") return { error: "generic_notify_status_not_ready" as const };
       if ((current.payload as Record<string, unknown> | null)?.dispatch_state === "blocked_live_gate") {
         return { error: "generic_notify_live_gate_blocked" as const };
-      }
-      if (isVisualQaLikeWorkItem(current)) return { error: "generic_notify_visual_qa_rejected" as const };
-      if (current.payload?.runtime_contract === "fresh_review_v1" && current.payload?.run_role === "review") {
-        return { error: "generic_notify_fresh_review_rejected" as const };
       }
       if (agent !== current.owner_agent && agent !== current.target_agent_id) {
         return { error: "notify_agent_identity_mismatch" as const };
@@ -624,7 +639,7 @@ ${failCommand}
       // concurrent same-key requests observe and preserve one trusted UUID.
       if (payload.runtime_contract === "fresh_review_v1"
           && payload.run_role === "implementation"
-          && typeof payload.dispatch_session_id !== "string") {
+          && !isTrustedImplementationDispatchSessionId(payload.dispatch_session_id)) {
         payload.dispatch_session_id = randomUUID();
       }
       payload.generic_notify_lease = lease;

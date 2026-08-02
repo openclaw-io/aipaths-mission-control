@@ -413,6 +413,40 @@ test("generic fresh-review rejection occurs before dispatch-session assignment o
   assert.equal(harness.getSpawnCount(), 0);
 });
 
+test("generic fresh-review rejection cannot be bypassed by replaying a pre-existing lease", async () => {
+  const key = "generic-notify-review-replay-0001";
+  const freshReview = {
+    ...structuredClone(atomicReadyRow),
+    loop_id: "40000000-0000-4000-8000-000000000044",
+    source_type: "loop",
+    source_id: "50000000-0000-4000-8000-000000000054",
+    payload: {
+      runtime_contract: "fresh_review_v1",
+      run_role: "review",
+      source_loop_id: "40000000-0000-4000-8000-000000000044",
+      generic_notify_lease: {
+        version: "generic_notify_lease_v1",
+        key,
+        outcome: "accepted",
+        leased_at: "2026-08-04T13:29:59.000Z",
+        expires_at: "2026-08-04T13:30:59.000Z",
+        outcome_at: "2026-08-04T13:30:00.000Z",
+        mode: "hermes_cli_spawn",
+        session_key: "untrusted-review-session",
+        error: null,
+      },
+    },
+  };
+  const harness = createNotifyHarness({ initialRow: freshReview });
+  const before = harness.getRow();
+  const response = await harness.post(key);
+
+  assert.equal(response.status, 409);
+  assert.equal(response.payload.error, "generic_notify_fresh_review_rejected");
+  assert.deepEqual(harness.getRow(), before);
+  assert.equal(harness.getSpawnCount(), 0);
+});
+
 test("generic fresh-review implementation gets a server UUID accepted by completion and replay preserves it", async () => {
   const implementation = {
     ...structuredClone(atomicReadyRow),
@@ -464,4 +498,28 @@ test("generic fresh-review implementation preserves an existing trusted dispatch
   assert.equal(response.status, 200, JSON.stringify(response.payload));
   assert.equal(response.payload.dispatchSessionId, existingSessionId);
   assert.equal(harness.getRow().payload.dispatch_session_id, existingSessionId);
+});
+
+test("generic fresh-review implementation replaces an untrusted dispatch session with a server UUID", async () => {
+  const implementation = {
+    ...structuredClone(atomicReadyRow),
+    loop_id: "40000000-0000-4000-8000-000000000045",
+    source_type: "loop",
+    source_id: "50000000-0000-4000-8000-000000000055",
+    payload: {
+      runtime_contract: "fresh_review_v1",
+      run_role: "implementation",
+      source_loop_id: "40000000-0000-4000-8000-000000000045",
+      loop_task_id: "50000000-0000-4000-8000-000000000055",
+      dispatch_session_id: "caller-controlled-session",
+    },
+  };
+  const harness = createNotifyHarness({ initialRow: implementation });
+  const response = await harness.post("generic-notify-replace-session-0001");
+  const assigned = harness.getRow().payload.dispatch_session_id;
+
+  assert.equal(response.status, 200, JSON.stringify(response.payload));
+  assert.equal(assigned, "30000000-0000-4000-8000-000000000030");
+  assert.equal(harness.isTrustedImplementationDispatchSessionId(assigned), true);
+  assert.equal(response.payload.dispatchSessionId, assigned);
 });
