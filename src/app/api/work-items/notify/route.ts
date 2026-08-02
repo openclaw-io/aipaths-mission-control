@@ -70,6 +70,75 @@ type WorkItemRow = {
   payload: Record<string, unknown> | null;
 };
 
+const GENERIC_NOTIFY_LEASE_VERSION = "generic_notify_lease_v1" as const;
+const GENERIC_NOTIFY_IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
+
+type GenericNotifyLease = {
+  version: typeof GENERIC_NOTIFY_LEASE_VERSION;
+  key: string;
+  outcome: "leased" | "accepted" | "failed";
+  leased_at: string;
+  expires_at: string;
+  outcome_at: string | null;
+  mode: WakeAgentResult["mode"] | null;
+  session_key: string | null;
+  error: string | null;
+};
+
+function genericNotifyLeaseMs() {
+  const configured = Number(process.env.GENERIC_NOTIFY_LEASE_MS || 60000);
+  return Number.isSafeInteger(configured) && configured >= 1000 && configured <= 3600000
+    ? configured
+    : 60000;
+}
+
+function parseGenericNotifyLease(payload: Record<string, unknown> | null): GenericNotifyLease | null | "invalid" {
+  const value = payload?.generic_notify_lease;
+  if (value === undefined) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "invalid";
+  const lease = value as Record<string, unknown>;
+  const outcome = String(lease.outcome);
+  const outcomeAtValid = lease.outcome_at === null
+    || (typeof lease.outcome_at === "string" && Number.isFinite(Date.parse(lease.outcome_at)));
+  const modeValid = lease.mode === null || lease.mode === "hermes_cli_spawn" || lease.mode === "hermes_cli_health";
+  const sessionKeyValid = lease.session_key === null
+    || (typeof lease.session_key === "string" && lease.session_key.length <= 512);
+  const errorValid = lease.error === null || (typeof lease.error === "string" && lease.error.length <= 500);
+  if (lease.version !== GENERIC_NOTIFY_LEASE_VERSION
+      || typeof lease.key !== "string" || !GENERIC_NOTIFY_IDEMPOTENCY_KEY.test(lease.key)
+      || !["leased", "accepted", "failed"].includes(outcome)
+      || typeof lease.leased_at !== "string" || !Number.isFinite(Date.parse(lease.leased_at))
+      || typeof lease.expires_at !== "string" || !Number.isFinite(Date.parse(lease.expires_at))
+      || !outcomeAtValid || !modeValid || !sessionKeyValid || !errorValid
+      || (outcome === "leased" && (lease.outcome_at !== null || lease.mode !== null || lease.error !== null))
+      || (outcome === "accepted" && (lease.outcome_at === null || lease.mode === null || lease.error !== null))
+      || (outcome === "failed" && (lease.outcome_at === null || lease.mode === null || typeof lease.error !== "string"))) {
+    return "invalid";
+  }
+  return lease as GenericNotifyLease;
+}
+
+function genericNotifyReplayBody(item: WorkItemRow, agent: string, lease: GenericNotifyLease) {
+  const accepted = lease.outcome === "accepted";
+  const pending = lease.outcome === "leased";
+  return {
+    ok: accepted,
+    accepted,
+    pending,
+    agent,
+    woke: lease.outcome === "accepted",
+    workItemId: item.id,
+    wakeMode: lease.mode,
+    dispatchCronJobId: null,
+    dispatchCronRunId: null,
+    dispatchSessionId: typeof item.payload?.dispatch_session_id === "string" ? item.payload.dispatch_session_id : null,
+    dispatchSessionKey: lease.session_key,
+    idempotent: true,
+    outcome: lease.outcome,
+    error: lease.error,
+  };
+}
+
 function buildLoopContext(loop: LoopContextRow) {
   const parts: string[] = [];
 
@@ -83,6 +152,11 @@ function buildLoopContext(loop: LoopContextRow) {
 }
 
 function buildWorkItemSessionKey(agentId: string, workItemId: string, payload?: Record<string, unknown> | null) {
+  const genericNotifyLease = parseGenericNotifyLease(payload || null);
+  if (genericNotifyLease && genericNotifyLease !== "invalid") {
+    return `agent:${agentId}:mission-control:work-item:${workItemId}:notify:${genericNotifyLease.key}`;
+  }
+
   const dispatchSessionKey = typeof payload?.dispatch_session_key === "string" ? payload.dispatch_session_key : "";
   if (dispatchSessionKey) return dispatchSessionKey;
 
@@ -225,25 +299,45 @@ async function wakeAgentViaHermesCli(agentId: string, workItemId: string, messag
     "--yolo",
   ];
 
-  try {
-    const child = spawn(hermesBin(), args, {
-      cwd: process.cwd(),
-      detached: true,
-      stdio: "ignore",
-      env: baseCommandEnv({
-        HERMES_MISSION_CONTROL_WORK_ITEM_ID: workItemId,
-        HERMES_MISSION_CONTROL_AGENT_ID: agentId,
-        HERMES_MISSION_CONTROL_SESSION_KEY: sessionKey,
-      }),
-    });
-    child.unref();
-    console.log(`[notify-work-item] spawned Hermes CLI wake pid ${child.pid} for ${agentId} ${workItemId}`);
-    return { ok: true, mode: "hermes_cli_spawn", sessionKey };
-  } catch (err: unknown) {
-    const error = err instanceof Error ? err.message : String(err);
-    console.error(`[notify-work-item] failed to spawn Hermes CLI wake for ${agentId}:`, error);
-    return { ok: false, mode: "hermes_cli_spawn", sessionKey, error };
-  }
+  return new Promise((resolve) => {
+    try {
+      const child = spawn(hermesBin(), args, {
+        cwd: process.cwd(),
+        detached: true,
+        stdio: "ignore",
+        env: baseCommandEnv({
+          HERMES_MISSION_CONTROL_WORK_ITEM_ID: workItemId,
+          HERMES_MISSION_CONTROL_AGENT_ID: agentId,
+          HERMES_MISSION_CONTROL_SESSION_KEY: sessionKey,
+        }),
+      });
+
+      const onError = (err: Error) => {
+        child.removeListener("spawn", onSpawn);
+        console.error(`[notify-work-item] failed to spawn Hermes CLI wake for ${agentId}:`, err.message);
+        resolve({ ok: false, mode: "hermes_cli_spawn", sessionKey, error: err.message });
+      };
+      const onSpawn = () => {
+        child.removeListener("error", onError);
+        // Detached execution is accepted once the OS has spawned it; do not wait
+        // for the agent to finish. Keep a late error listener so no ChildProcess
+        // error can become an unhandled EventEmitter exception.
+        child.on("error", (err) => {
+          console.error(`[notify-work-item] Hermes CLI wake pid ${child.pid} later errored for ${agentId}:`, err.message);
+        });
+        child.unref();
+        console.log(`[notify-work-item] spawned Hermes CLI wake pid ${child.pid} for ${agentId} ${workItemId}`);
+        resolve({ ok: true, mode: "hermes_cli_spawn", sessionKey });
+      };
+
+      child.once("error", onError);
+      child.once("spawn", onSpawn);
+    } catch (err: unknown) {
+      const error = err instanceof Error ? err.message : String(err);
+      console.error(`[notify-work-item] failed to spawn Hermes CLI wake for ${agentId}:`, error);
+      resolve({ ok: false, mode: "hermes_cli_spawn", sessionKey, error });
+    }
+  });
 }
 
 async function wakeAgent(agentId: string, workItemId: string, message: string, workPayload?: Record<string, unknown> | null): Promise<WakeAgentResult> {
@@ -275,13 +369,17 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { workItemId, agent, action, caller, expectedClassificationIdentity } = await request.json();
+  const { workItemId, agent, action, caller, idempotencyKey, expectedClassificationIdentity } = await request.json();
   const isGenericSchedulerCall = caller === "generic_scheduler_v1";
   const schedulerClassificationIdentity = isGenericSchedulerCall
     ? parseGenericNotifyClassificationIdentity(expectedClassificationIdentity)
     : null;
   if (isGenericSchedulerCall && !schedulerClassificationIdentity) {
     return NextResponse.json({ error: "generic_notify_classification_identity_required" }, { status: 400 });
+  }
+  if (isGenericSchedulerCall
+      && (typeof idempotencyKey !== "string" || !GENERIC_NOTIFY_IDEMPOTENCY_KEY.test(idempotencyKey))) {
+    return NextResponse.json({ error: "generic_notify_idempotency_key_required" }, { status: 400 });
   }
 
   if (!isRoutedAgent(agent)) {
@@ -318,20 +416,21 @@ export async function POST(request: NextRequest) {
   if (!item) {
     return NextResponse.json({ error: "work_item not found" }, { status: 404 });
   }
-  if (isVisualQaLikeWorkItem(item)) {
+  if (!isGenericSchedulerCall && isVisualQaLikeWorkItem(item)) {
     return NextResponse.json({ error: "visual_qa_v1 requires dedicated QA claim" }, { status: 409 });
   }
-  if (item.payload?.runtime_contract === "fresh_review_v1" && item.payload?.run_role === "review") {
+  if (!isGenericSchedulerCall
+      && item.payload?.runtime_contract === "fresh_review_v1" && item.payload?.run_role === "review") {
     return NextResponse.json({ error: "fresh_review_v1 requires dedicated reviewer dispatch" }, { status: 409 });
   }
-  if (agent !== item.owner_agent && agent !== item.target_agent_id) {
+  if (!isGenericSchedulerCall && agent !== item.owner_agent && agent !== item.target_agent_id) {
     return NextResponse.json({ error: "notify_agent_identity_mismatch" }, { status: 409 });
   }
 
   // fresh_review_v1 session identity is server-owned. The detached agent never
   // supplies or chooses it; retries of the same immutable work item retain it.
   let workPayload = { ...(item.payload || {}) } as Record<string, unknown>;
-  if (useLocalMode && workPayload.runtime_contract === "fresh_review_v1"
+  if (!isGenericSchedulerCall && useLocalMode && workPayload.runtime_contract === "fresh_review_v1"
       && typeof workPayload.dispatch_session_id !== "string") {
     const dispatchSessionId = randomUUID();
     const assigned = await query<{ payload: Record<string, unknown> }>(
@@ -464,7 +563,10 @@ ${failCommand}
     if (!useLocalMode || !schedulerClassificationIdentity) {
       return NextResponse.json({ error: "generic_scheduler_notify_requires_local_atomic_guard" }, { status: 503 });
     }
-    const guarded = await withTransaction(async (client) => {
+
+    // Commit the lease before the external spawn. A retry can therefore replay
+    // the same logical attempt even when the first HTTP response is ambiguous.
+    const acquisition = await withTransaction(async (client) => {
       const currentResult = await client.query<WorkItemRow>(
         `select id,status,updated_at,source_type,source_id,owner_agent,target_agent_id,payload
            from public.work_items
@@ -473,56 +575,180 @@ ${failCommand}
         [item.id],
       );
       const current = currentResult.rows[0];
-      if (!current || !genericNotifyIdentityMatches(schedulerClassificationIdentity, current)) {
+      if (!current) return { error: "generic_notify_classification_identity_changed" as const };
+
+      const existingLease = parseGenericNotifyLease(current.payload);
+      if (existingLease === "invalid") return { error: "generic_notify_lease_invalid" as const };
+      const nowMs = Date.now();
+      if (existingLease && existingLease.key === idempotencyKey
+          && existingLease.outcome !== "leased") {
+        return { replay: existingLease, current };
+      }
+      if (existingLease && Date.parse(existingLease.expires_at) > nowMs) {
+        if (existingLease.key === idempotencyKey) return { replay: existingLease, current };
+        return { error: "generic_notify_lease_active" as const };
+      }
+
+      // Classification is intentionally checked against the pristine locked
+      // row before this endpoint writes its own lease into payload/updated_at.
+      if (!genericNotifyIdentityMatches(schedulerClassificationIdentity, current)) {
         return { error: "generic_notify_classification_identity_changed" as const };
       }
-      if (current.status !== "ready") {
-        return { error: "generic_notify_status_not_ready" as const };
-      }
+      if (current.status !== "ready") return { error: "generic_notify_status_not_ready" as const };
       if ((current.payload as Record<string, unknown> | null)?.dispatch_state === "blocked_live_gate") {
         return { error: "generic_notify_live_gate_blocked" as const };
       }
-      if (isVisualQaLikeWorkItem(current)) {
-        return { error: "generic_notify_visual_qa_rejected" as const };
+      if (isVisualQaLikeWorkItem(current)) return { error: "generic_notify_visual_qa_rejected" as const };
+      if (current.payload?.runtime_contract === "fresh_review_v1" && current.payload?.run_role === "review") {
+        return { error: "generic_notify_fresh_review_rejected" as const };
       }
       if (agent !== current.owner_agent && agent !== current.target_agent_id) {
         return { error: "notify_agent_identity_mismatch" as const };
       }
-      const guardedWake = await wakeAgent(routing.agentId, item.id, message, workPayload);
-      return { wake: guardedWake };
+
+      const leasedAt = new Date(nowMs).toISOString();
+      const lease: GenericNotifyLease = {
+        version: GENERIC_NOTIFY_LEASE_VERSION,
+        key: idempotencyKey,
+        outcome: "leased",
+        leased_at: leasedAt,
+        expires_at: new Date(nowMs + genericNotifyLeaseMs()).toISOString(),
+        outcome_at: null,
+        mode: null,
+        session_key: null,
+        error: null,
+      };
+      const payload: Record<string, unknown> = { ...(current.payload || {}) };
+      // fresh_review_v1 implementation completion requires a server-owned
+      // dispatch identity. Issue it under the same row lock as the lease so
+      // concurrent same-key requests observe and preserve one trusted UUID.
+      if (payload.runtime_contract === "fresh_review_v1"
+          && payload.run_role === "implementation"
+          && typeof payload.dispatch_session_id !== "string") {
+        payload.dispatch_session_id = randomUUID();
+      }
+      payload.generic_notify_lease = lease;
+      const updated = await client.query<WorkItemRow>(
+        `update public.work_items
+            set payload=$2::jsonb,updated_at=now()
+          where id=$1
+          returning id,status,updated_at,source_type,source_id,owner_agent,target_agent_id,payload`,
+        [current.id, JSON.stringify(payload)],
+      );
+      if (!updated.rows[0]) return { error: "generic_notify_lease_write_failed" as const };
+      return { acquired: true as const, current: updated.rows[0], payload };
     });
-    if ("error" in guarded) {
-      return NextResponse.json({ error: guarded.error }, { status: 409 });
+
+    if ("error" in acquisition) {
+      return NextResponse.json({ error: acquisition.error }, { status: 409 });
     }
-    wake = guarded.wake;
+    if ("replay" in acquisition && acquisition.replay) {
+      const replay = acquisition.replay as GenericNotifyLease;
+      const body = genericNotifyReplayBody({ ...item, payload: acquisition.current.payload }, agent, replay);
+      const status = replay.outcome === "failed" ? 503 : replay.outcome === "leased" ? 202 : 200;
+      return NextResponse.json(body, { status });
+    }
+    if (!("acquired" in acquisition) || !acquisition.acquired) {
+      return NextResponse.json({ error: "generic_notify_lease_acquire_failed" }, { status: 503 });
+    }
+
+    workPayload = acquisition.payload;
+    item.payload = workPayload;
+    wake = await wakeAgent(routing.agentId, item.id, message, workPayload);
+
+    const finalized = await withTransaction(async (client) => {
+      const locked = await client.query<WorkItemRow>(
+        `select id,status,updated_at,source_type,source_id,owner_agent,target_agent_id,payload
+           from public.work_items
+          where id=$1
+          for update`,
+        [item.id],
+      );
+      const current = locked.rows[0];
+      if (!current) return null;
+      const lease = parseGenericNotifyLease(current.payload);
+      if (!lease || lease === "invalid" || lease.key !== idempotencyKey || lease.outcome !== "leased") return null;
+
+      const outcomeAt = new Date().toISOString();
+      const finalizedLease: GenericNotifyLease = {
+        ...lease,
+        outcome: wake.ok ? "accepted" : "failed",
+        outcome_at: outcomeAt,
+        mode: wake.mode,
+        session_key: wake.sessionKey || null,
+        error: wake.ok ? null : (wake.error || "wake_failed").slice(0, 500),
+      };
+      const payload: Record<string, unknown> = {
+        ...(current.payload || {}),
+        generic_notify_lease: finalizedLease,
+      };
+      if (!wake.ok) {
+        const previousWakeFailures = Number(payload.wake_failure_count);
+        payload.wake_failure_count = Number.isSafeInteger(previousWakeFailures) && previousWakeFailures >= 0
+          ? previousWakeFailures + 1
+          : 1;
+        payload.dispatch_failure_reason = finalizedLease.error;
+        payload.dispatch_last_failed_at = outcomeAt;
+      }
+      const updated = await client.query<WorkItemRow>(
+        `update public.work_items
+            set payload=$2::jsonb,updated_at=now()
+          where id=$1
+          returning id,status,updated_at,source_type,source_id,owner_agent,target_agent_id,payload`,
+        [current.id, JSON.stringify(payload)],
+      );
+      return updated.rows[0] || null;
+    });
+
+    if (!finalized) {
+      return NextResponse.json({
+        ok: false,
+        agent,
+        woke: wake.ok,
+        workItemId: item.id,
+        wakeMode: wake.mode,
+        error: "generic_notify_lease_finalize_conflict",
+      }, { status: 503 });
+    }
+    workPayload = finalized.payload || workPayload;
+    item.payload = workPayload;
   } else {
     wake = await wakeAgent(routing.agentId, item.id, message, workPayload);
-  }
-  if (!wake.ok) {
-    let latestStatus: string | null = null;
-    if (useLocalMode) {
-      const { rows } = await query(`select status from public.work_items where id = $1 limit 1`, [item.id]);
-      latestStatus = typeof rows[0]?.status === "string" ? rows[0].status : null;
-    } else {
-      const { data: latestItem } = await (db as ReturnType<typeof createServiceClient>)
-        .from("work_items")
-        .select("status")
-        .eq("id", item.id)
-        .maybeSingle();
-      latestStatus = latestItem?.status || null;
-    }
+    if (!wake.ok) {
+      let latestStatus: string | null = null;
+      if (useLocalMode) {
+        const { rows } = await query(`select status from public.work_items where id = $1 limit 1`, [item.id]);
+        latestStatus = typeof rows[0]?.status === "string" ? rows[0].status : null;
+      } else {
+        const { data: latestItem } = await (db as ReturnType<typeof createServiceClient>)
+          .from("work_items")
+          .select("status")
+          .eq("id", item.id)
+          .maybeSingle();
+        latestStatus = latestItem?.status || null;
+      }
 
-    // Completion is the only safe success signal after a failed wake. An
-    // in_progress claim can also be a stale broken session, so let the scheduler
-    // surface it instead of hiding the failure as a successful dispatch.
-    if (latestStatus === "done") {
-      console.log(`[notify-work-item] ${agent} wake timed out, but work item is ${latestStatus}; treating as success`);
-      wake = { ...wake, ok: true };
+      if (latestStatus === "done") {
+        console.log(`[notify-work-item] ${agent} wake timed out, but work item is ${latestStatus}; treating as success`);
+        wake = { ...wake, ok: true };
+      }
     }
   }
 
   if (!wake.ok) {
-    return NextResponse.json({ ok: false, agent, woke: false, workItemId: item.id, wakeMode: wake.mode, error: wake.error || null }, { status: 503 });
+    return NextResponse.json({
+      ok: false,
+      accepted: false,
+      pending: false,
+      agent,
+      woke: false,
+      workItemId: item.id,
+      wakeMode: wake.mode,
+      dispatchSessionKey: wake.sessionKey || null,
+      idempotent: false,
+      outcome: isGenericSchedulerCall ? "failed" : undefined,
+      error: wake.error || null,
+    }, { status: 503 });
   }
 
   const webhookUrl = process.env.DISCORD_TASK_ROUTER_WEBHOOK;
@@ -543,6 +769,8 @@ ${failCommand}
 
   return NextResponse.json({
     ok: true,
+    accepted: true,
+    pending: false,
     agent,
     woke: wake.ok,
     workItemId: item.id,
@@ -551,5 +779,7 @@ ${failCommand}
     dispatchCronRunId: null,
     dispatchSessionId: typeof workPayload.dispatch_session_id === "string" ? workPayload.dispatch_session_id : null,
     dispatchSessionKey: wake.sessionKey || null,
+    idempotent: false,
+    outcome: isGenericSchedulerCall ? "accepted" : undefined,
   });
 }
