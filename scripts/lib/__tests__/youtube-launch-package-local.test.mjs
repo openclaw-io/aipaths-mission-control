@@ -326,7 +326,7 @@ test("governed reschedule fails closed on contradictory existing active launch m
   assert.equal(rows.pipeline.length, 1);
 });
 
-test("governed catalog row is revalidated and share-locked inside the transaction before mutations", async () => {
+test("governed catalog row is revalidated under the canonical import shared lock before mutations", async () => {
   const catalogCases = [
     { videoId: "GovMiss0001", playlistId: "PLGovernedMissing" },
     { videoId: "GovArch0001", playlistId: "PLGovernedArchived", status: "archived", kind: "hub" },
@@ -352,7 +352,20 @@ test("governed catalog row is revalidated and share-locked inside the transactio
   }
 
   const source = readFileSync(resolve(repoRoot, "src/lib/youtube-launch-package-local.ts"), "utf8");
-  assert.match(source, /from public\.youtube_playlists[\s\S]*playlist_id = \$1[\s\S]*status = 'active'[\s\S]*kind in \('hub', 'official_series'\)[\s\S]*for share/);
+  const importSource = readFileSync(resolve(repoRoot, "scripts/lib/youtube-playlist-import.mjs"), "utf8");
+  const lockFunction = source.slice(
+    source.indexOf("async function lockGovernedPlaylist"),
+    source.indexOf("function assertGovernedPlaylistInputs"),
+  );
+  const canonicalLockKey = "mission-control:youtube-playlist-import";
+  assert.match(importSource, new RegExp(`pg_advisory_xact_lock\\(hashtextextended\\('${canonicalLockKey}', 0\\)\\)`));
+  assert.match(lockFunction, new RegExp(`pg_advisory_xact_lock_shared\\(hashtextextended\\('${canonicalLockKey}', 0\\)\\)`));
+  assert.ok(
+    lockFunction.indexOf("pg_advisory_xact_lock_shared") < lockFunction.indexOf("from public.youtube_playlists"),
+    "the shared import lock must be acquired before reading and validating the governed row",
+  );
+  assert.doesNotMatch(lockFunction, /for\s+(share|update)/i);
+  assert.match(lockFunction, /from public\.youtube_playlists[\s\S]*playlist_id = \$1[\s\S]*status = 'active'[\s\S]*kind in \('hub', 'official_series'\)/);
   assert.ok(source.indexOf("lockGovernedPlaylist(client") < source.indexOf("findExistingVideoItem(client", source.indexOf("createScheduledYouTubeLaunchPackageLocal")));
 });
 

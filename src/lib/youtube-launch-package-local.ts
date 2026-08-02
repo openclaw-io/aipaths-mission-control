@@ -115,13 +115,17 @@ async function lockGovernedPlaylist(client: PoolClient, playlistId: string | nul
   if (!playlistId || !/^[a-zA-Z0-9_-]+$/.test(playlistId)) {
     throw new GovernedPlaylistValidationError("playlist_id is required for governed YouTube launches");
   }
+  // Serialize catalog validation against the canonical snapshot importer while
+  // preserving the application's SELECT-only privilege boundary on this table.
+  await client.query(
+    "select pg_advisory_xact_lock_shared(hashtextextended('mission-control:youtube-playlist-import', 0))",
+  );
   const result = await client.query(
     `select playlist_id
        from public.youtube_playlists
       where playlist_id = $1
         and status = 'active'
-        and kind in ('hub', 'official_series')
-      for share`,
+        and kind in ('hub', 'official_series')`,
     [playlistId],
   );
   if (result.rowCount !== 1) {
