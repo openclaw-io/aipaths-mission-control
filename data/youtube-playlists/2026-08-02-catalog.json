@@ -1,0 +1,533 @@
+{
+  "schema_version": 1,
+  "source": "youtube_oauth_snapshot_2026-08-02_owner_finalized",
+  "source_observed_at": "2026-08-02T13:03:54.734Z",
+  "playlists": [
+    {
+      "playlist_id": "PLLf3OT58Naa0",
+      "canonical_slug": "empeza-aca-sistemas-ia-negocio",
+      "title": "Empezá Acá: Sistemas de IA para tu Negocio",
+      "description": "Empezá por acá para pasar de usar herramientas de IA sueltas a construir sistemas simples que operan partes reales de tu negocio. Casos, decisiones y tutoriales para recuperar tiempo y aumentar tu capacidad.",
+      "url": "https://www.youtube.com/playlist?list=PLLf3OT58Naa0",
+      "kind": "hub",
+      "purpose": "Explicar la transformación completa del canal, no una herramienta.",
+      "audience": null,
+      "status": "active",
+      "featured": true,
+      "home_order": 1,
+      "aliases": [
+        "Automatizaciones para Empresas"
+      ],
+      "use_cases": [
+        "start-here",
+        "business-systems"
+      ],
+      "tags": [
+        "ai",
+        "business",
+        "systems"
+      ],
+      "source_metadata": {
+        "metadata_kind": "approved_editorial_intent",
+        "approved_editorial_source": {
+          "path": "data/youtube-playlists/sources/architecture-v2.md",
+          "sha256": "5bc2c3c0b4d1d856cb0b7a00dc0ed58a3dbd2b4d2ddf0fcbf1583048046db622"
+        },
+        "live_observation_source": {
+          "path": "data/youtube-playlists/sources/youtube-live-snapshot-2026-08-02.json",
+          "sha256": "773a65226fba4f0b36c615d97ebc489e71f7f0e706dd312e2add56e4a33e5e76"
+        },
+        "architecture_section": "Playlists principales de la home #1",
+        "editorial_state": "rename_existing",
+        "live_sync_state": "owner_finalized_live_2026-08-02"
+      },
+      "live_metadata": {
+        "metadata_kind": "observed_live_state",
+        "captured_at": "2026-08-02T13:03:54.734Z",
+        "channel_id": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "privacy_status": "public",
+        "observed_title": "Empezá Acá: Sistemas de IA para tu Negocio",
+        "observed_description": "Empezá por acá para pasar de usar herramientas de IA sueltas a construir sistemas simples que operan partes reales de tu negocio. Casos, decisiones y tutoriales para recuperar tiempo y aumentar tu capacidad.",
+        "item_count": 7
+      }
+    },
+    {
+      "playlist_id": "PLUHsg-px6xck",
+      "canonical_slug": "tutoriales-tecnicos-ia-negocios",
+      "title": "Tutoriales Técnicos de IA para Negocios",
+      "description": "Tutoriales técnicos y paso a paso para implementar agentes, automatizaciones, n8n, WhatsApp, Hermes, OpenClaw y Claude Code en operaciones reales de negocio.",
+      "url": "https://www.youtube.com/playlist?list=PLUHsg-px6xck",
+      "kind": "hub",
+      "purpose": "Capturar la intención de implementar IA paso a paso, sin importar la herramienta.",
+      "audience": null,
+      "status": "active",
+      "featured": true,
+      "home_order": 2,
+      "aliases": [
+        "Tutoriales Técnicos"
+      ],
+      "use_cases": [
+        "technical-tutorials",
+        "implementation"
+      ],
+      "tags": [
+        "tutorials",
+        "ai",
+        "business"
+      ],
+      "source_metadata": {
+        "metadata_kind": "approved_editorial_intent",
+        "approved_editorial_source": {
+          "path": "data/youtube-playlists/sources/architecture-v2.md",
+          "sha256": "5bc2c3c0b4d1d856cb0b7a00dc0ed58a3dbd2b4d2ddf0fcbf1583048046db622"
+        },
+        "live_observation_source": {
+          "path": "data/youtube-playlists/sources/youtube-live-snapshot-2026-08-02.json",
+          "sha256": "773a65226fba4f0b36c615d97ebc489e71f7f0e706dd312e2add56e4a33e5e76"
+        },
+        "architecture_section": "Playlists principales de la home #2",
+        "editorial_state": "created_and_owner_finalized"
+      },
+      "live_metadata": {
+        "metadata_kind": "observed_live_state",
+        "captured_at": "2026-08-02T13:03:54.734Z",
+        "channel_id": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "privacy_status": "public",
+        "observed_title": "Tutoriales Técnicos de IA para Negocios",
+        "observed_description": "Tutoriales técnicos y paso a paso para implementar agentes, automatizaciones, n8n, WhatsApp, Hermes, OpenClaw y Claude Code en operaciones reales de negocio.",
+        "item_count": 12
+      }
+    },
+    {
+      "playlist_id": "PLItELtCfBA39ig81F5j9wcMqclkhfdKaL",
+      "canonical_slug": "agentes-ia-negocios-hermes-openclaw",
+      "title": "Agentes de IA para Negocios | Hermes y OpenClaw",
+      "description": "Instalación, arquitectura, costos y casos reales de agentes de IA con Hermes Agent y OpenClaw para operar tareas de negocio.",
+      "url": "https://www.youtube.com/playlist?list=PLItELtCfBA39ig81F5j9wcMqclkhfdKaL",
+      "kind": "hub",
+      "purpose": "Agrupar arquitectura, instalación, costos y casos de agentes.",
+      "audience": null,
+      "status": "active",
+      "featured": true,
+      "home_order": 3,
+      "aliases": [
+        "Agentes de IA con OpenClaw",
+        "Agentes de IA para Negocios"
+      ],
+      "use_cases": [
+        "agent-architecture",
+        "agent-implementation"
+      ],
+      "tags": [
+        "agents",
+        "hermes",
+        "openclaw",
+        "business"
+      ],
+      "source_metadata": {
+        "metadata_kind": "approved_editorial_intent",
+        "approved_editorial_source": {
+          "path": "data/youtube-playlists/sources/architecture-v2.md",
+          "sha256": "5bc2c3c0b4d1d856cb0b7a00dc0ed58a3dbd2b4d2ddf0fcbf1583048046db622"
+        },
+        "live_observation_source": {
+          "path": "data/youtube-playlists/sources/youtube-live-snapshot-2026-08-02.json",
+          "sha256": "773a65226fba4f0b36c615d97ebc489e71f7f0e706dd312e2add56e4a33e5e76"
+        },
+        "architecture_section": "Playlists principales de la home #3",
+        "editorial_state": "rename_existing",
+        "live_sync_state": "owner_finalized_live_2026-08-02"
+      },
+      "live_metadata": {
+        "metadata_kind": "observed_live_state",
+        "captured_at": "2026-08-02T13:03:54.734Z",
+        "channel_id": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "privacy_status": "public",
+        "observed_title": "Agentes de IA para Negocios | Hermes y OpenClaw",
+        "observed_description": "Instalación, arquitectura, costos y casos reales de agentes de IA con Hermes Agent y OpenClaw para operar tareas de negocio.",
+        "item_count": 10
+      }
+    },
+    {
+      "playlist_id": "PLItELtCfBA389ShH6qJOUkjZdRsbTQg44",
+      "canonical_slug": "whatsapp-ia-negocio",
+      "title": "Chatbot de WhatsApp con IA para tu Negocio",
+      "description": "Aprendé a usar WhatsApp, la API de Meta, n8n y agentes de IA para atención, ventas, turnos y operaciones reales de negocio.",
+      "url": "https://www.youtube.com/playlist?list=PLItELtCfBA389ShH6qJOUkjZdRsbTQg44",
+      "kind": "hub",
+      "purpose": "Organizar resultados de negocio y la entrada moderna al cluster más fuerte del canal.",
+      "audience": null,
+      "status": "active",
+      "featured": true,
+      "home_order": 4,
+      "aliases": [
+        "Chatbot Whatsapp",
+        "WhatsApp con IA para tu Negocio"
+      ],
+      "use_cases": [
+        "whatsapp-implementation",
+        "business-outcomes"
+      ],
+      "tags": [
+        "whatsapp",
+        "agents",
+        "business"
+      ],
+      "source_metadata": {
+        "metadata_kind": "approved_editorial_intent",
+        "approved_editorial_source": {
+          "path": "data/youtube-playlists/sources/architecture-v2.md",
+          "sha256": "5bc2c3c0b4d1d856cb0b7a00dc0ed58a3dbd2b4d2ddf0fcbf1583048046db622"
+        },
+        "live_observation_source": {
+          "path": "data/youtube-playlists/sources/youtube-live-snapshot-2026-08-02.json",
+          "sha256": "773a65226fba4f0b36c615d97ebc489e71f7f0e706dd312e2add56e4a33e5e76"
+        },
+        "architecture_section": "Playlists principales de la home #4",
+        "editorial_state": "rename_existing_keep_id",
+        "live_sync_state": "owner_finalized_live_2026-08-02"
+      },
+      "live_metadata": {
+        "metadata_kind": "observed_live_state",
+        "captured_at": "2026-08-02T13:03:54.734Z",
+        "channel_id": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "privacy_status": "public",
+        "observed_title": "Chatbot de WhatsApp con IA para tu Negocio",
+        "observed_description": "Aprendé a usar WhatsApp, la API de Meta, n8n y agentes de IA para atención, ventas, turnos y operaciones reales de negocio.",
+        "item_count": 22
+      }
+    },
+    {
+      "playlist_id": "PLItELtCfBA39I0m77IIZp8TR9KtwE1d5e",
+      "canonical_slug": "n8n-automatizar-negocio",
+      "title": "N8N para Automatizar tu Negocio",
+      "description": "Tutoriales y casos prácticos de n8n para automatizar procesos de negocio, conectar WhatsApp, usar datos y construir agentes de IA.",
+      "url": "https://www.youtube.com/playlist?list=PLItELtCfBA39I0m77IIZp8TR9KtwE1d5e",
+      "kind": "hub",
+      "purpose": null,
+      "audience": null,
+      "status": "active",
+      "featured": true,
+      "home_order": 5,
+      "aliases": [
+        "N8N Automatizaciones",
+        "n8n para Automatizar tu Negocio"
+      ],
+      "use_cases": [
+        "automation-implementation"
+      ],
+      "tags": [
+        "n8n",
+        "automation",
+        "business"
+      ],
+      "source_metadata": {
+        "metadata_kind": "approved_editorial_intent",
+        "approved_editorial_source": {
+          "path": "data/youtube-playlists/sources/architecture-v2.md",
+          "sha256": "5bc2c3c0b4d1d856cb0b7a00dc0ed58a3dbd2b4d2ddf0fcbf1583048046db622"
+        },
+        "live_observation_source": {
+          "path": "data/youtube-playlists/sources/youtube-live-snapshot-2026-08-02.json",
+          "sha256": "773a65226fba4f0b36c615d97ebc489e71f7f0e706dd312e2add56e4a33e5e76"
+        },
+        "architecture_section": "Playlists principales de la home #5",
+        "editorial_state": "rename_existing",
+        "live_sync_state": "owner_finalized_live_2026-08-02"
+      },
+      "live_metadata": {
+        "metadata_kind": "observed_live_state",
+        "captured_at": "2026-08-02T13:03:54.734Z",
+        "channel_id": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "privacy_status": "public",
+        "observed_title": "N8N para Automatizar tu Negocio",
+        "observed_description": "Tutoriales y casos prácticos de n8n para automatizar procesos de negocio, conectar WhatsApp, usar datos y construir agentes de IA.",
+        "item_count": 5
+      }
+    },
+    {
+      "playlist_id": "PLItELtCfBA39BbCy0gS8eO2OGn5xEO_cB",
+      "canonical_slug": "claude-code-emprendedores",
+      "title": "Claude Code para Emprendedores",
+      "description": "Usá Claude Code para crear webs, documentos, presupuestos y sistemas de trabajo con IA. Tutoriales, comparativas y casos reales para emprendedores.",
+      "url": "https://www.youtube.com/playlist?list=PLItELtCfBA39BbCy0gS8eO2OGn5xEO_cB",
+      "kind": "hub",
+      "purpose": null,
+      "audience": null,
+      "status": "active",
+      "featured": true,
+      "home_order": 6,
+      "aliases": [
+        "Claude Vibe Coding"
+      ],
+      "use_cases": [
+        "coding-productivity",
+        "implementation"
+      ],
+      "tags": [
+        "claude-code",
+        "coding",
+        "business"
+      ],
+      "source_metadata": {
+        "metadata_kind": "approved_editorial_intent",
+        "approved_editorial_source": {
+          "path": "data/youtube-playlists/sources/architecture-v2.md",
+          "sha256": "5bc2c3c0b4d1d856cb0b7a00dc0ed58a3dbd2b4d2ddf0fcbf1583048046db622"
+        },
+        "live_observation_source": {
+          "path": "data/youtube-playlists/sources/youtube-live-snapshot-2026-08-02.json",
+          "sha256": "773a65226fba4f0b36c615d97ebc489e71f7f0e706dd312e2add56e4a33e5e76"
+        },
+        "architecture_section": "Playlists principales de la home #6",
+        "editorial_state": "rename_existing",
+        "live_sync_state": "owner_finalized_live_2026-08-02"
+      },
+      "live_metadata": {
+        "metadata_kind": "observed_live_state",
+        "captured_at": "2026-08-02T13:03:54.734Z",
+        "channel_id": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "privacy_status": "public",
+        "observed_title": "Claude Code para Emprendedores",
+        "observed_description": "Usá Claude Code para crear webs, documentos, presupuestos y sistemas de trabajo con IA. Tutoriales, comparativas y casos reales para emprendedores.",
+        "item_count": 9
+      }
+    },
+    {
+      "playlist_id": "PLAgA2iMTqNrg",
+      "canonical_slug": "casos-reales-lecciones-ia",
+      "title": "Casos Reales y Lecciones Construyendo con IA",
+      "description": "Historias, decisiones y aprendizajes reales construyendo negocios, equipos, automatizaciones y agentes con IA. Lo que funcionó, lo que falló y por qué.",
+      "url": "https://www.youtube.com/playlist?list=PLAgA2iMTqNrg",
+      "kind": "hub",
+      "purpose": "Historia y autoridad para viewers que no buscan una herramienta concreta.",
+      "audience": null,
+      "status": "active",
+      "featured": true,
+      "home_order": 7,
+      "aliases": [
+        "Casos Reales"
+      ],
+      "use_cases": [
+        "case-studies",
+        "creator-journey"
+      ],
+      "tags": [
+        "case-studies",
+        "ai",
+        "business"
+      ],
+      "source_metadata": {
+        "metadata_kind": "approved_editorial_intent",
+        "approved_editorial_source": {
+          "path": "data/youtube-playlists/sources/architecture-v2.md",
+          "sha256": "5bc2c3c0b4d1d856cb0b7a00dc0ed58a3dbd2b4d2ddf0fcbf1583048046db622"
+        },
+        "live_observation_source": {
+          "path": "data/youtube-playlists/sources/youtube-live-snapshot-2026-08-02.json",
+          "sha256": "773a65226fba4f0b36c615d97ebc489e71f7f0e706dd312e2add56e4a33e5e76"
+        },
+        "architecture_section": "Playlists principales de la home #7",
+        "editorial_state": "created_and_owner_finalized"
+      },
+      "live_metadata": {
+        "metadata_kind": "observed_live_state",
+        "captured_at": "2026-08-02T13:03:54.734Z",
+        "channel_id": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "privacy_status": "public",
+        "observed_title": "Casos Reales y Lecciones Construyendo con IA",
+        "observed_description": "Historias, decisiones y aprendizajes reales construyendo negocios, equipos, automatizaciones y agentes con IA. Lo que funcionó, lo que falló y por qué.",
+        "item_count": 9
+      }
+    },
+    {
+      "playlist_id": "PLabAVfcno0tA",
+      "canonical_slug": "curso-n8n-desde-cero-negocios",
+      "title": "Curso n8n desde Cero para Negocios",
+      "description": "Recorrido técnico y ordenado para aprender n8n desde cero y construir automatizaciones, chatbots, agentes y conexiones con datos para tu negocio.",
+      "url": "https://www.youtube.com/playlist?list=PLabAVfcno0tA",
+      "kind": "official_series",
+      "purpose": "Ofrecer un recorrido técnico y ordenado para aprender n8n desde cero.",
+      "audience": null,
+      "status": "active",
+      "featured": false,
+      "home_order": null,
+      "aliases": [
+        "Curso n8n"
+      ],
+      "use_cases": [
+        "n8n-course",
+        "technical-course"
+      ],
+      "tags": [
+        "n8n",
+        "automation",
+        "course"
+      ],
+      "source_metadata": {
+        "metadata_kind": "approved_editorial_intent",
+        "approved_editorial_source": {
+          "path": "data/youtube-playlists/sources/architecture-v2.md",
+          "sha256": "5bc2c3c0b4d1d856cb0b7a00dc0ed58a3dbd2b4d2ddf0fcbf1583048046db622"
+        },
+        "live_observation_source": {
+          "path": "data/youtube-playlists/sources/youtube-live-snapshot-2026-08-02.json",
+          "sha256": "773a65226fba4f0b36c615d97ebc489e71f7f0e706dd312e2add56e4a33e5e76"
+        },
+        "architecture_section": "Series oficiales para crear #9",
+        "editorial_state": "created_and_owner_finalized"
+      },
+      "live_metadata": {
+        "metadata_kind": "observed_live_state",
+        "captured_at": "2026-08-02T13:03:54.734Z",
+        "channel_id": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "privacy_status": "public",
+        "observed_title": "Curso n8n desde Cero para Negocios",
+        "observed_description": "Recorrido técnico y ordenado para aprender n8n desde cero y construir automatizaciones, chatbots, agentes y conexiones con datos para tu negocio.",
+        "item_count": 5
+      }
+    },
+    {
+      "playlist_id": "PLNSAM5eg9dXA",
+      "canonical_slug": "curso-tecnico-whatsapp-api-chatbots",
+      "title": "Curso Técnico de WhatsApp API y Chatbots",
+      "description": "Curso técnico ordenado para crear, conectar y desplegar chatbots de WhatsApp usando la API de Meta, Node.js, Google Sheets e IA.",
+      "url": "https://www.youtube.com/playlist?list=PLNSAM5eg9dXA",
+      "kind": "official_series",
+      "purpose": "Ofrecer una secuencia técnica y lógica para implementar WhatsApp API y chatbots.",
+      "audience": null,
+      "status": "active",
+      "featured": false,
+      "home_order": null,
+      "aliases": [
+        "Curso WhatsApp",
+        "Curso Técnico de WhatsApp"
+      ],
+      "use_cases": [
+        "whatsapp-course",
+        "technical-course"
+      ],
+      "tags": [
+        "whatsapp",
+        "chatbots",
+        "course"
+      ],
+      "source_metadata": {
+        "metadata_kind": "approved_editorial_intent",
+        "approved_editorial_source": {
+          "path": "data/youtube-playlists/sources/architecture-v2.md",
+          "sha256": "5bc2c3c0b4d1d856cb0b7a00dc0ed58a3dbd2b4d2ddf0fcbf1583048046db622"
+        },
+        "live_observation_source": {
+          "path": "data/youtube-playlists/sources/youtube-live-snapshot-2026-08-02.json",
+          "sha256": "773a65226fba4f0b36c615d97ebc489e71f7f0e706dd312e2add56e4a33e5e76"
+        },
+        "architecture_section": "Series oficiales para crear #8",
+        "editorial_state": "created_and_owner_finalized"
+      },
+      "live_metadata": {
+        "metadata_kind": "observed_live_state",
+        "captured_at": "2026-08-02T13:03:54.734Z",
+        "channel_id": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "privacy_status": "public",
+        "observed_title": "Curso Técnico de WhatsApp API y Chatbots",
+        "observed_description": "Curso técnico ordenado para crear, conectar y desplegar chatbots de WhatsApp usando la API de Meta, Node.js, Google Sheets e IA.",
+        "item_count": 11
+      }
+    },
+    {
+      "playlist_id": "PLItELtCfBA3_K7Eh-OCAmbhDrlcTQ-32w",
+      "canonical_slug": "ia-local-llms-gpts",
+      "title": "IA Local, LLMs y GPTs",
+      "description": "Tutoriales técnicos sobre modelos locales, LLMs, GPTs, APIs y conexiones con datos. Biblioteca secundaria de contenido técnico de AIPaths.",
+      "url": "https://www.youtube.com/playlist?list=PLItELtCfBA3_K7Eh-OCAmbhDrlcTQ-32w",
+      "kind": "archive",
+      "purpose": "Mantener organizado el archivo sin presentarlo como una línea editorial prioritaria.",
+      "audience": null,
+      "status": "active",
+      "featured": false,
+      "home_order": null,
+      "aliases": [
+        "LLMs"
+      ],
+      "use_cases": [
+        "archive-reference"
+      ],
+      "tags": [
+        "local-ai",
+        "llms",
+        "gpts"
+      ],
+      "source_metadata": {
+        "metadata_kind": "approved_editorial_intent",
+        "approved_editorial_source": {
+          "path": "data/youtube-playlists/sources/architecture-v2.md",
+          "sha256": "5bc2c3c0b4d1d856cb0b7a00dc0ed58a3dbd2b4d2ddf0fcbf1583048046db622"
+        },
+        "live_observation_source": {
+          "path": "data/youtube-playlists/sources/youtube-live-snapshot-2026-08-02.json",
+          "sha256": "773a65226fba4f0b36c615d97ebc489e71f7f0e706dd312e2add56e4a33e5e76"
+        },
+        "architecture_section": "Playlists secundarias: IA Local, LLMs y GPTs",
+        "editorial_state": "rename_existing_off_home",
+        "live_sync_state": "owner_finalized_live_2026-08-02"
+      },
+      "live_metadata": {
+        "metadata_kind": "observed_live_state",
+        "captured_at": "2026-08-02T13:03:54.734Z",
+        "channel_id": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "privacy_status": "public",
+        "observed_title": "IA Local, LLMs y GPTs",
+        "observed_description": "Tutoriales técnicos sobre modelos locales, LLMs, GPTs, APIs y conexiones con datos. Biblioteca secundaria de contenido técnico de AIPaths.",
+        "item_count": 5
+      }
+    },
+    {
+      "playlist_id": "PLFUuhOj6V574",
+      "canonical_slug": "vender-chatbots-servicios-ia",
+      "title": "Vender Chatbots y Servicios de IA",
+      "description": "Casos y aprendizajes sobre vender, entregar y operar chatbots y servicios de IA para clientes.",
+      "url": "https://www.youtube.com/playlist?list=PLFUuhOj6V574",
+      "kind": "hub",
+      "purpose": "Preservar la demanda histórica sobre vender y entregar servicios de IA sin convertirla en la promesa central del canal.",
+      "audience": null,
+      "status": "active",
+      "featured": false,
+      "home_order": null,
+      "aliases": [
+        "Vender Chatbots"
+      ],
+      "use_cases": [
+        "service-sales",
+        "client-delivery"
+      ],
+      "tags": [
+        "sales",
+        "chatbots",
+        "services"
+      ],
+      "source_metadata": {
+        "metadata_kind": "approved_editorial_intent",
+        "approved_editorial_source": {
+          "path": "data/youtube-playlists/sources/architecture-v2.md",
+          "sha256": "5bc2c3c0b4d1d856cb0b7a00dc0ed58a3dbd2b4d2ddf0fcbf1583048046db622"
+        },
+        "live_observation_source": {
+          "path": "data/youtube-playlists/sources/youtube-live-snapshot-2026-08-02.json",
+          "sha256": "773a65226fba4f0b36c615d97ebc489e71f7f0e706dd312e2add56e4a33e5e76"
+        },
+        "architecture_section": "Playlists secundarias #10",
+        "editorial_state": "created_and_owner_finalized"
+      },
+      "live_metadata": {
+        "metadata_kind": "observed_live_state",
+        "captured_at": "2026-08-02T13:03:54.734Z",
+        "channel_id": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "privacy_status": "public",
+        "observed_title": "Vender Chatbots y Servicios de IA",
+        "observed_description": "Casos y aprendizajes sobre vender, entregar y operar chatbots y servicios de IA para clientes.",
+        "item_count": 6
+      }
+    }
+  ]
+}

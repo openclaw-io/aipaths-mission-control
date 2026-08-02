@@ -203,3 +203,37 @@ test("the audited 2026-07-31 seed excludes Shorts and replays only long-form pla
   assert.deepEqual(counts.rows[0], first);
   assert.equal((await pool.query("select count(*)::int count from youtube_playlists where playlist_id=any($1::text[]) and source='youtube_playlist_audit_2026-07-31'", [playlistIds])).rows[0].count, 6);
 });
+
+test("the owner-finalized 2026-08-02 snapshot converges to all public long-form playlists", async () => {
+  const sourcePath = "data/youtube-playlists/sources/youtube-live-snapshot-2026-08-02.json";
+  const sourceBytes = readFileSync(resolve(repoRoot, sourcePath));
+  const sourceHash = createHash("sha256").update(sourceBytes).digest("hex");
+  assert.equal(sourceHash, "773a65226fba4f0b36c615d97ebc489e71f7f0e706dd312e2add56e4a33e5e76");
+
+  const sourceSnapshot = JSON.parse(sourceBytes.toString("utf8"));
+  const liveIds = sourceSnapshot.playlists
+    .filter((playlist) => playlist.status?.privacyStatus === "public" && !playlist.snippet?.title?.toLowerCase().includes("shorts"))
+    .map((playlist) => playlist.id)
+    .sort();
+  const catalog = parseCatalogJson(readFileSync(resolve(repoRoot, "data/youtube-playlists/2026-08-02-catalog.json"), "utf8"));
+  const memberships = parseMembershipTsv(readFileSync(resolve(repoRoot, "data/youtube-playlists/2026-08-02-memberships.tsv"), "utf8"));
+
+  assert.deepEqual(catalog.playlists.map((playlist) => playlist.playlist_id).sort(), liveIds);
+  assert.equal(catalog.playlists.some((playlist) => playlist.kind === "shorts"), false);
+  assert.equal(catalog.source_observed_at, sourceSnapshot.capturedAt);
+  for (const playlist of catalog.playlists) {
+    assert.deepEqual(playlist.source_metadata.live_observation_source, { path: sourcePath, sha256: sourceHash });
+    assert.equal(playlist.live_metadata.captured_at, sourceSnapshot.capturedAt);
+    assert.equal(playlist.live_metadata.privacy_status, "public");
+  }
+
+  const first = await upsertPlaylistSnapshot(pool, { ...catalog, memberships });
+  const second = await upsertPlaylistSnapshot(pool, { ...catalog, memberships });
+  assert.deepEqual(first, { playlists: 11, memberships: 101 });
+  assert.deepEqual(second, first);
+  const playlistIds = catalog.playlists.map((playlist) => playlist.playlist_id);
+  const counts = await pool.query(`select
+    (select count(*)::int from youtube_playlists where playlist_id=any($1::text[])) playlists,
+    (select count(*)::int from youtube_playlist_videos where playlist_id=any($1::text[])) memberships`, [playlistIds]);
+  assert.deepEqual(counts.rows[0], first);
+});

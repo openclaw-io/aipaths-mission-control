@@ -1,0 +1,3284 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-08-02T13:03:54.734Z",
+  "channelId": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+  "playlists": [
+    {
+      "id": "PLFUuhOj6V574",
+      "snippet": {
+        "publishedAt": "2026-08-02T10:18:15.232008Z",
+        "channelId": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "title": "Vender Chatbots y Servicios de IA",
+        "description": "Casos y aprendizajes sobre vender, entregar y operar chatbots y servicios de IA para clientes.",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/YzZtrk_fkPA/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/YzZtrk_fkPA/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/YzZtrk_fkPA/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          },
+          "standard": {
+            "url": "https://i.ytimg.com/vi/YzZtrk_fkPA/sddefault.jpg",
+            "width": 640,
+            "height": 480
+          },
+          "maxres": {
+            "url": "https://i.ytimg.com/vi/YzZtrk_fkPA/maxresdefault.jpg",
+            "width": 1280,
+            "height": 720
+          }
+        },
+        "channelTitle": "AIPaths",
+        "defaultLanguage": "es-419",
+        "localized": {
+          "title": "Vender Chatbots y Servicios de IA",
+          "description": "Casos y aprendizajes sobre vender, entregar y operar chatbots y servicios de IA para clientes."
+        }
+      },
+      "status": {
+        "privacyStatus": "public"
+      },
+      "contentDetails": {
+        "itemCount": 6
+      },
+      "items": [
+        {
+          "playlistItemId": "UExGVXVoT2o2VjU3NC41NkI0NEY2RDEwNTU3Q0M2",
+          "videoId": "YzZtrk_fkPA",
+          "position": 0,
+          "title": "Olvidá los chatbots: esto es un agente real en WhatsApp que se automejora",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExGVXVoT2o2VjU3NC4yODlGNEE0NkRGMEEzMEQy",
+          "videoId": "W6mYWefVczM",
+          "position": 1,
+          "title": "Vendí 20+ Chatbots y Me Arrepentí",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExGVXVoT2o2VjU3NC4wMTcyMDhGQUE4NTIzM0Y5",
+          "videoId": "2nj6WLyGgbM",
+          "position": 2,
+          "title": "Guia para VENDER tu primer AI Chatbot para Whatsapp",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExGVXVoT2o2VjU3NC41MjE1MkI0OTQ2QzJGNzNG",
+          "videoId": "gvb2B-UjtCM",
+          "position": 3,
+          "title": "Metodo para vender Chatbots de Whatsapp en 2025",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExGVXVoT2o2VjU3NC4wOTA3OTZBNzVEMTUzOTMy",
+          "videoId": "vZyN-MYGiqU",
+          "position": 4,
+          "title": "5 Pasos para crear un CHATBOT AI de Wpp | Cliente REAL",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExGVXVoT2o2VjU3NC4xMkVGQjNCMUM1N0RFNEUx",
+          "videoId": "zy_4RTApiik",
+          "position": 5,
+          "title": "De Cero a Entrega: Chatbot para un Cliente",
+          "status": {
+            "privacyStatus": "public"
+          }
+        }
+      ]
+    },
+    {
+      "id": "PLabAVfcno0tA",
+      "snippet": {
+        "publishedAt": "2026-08-02T08:55:35.702553Z",
+        "channelId": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "title": "Curso n8n desde Cero para Negocios",
+        "description": "Recorrido técnico y ordenado para aprender n8n desde cero y construir automatizaciones, chatbots, agentes y conexiones con datos para tu negocio.",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/V_fF70x9o10/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/V_fF70x9o10/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/V_fF70x9o10/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          },
+          "standard": {
+            "url": "https://i.ytimg.com/vi/V_fF70x9o10/sddefault.jpg",
+            "width": 640,
+            "height": 480
+          },
+          "maxres": {
+            "url": "https://i.ytimg.com/vi/V_fF70x9o10/maxresdefault.jpg",
+            "width": 1280,
+            "height": 720
+          }
+        },
+        "channelTitle": "AIPaths",
+        "defaultLanguage": "es-419",
+        "localized": {
+          "title": "Curso n8n desde Cero para Negocios",
+          "description": "Recorrido técnico y ordenado para aprender n8n desde cero y construir automatizaciones, chatbots, agentes y conexiones con datos para tu negocio."
+        }
+      },
+      "status": {
+        "privacyStatus": "public"
+      },
+      "contentDetails": {
+        "itemCount": 5
+      },
+      "items": [
+        {
+          "playlistItemId": "UExhYkFWZmNubzB0QS41NkI0NEY2RDEwNTU3Q0M2",
+          "videoId": "V_fF70x9o10",
+          "position": 0,
+          "title": "n8n Tutorial para Principiantes: Automatiza GRATIS (Para 2026)",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExhYkFWZmNubzB0QS4yODlGNEE0NkRGMEEzMEQy",
+          "videoId": "2I6Y8R6jJoI",
+          "position": 1,
+          "title": "n8n + Gemini: Automatiza Noticias de IA Paso a Paso",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExhYkFWZmNubzB0QS4wOTA3OTZBNzVEMTUzOTMy",
+          "videoId": "YJbSWaf-pBE",
+          "position": 2,
+          "title": "RAG en n8n: Conecta tu Agente IA a tus Datos",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExhYkFWZmNubzB0QS4wMTcyMDhGQUE4NTIzM0Y5",
+          "videoId": "tG8GR7S80f8",
+          "position": 3,
+          "title": "Cómo Crear un Chatbot de WhatsApp con IA GRATIS (N8N Sin Programar)",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExhYkFWZmNubzB0QS41MjE1MkI0OTQ2QzJGNzNG",
+          "videoId": "kCNFRSv6CdQ",
+          "position": 4,
+          "title": "Chatbot de WhatsApp: agenda turnos automaticamente (n8n + Google Calendar)",
+          "status": {
+            "privacyStatus": "public"
+          }
+        }
+      ]
+    },
+    {
+      "id": "PLNSAM5eg9dXA",
+      "snippet": {
+        "publishedAt": "2026-08-02T08:55:25.821124Z",
+        "channelId": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "title": "Curso Técnico de WhatsApp API y Chatbots",
+        "description": "Curso técnico ordenado para crear, conectar y desplegar chatbots de WhatsApp usando la API de Meta, Node.js, Google Sheets e IA.",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/aS3oFnRWrQY/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/aS3oFnRWrQY/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/aS3oFnRWrQY/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          },
+          "standard": {
+            "url": "https://i.ytimg.com/vi/aS3oFnRWrQY/sddefault.jpg",
+            "width": 640,
+            "height": 480
+          },
+          "maxres": {
+            "url": "https://i.ytimg.com/vi/aS3oFnRWrQY/maxresdefault.jpg",
+            "width": 1280,
+            "height": 720
+          }
+        },
+        "channelTitle": "AIPaths",
+        "defaultLanguage": "es",
+        "localized": {
+          "title": "Curso Técnico de WhatsApp API y Chatbots",
+          "description": "Curso técnico ordenado para crear, conectar y desplegar chatbots de WhatsApp usando la API de Meta, Node.js, Google Sheets e IA."
+        }
+      },
+      "status": {
+        "privacyStatus": "public"
+      },
+      "contentDetails": {
+        "itemCount": 11
+      },
+      "items": [
+        {
+          "playlistItemId": "UExOU0FNNWVnOWRYQS41NkI0NEY2RDEwNTU3Q0M2",
+          "videoId": "aS3oFnRWrQY",
+          "position": 0,
+          "title": "Whatsapp Chatbot FACIL, GRATIS y RAPIDO",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExOU0FNNWVnOWRYQS4yODlGNEE0NkRGMEEzMEQy",
+          "videoId": "twia5bKW6eg",
+          "position": 1,
+          "title": "Whatsapp Chatbot Crash-Course | De 0 a 100 en 60 minutos",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExOU0FNNWVnOWRYQS4wMTcyMDhGQUE4NTIzM0Y5",
+          "videoId": "r5Q5M66pxaY",
+          "position": 2,
+          "title": "Crear un Chatbot de WhatsApp con la API de Meta | Tutorial Paso a Paso Usando NodeJS",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExOU0FNNWVnOWRYQS41MjE1MkI0OTQ2QzJGNzNG",
+          "videoId": "jL_u5LL7iz4",
+          "position": 3,
+          "title": "Aprende RÁPIDO a Usar la API de WhatsApp con IA en Node.js",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExOU0FNNWVnOWRYQS4wOTA3OTZBNzVEMTUzOTMy",
+          "videoId": "nQCfFvz9eXc",
+          "position": 4,
+          "title": "Crea tu propio Asistente de OpenAI en Whatsapp solo con NodeJS",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExOU0FNNWVnOWRYQS4xMkVGQjNCMUM1N0RFNEUx",
+          "videoId": "-dpfUCMnTPw",
+          "position": 5,
+          "title": "Agenda turnos por Whatsapp con Google Sheets | Curso Chatbot Whatsapp NodeJs",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExOU0FNNWVnOWRYQS41MzJCQjBCNDIyRkJDN0VD",
+          "videoId": "Mc0QC9b1aIM",
+          "position": 6,
+          "title": "Es posible vincular Google Sheets con Whatsapp?",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExOU0FNNWVnOWRYQS5DQUNERDQ2NkIzRUQxNTY1",
+          "videoId": "YGo28dFPYco",
+          "position": 7,
+          "title": "Como agregarle Botones y Listas a tu Chatbot de Whatsapp | Meta API",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExOU0FNNWVnOWRYQS45NDk1REZENzhEMzU5MDQz",
+          "videoId": "-2LAr8A-lQI",
+          "position": 8,
+          "title": "Agrega tu chatbot a un GRUPO de WHATSAPP con NodeJS",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExOU0FNNWVnOWRYQS5GNjNDRDREMDQxOThCMDQ2",
+          "videoId": "MOKygryvVxM",
+          "position": 9,
+          "title": "Whatsapp AI Bot en CLOUD 24/7 para tu negocio",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExOU0FNNWVnOWRYQS40NzZCMERDMjVEN0RFRThB",
+          "videoId": "zy_4RTApiik",
+          "position": 10,
+          "title": "De Cero a Entrega: Chatbot para un Cliente",
+          "status": {
+            "privacyStatus": "public"
+          }
+        }
+      ]
+    },
+    {
+      "id": "PLAgA2iMTqNrg",
+      "snippet": {
+        "publishedAt": "2026-08-02T08:55:20.311812Z",
+        "channelId": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "title": "Casos Reales y Lecciones Construyendo con IA",
+        "description": "Historias, decisiones y aprendizajes reales construyendo negocios, equipos, automatizaciones y agentes con IA. Lo que funcionó, lo que falló y por qué.",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/W6mYWefVczM/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/W6mYWefVczM/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/W6mYWefVczM/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          },
+          "standard": {
+            "url": "https://i.ytimg.com/vi/W6mYWefVczM/sddefault.jpg",
+            "width": 640,
+            "height": 480
+          },
+          "maxres": {
+            "url": "https://i.ytimg.com/vi/W6mYWefVczM/maxresdefault.jpg",
+            "width": 1280,
+            "height": 720
+          }
+        },
+        "channelTitle": "AIPaths",
+        "defaultLanguage": "es",
+        "localized": {
+          "title": "Casos Reales y Lecciones Construyendo con IA",
+          "description": "Historias, decisiones y aprendizajes reales construyendo negocios, equipos, automatizaciones y agentes con IA. Lo que funcionó, lo que falló y por qué."
+        }
+      },
+      "status": {
+        "privacyStatus": "public"
+      },
+      "contentDetails": {
+        "itemCount": 9
+      },
+      "items": [
+        {
+          "playlistItemId": "UExBZ0EyaU1UcU5yZy41NkI0NEY2RDEwNTU3Q0M2",
+          "videoId": "W6mYWefVczM",
+          "position": 0,
+          "title": "Vendí 20+ Chatbots y Me Arrepentí",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExBZ0EyaU1UcU5yZy4yODlGNEE0NkRGMEEzMEQy",
+          "videoId": "TOs7LzF5uRA",
+          "position": 1,
+          "title": "Metí 6 Agentes en una Mac Mini",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExBZ0EyaU1UcU5yZy4wMTcyMDhGQUE4NTIzM0Y5",
+          "videoId": "Dn1pJz5fq-w",
+          "position": 2,
+          "title": "Cómo construí un equipo usando IA",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExBZ0EyaU1UcU5yZy41MjE1MkI0OTQ2QzJGNzNG",
+          "videoId": "xQaS8wmT_HQ",
+          "position": 3,
+          "title": "Migré a Hermes y esto es lo que pasó con mis agentes de IA",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExBZ0EyaU1UcU5yZy4wOTA3OTZBNzVEMTUzOTMy",
+          "videoId": "pT9uo0STEa4",
+          "position": 4,
+          "title": "No Automatices Tu Negocio Todavía",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExBZ0EyaU1UcU5yZy4xMkVGQjNCMUM1N0RFNEUx",
+          "videoId": "DmbwPSJ6mgg",
+          "position": 5,
+          "title": "¿Vale la pena aprender a programar en 2026?",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExBZ0EyaU1UcU5yZy41MzJCQjBCNDIyRkJDN0VD",
+          "videoId": "414mY2UeH-I",
+          "position": 6,
+          "title": "Simulamos una Economía de Agentes IA",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExBZ0EyaU1UcU5yZy5DQUNERDQ2NkIzRUQxNTY1",
+          "videoId": "ElfXX43LeeM",
+          "position": 7,
+          "title": "¿El Vibe Coding es el FUTURO de los Developers?",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExBZ0EyaU1UcU5yZy45NDk1REZENzhEMzU5MDQz",
+          "videoId": "zy_4RTApiik",
+          "position": 8,
+          "title": "De Cero a Entrega: Chatbot para un Cliente",
+          "status": {
+            "privacyStatus": "public"
+          }
+        }
+      ]
+    },
+    {
+      "id": "PLUHsg-px6xck",
+      "snippet": {
+        "publishedAt": "2026-08-02T08:55:13.611178Z",
+        "channelId": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "title": "Tutoriales Técnicos de IA para Negocios",
+        "description": "Tutoriales técnicos y paso a paso para implementar agentes, automatizaciones, n8n, WhatsApp, Hermes, OpenClaw y Claude Code en operaciones reales de negocio.",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/eZnhDGHKFUw/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/eZnhDGHKFUw/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/eZnhDGHKFUw/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          },
+          "standard": {
+            "url": "https://i.ytimg.com/vi/eZnhDGHKFUw/sddefault.jpg",
+            "width": 640,
+            "height": 480
+          },
+          "maxres": {
+            "url": "https://i.ytimg.com/vi/eZnhDGHKFUw/maxresdefault.jpg",
+            "width": 1280,
+            "height": 720
+          }
+        },
+        "channelTitle": "AIPaths",
+        "defaultLanguage": "es",
+        "localized": {
+          "title": "Tutoriales Técnicos de IA para Negocios",
+          "description": "Tutoriales técnicos y paso a paso para implementar agentes, automatizaciones, n8n, WhatsApp, Hermes, OpenClaw y Claude Code en operaciones reales de negocio."
+        }
+      },
+      "status": {
+        "privacyStatus": "public"
+      },
+      "contentDetails": {
+        "itemCount": 12
+      },
+      "items": [
+        {
+          "playlistItemId": "UExVSHNnLXB4Nnhjay41NkI0NEY2RDEwNTU3Q0M2",
+          "videoId": "eZnhDGHKFUw",
+          "position": 0,
+          "title": "Hermes Agent Guía completa en español",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExVSHNnLXB4Nnhjay4yODlGNEE0NkRGMEEzMEQy",
+          "videoId": "Gy903dcxsL0",
+          "position": 1,
+          "title": "OpenClaw desde 0 | Todo lo que Necesitas",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExVSHNnLXB4Nnhjay4wMTcyMDhGQUE4NTIzM0Y5",
+          "videoId": "_35Bgr0akBU",
+          "position": 2,
+          "title": "OpenClaw: Tu Primer Agente Desde Cero",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExVSHNnLXB4Nnhjay41MjE1MkI0OTQ2QzJGNzNG",
+          "videoId": "V_fF70x9o10",
+          "position": 3,
+          "title": "n8n Tutorial para Principiantes: Automatiza GRATIS (Para 2026)",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExVSHNnLXB4Nnhjay4wOTA3OTZBNzVEMTUzOTMy",
+          "videoId": "tG8GR7S80f8",
+          "position": 4,
+          "title": "Cómo Crear un Chatbot de WhatsApp con IA GRATIS (N8N Sin Programar)",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExVSHNnLXB4Nnhjay4xMkVGQjNCMUM1N0RFNEUx",
+          "videoId": "lnHaENblJJA",
+          "position": 5,
+          "title": "API de WhatsApp en Meta: Todo lo que necesitas saber 2026",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExVSHNnLXB4Nnhjay41MzJCQjBCNDIyRkJDN0VD",
+          "videoId": "r5Q5M66pxaY",
+          "position": 6,
+          "title": "Crear un Chatbot de WhatsApp con la API de Meta | Tutorial Paso a Paso Usando NodeJS",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExVSHNnLXB4Nnhjay5DQUNERDQ2NkIzRUQxNTY1",
+          "videoId": "YJbSWaf-pBE",
+          "position": 7,
+          "title": "RAG en n8n: Conecta tu Agente IA a tus Datos",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExVSHNnLXB4Nnhjay45NDk1REZENzhEMzU5MDQz",
+          "videoId": "JbnSd6zm0es",
+          "position": 8,
+          "title": "Claude Code: 5 Trucos que Me Tomaron 6 Meses Aprender",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExVSHNnLXB4Nnhjay5GNjNDRDREMDQxOThCMDQ2",
+          "videoId": "o8vxxunfZc4",
+          "position": 9,
+          "title": "Context Engineering: Por Qué Prompt Engineering Ya No Alcanza",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExVSHNnLXB4Nnhjay40NzZCMERDMjVEN0RFRThB",
+          "videoId": "u_NOjT8MQIY",
+          "position": 10,
+          "title": "Cómo Usar Gemini, Claude y ChatGPT en tu Terminal (Guia Completa)",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExVSHNnLXB4Nnhjay5EMEEwRUY5M0RDRTU3NDJC",
+          "videoId": "Dn3Z39GZJEY",
+          "position": 11,
+          "title": "Como conectar Whatsapp con un LLM Local? LM Studio",
+          "status": {
+            "privacyStatus": "public"
+          }
+        }
+      ]
+    },
+    {
+      "id": "PLLf3OT58Naa0",
+      "snippet": {
+        "publishedAt": "2026-06-25T09:07:07.212164Z",
+        "channelId": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "title": "Empezá Acá: Sistemas de IA para tu Negocio",
+        "description": "Empezá por acá para pasar de usar herramientas de IA sueltas a construir sistemas simples que operan partes reales de tu negocio. Casos, decisiones y tutoriales para recuperar tiempo y aumentar tu capacidad.",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/Dn1pJz5fq-w/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/Dn1pJz5fq-w/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/Dn1pJz5fq-w/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          },
+          "standard": {
+            "url": "https://i.ytimg.com/vi/Dn1pJz5fq-w/sddefault.jpg",
+            "width": 640,
+            "height": 480
+          },
+          "maxres": {
+            "url": "https://i.ytimg.com/vi/Dn1pJz5fq-w/maxresdefault.jpg",
+            "width": 1280,
+            "height": 720
+          }
+        },
+        "channelTitle": "AIPaths",
+        "defaultLanguage": "es-419",
+        "localized": {
+          "title": "Empezá Acá: Sistemas de IA para tu Negocio",
+          "description": "Empezá por acá para pasar de usar herramientas de IA sueltas a construir sistemas simples que operan partes reales de tu negocio. Casos, decisiones y tutoriales para recuperar tiempo y aumentar tu capacidad."
+        }
+      },
+      "status": {
+        "privacyStatus": "public"
+      },
+      "contentDetails": {
+        "itemCount": 7
+      },
+      "items": [
+        {
+          "playlistItemId": "UExMZjNPVDU4TmFhMC4wMTcyMDhGQUE4NTIzM0Y5",
+          "videoId": "Dn1pJz5fq-w",
+          "position": 0,
+          "title": "Cómo construí un equipo usando IA",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExMZjNPVDU4TmFhMC41NkI0NEY2RDEwNTU3Q0M2",
+          "videoId": "pT9uo0STEa4",
+          "position": 1,
+          "title": "No Automatices Tu Negocio Todavía",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExMZjNPVDU4TmFhMC4yODlGNEE0NkRGMEEzMEQy",
+          "videoId": "KIOLeqdZGRc",
+          "position": 2,
+          "title": "Convertí una Tarea en un Sistema de IA",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExMZjNPVDU4TmFhMC5GNjNDRDREMDQxOThCMDQ2",
+          "videoId": "WzYn3Y6PP-4",
+          "position": 3,
+          "title": "¿Cuánto Cuesta Correr 8 Agentes de IA?",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExMZjNPVDU4TmFhMC45NDk1REZENzhEMzU5MDQz",
+          "videoId": "TOs7LzF5uRA",
+          "position": 4,
+          "title": "Metí 6 Agentes en una Mac Mini",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExMZjNPVDU4TmFhMC40NzZCMERDMjVEN0RFRThB",
+          "videoId": "T-sCYCl9dkw",
+          "position": 5,
+          "title": "Cómo Creo Cotizaciones para Clientes con AI (Método Completo)",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExMZjNPVDU4TmFhMC5EMEEwRUY5M0RDRTU3NDJC",
+          "videoId": "GKwOVZm5q_A",
+          "position": 6,
+          "title": "Crea tu página web gratis en 10 minutos: template + 3 prompts de IA",
+          "status": {
+            "privacyStatus": "public"
+          }
+        }
+      ]
+    },
+    {
+      "id": "PLItELtCfBA39ig81F5j9wcMqclkhfdKaL",
+      "snippet": {
+        "publishedAt": "2026-03-10T17:56:50.328227Z",
+        "channelId": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "title": "Agentes de IA para Negocios | Hermes y OpenClaw",
+        "description": "Instalación, arquitectura, costos y casos reales de agentes de IA con Hermes Agent y OpenClaw para operar tareas de negocio.",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/TOs7LzF5uRA/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/TOs7LzF5uRA/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/TOs7LzF5uRA/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          },
+          "standard": {
+            "url": "https://i.ytimg.com/vi/TOs7LzF5uRA/sddefault.jpg",
+            "width": 640,
+            "height": 480
+          },
+          "maxres": {
+            "url": "https://i.ytimg.com/vi/TOs7LzF5uRA/maxresdefault.jpg",
+            "width": 1280,
+            "height": 720
+          }
+        },
+        "channelTitle": "AIPaths",
+        "defaultLanguage": "es-419",
+        "localized": {
+          "title": "Agentes de IA para Negocios | Hermes y OpenClaw",
+          "description": "Instalación, arquitectura, costos y casos reales de agentes de IA con Hermes Agent y OpenClaw para operar tareas de negocio."
+        }
+      },
+      "status": {
+        "privacyStatus": "public"
+      },
+      "contentDetails": {
+        "itemCount": 10
+      },
+      "items": [
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWlnODFGNWo5d2NNcWNsa2hmZEthTC4wMTcyMDhGQUE4NTIzM0Y5",
+          "videoId": "TOs7LzF5uRA",
+          "position": 0,
+          "title": "Metí 6 Agentes en una Mac Mini",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWlnODFGNWo5d2NNcWNsa2hmZEthTC5GNjNDRDREMDQxOThCMDQ2",
+          "videoId": "eZnhDGHKFUw",
+          "position": 1,
+          "title": "Hermes Agent Guía completa en español",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWlnODFGNWo5d2NNcWNsa2hmZEthTC4xMkVGQjNCMUM1N0RFNEUx",
+          "videoId": "Gy903dcxsL0",
+          "position": 2,
+          "title": "OpenClaw desde 0 | Todo lo que Necesitas",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWlnODFGNWo5d2NNcWNsa2hmZEthTC5DQUNERDQ2NkIzRUQxNTY1",
+          "videoId": "xQaS8wmT_HQ",
+          "position": 3,
+          "title": "Migré a Hermes y esto es lo que pasó con mis agentes de IA",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWlnODFGNWo5d2NNcWNsa2hmZEthTC41MjE1MkI0OTQ2QzJGNzNG",
+          "videoId": "WzYn3Y6PP-4",
+          "position": 4,
+          "title": "¿Cuánto Cuesta Correr 8 Agentes de IA?",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWlnODFGNWo5d2NNcWNsa2hmZEthTC4yODlGNEE0NkRGMEEzMEQy",
+          "videoId": "_35Bgr0akBU",
+          "position": 5,
+          "title": "OpenClaw: Tu Primer Agente Desde Cero",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWlnODFGNWo5d2NNcWNsa2hmZEthTC45NDk1REZENzhEMzU5MDQz",
+          "videoId": "YzZtrk_fkPA",
+          "position": 6,
+          "title": "Olvidá los chatbots: esto es un agente real en WhatsApp que se automejora",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWlnODFGNWo5d2NNcWNsa2hmZEthTC41NkI0NEY2RDEwNTU3Q0M2",
+          "videoId": "5gHJVIR8UhY",
+          "position": 7,
+          "title": "Tu Agente de IA por $20/mes",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWlnODFGNWo5d2NNcWNsa2hmZEthTC4wOTA3OTZBNzVEMTUzOTMy",
+          "videoId": "C8EAEtinfJ8",
+          "position": 8,
+          "title": "Claude Code vs OpenClaw para crear agentes IA",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWlnODFGNWo5d2NNcWNsa2hmZEthTC41MzJCQjBCNDIyRkJDN0VD",
+          "videoId": "R665CPPKC7I",
+          "position": 9,
+          "title": "OpenClaw: El sistema que gestiona todo mi contenido",
+          "status": {
+            "privacyStatus": "public"
+          }
+        }
+      ]
+    },
+    {
+      "id": "PLItELtCfBA39eNY62y9AGxYt4JnPtroWB",
+      "snippet": {
+        "publishedAt": "2025-12-18T11:58:56.579258Z",
+        "channelId": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "title": "Shorts de Agentes y Claude Code",
+        "description": "Shorts sobre agentes de IA, Claude Code, terminal, contexto y herramientas prácticas para construir con IA.",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/fZIiOosoBCE/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/fZIiOosoBCE/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/fZIiOosoBCE/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          },
+          "standard": {
+            "url": "https://i.ytimg.com/vi/fZIiOosoBCE/sddefault.jpg",
+            "width": 640,
+            "height": 480
+          },
+          "maxres": {
+            "url": "https://i.ytimg.com/vi/fZIiOosoBCE/maxresdefault.jpg",
+            "width": 1280,
+            "height": 720
+          }
+        },
+        "channelTitle": "AIPaths",
+        "localized": {
+          "title": "Shorts de Agentes y Claude Code",
+          "description": "Shorts sobre agentes de IA, Claude Code, terminal, contexto y herramientas prácticas para construir con IA."
+        }
+      },
+      "status": {
+        "privacyStatus": "public"
+      },
+      "contentDetails": {
+        "itemCount": 51
+      },
+      "items": [
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi41RTNBREYwMkI5QzU3RkY2",
+          "videoId": "fZIiOosoBCE",
+          "position": 0,
+          "title": "Mi IA me hizo un PR a GitHub sola",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi40QzRDOEU0QUYwNUIxN0M1",
+          "videoId": "h9W5_UDgR40",
+          "position": 1,
+          "title": "Mis agentes trabajan mientras duermo",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi5ENjI1QUI0MDI5NEQzODFE",
+          "videoId": "D6Qf2mCQaIA",
+          "position": 2,
+          "title": "20 empleados en una Mac Mini",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi44QzVGQUU2QjE2NDgxM0M4",
+          "videoId": "0kf9dzuwuoY",
+          "position": 3,
+          "title": "La IA me ayudaba pero no me alcanzaba",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi44Mjc5REFBRUE2MTdFRDU0",
+          "videoId": "bN55YUqXatM",
+          "position": 4,
+          "title": "Creá un Agente de Claude en 5 minutos",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi5GNjNDRDREMDQxOThCMDQ2",
+          "videoId": "1gHbFOYYmCU",
+          "position": 5,
+          "title": "5 minutos y la cotización está lista (sin cortes)",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi45NzUwQkI1M0UxNThBMkU0",
+          "videoId": "Tl-HHV_g_Kg",
+          "position": 6,
+          "title": "📋 Así se ve el template que te regalo para crear tu landing con IA",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi41MzY4MzcwOUFFRUU3QzEx",
+          "videoId": "vnHu808ZbcU",
+          "position": 7,
+          "title": "Por qué guardo todo en Markdown (y vos también deberías)",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi5DQ0MyQ0Y4Mzg0M0VGOEYw",
+          "videoId": "adNoSivttn8",
+          "position": 8,
+          "title": "🔥 El SECRETO de Claude Code que lo hace MEJOR que Cursor",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi41Mzk2QTAxMTkzNDk4MDhF",
+          "videoId": "4dWNsvzxfVQ",
+          "position": 9,
+          "title": "10 temas de investigación, 1 solo comando",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi45RTgxNDRBMzUwRjQ0MDhC",
+          "videoId": "LsSnDPWbeGs",
+          "position": 10,
+          "title": "9 minutos vs 2 minutos: así rinden los Agentes",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi4zRDBDOEZDOUM0MDY5NEEz",
+          "videoId": "eZIoDPROflY",
+          "position": 11,
+          "title": "Las instancias de IA recuerdan TODO porque usan archivos locales",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi41QTY1Q0UxMTVCODczNThE",
+          "videoId": "BuauQV9y9IA",
+          "position": 12,
+          "title": "🎨 Antes de Codear, Diseñá en Estas 3 Apps",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi5DMkU4NTY1QUFGQTYwMDE3",
+          "videoId": "aes14lRStWA",
+          "position": 13,
+          "title": "El secreto de mis cotizaciones: una plantilla en Markdown",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi42MTI4Njc2QjM1RjU1MjlG",
+          "videoId": "h4YDn9583dE",
+          "position": 14,
+          "title": "🧪 100+ horas probando Cursor y Claude Code: Creé 2 páginas web",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi4zRjM0MkVCRTg0MkYyQTM0",
+          "videoId": "PcvkPgw6tBg",
+          "position": 15,
+          "title": "⚡ Lo que Cursor hace MEJOR que Claude Code",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi4zQzFBN0RGNzNFREFCMjBE",
+          "videoId": "qkdegzcqC8Y",
+          "position": 16,
+          "title": "💸 Claude Code Pricing: Por qué NO deberías usar la API",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi40QTA3NTU2RkM1QzlCMzYx",
+          "videoId": "lektidJrPyQ",
+          "position": 17,
+          "title": "ChatGPT tardó 7 veces más que Claude",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi5GNDg1Njc1QzZERjlFRjE5",
+          "videoId": "qC6WVYd5Geo",
+          "position": 18,
+          "title": "Lancé 10 agentes a la vez, mirá esto",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi5CMEQ2Mjk5NTc3NDZFRUNB",
+          "videoId": "eeQn5EyX__E",
+          "position": 19,
+          "title": "Creá tu primer Agente de Claude así de fácil",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi4yQUE2Q0JEMTk4NTM3RTZC",
+          "videoId": "adfxcow5O7I",
+          "position": 20,
+          "title": "+100 links analizados por un solo agente",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi43MTI1NDIwOTMwQjIxMzNG",
+          "videoId": "Z5PysQpsecs",
+          "position": 21,
+          "title": "10 agentes, 10 documentos profesionales",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi4xOTEzQzhBQzU3MDNDNjcz",
+          "videoId": "nXHDpqi-_Io",
+          "position": 22,
+          "title": "Mirá el documento que creó Claude en minutos",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi4zMDg5MkQ5MEVDMEM1NTg2",
+          "videoId": "4ct1OVp8y3I",
+          "position": 23,
+          "title": "Cómo personalizar un Agente de Claude en segundos",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi4yMDhBMkNBNjRDMjQxQTg1",
+          "videoId": "MqCl3DrTrrA",
+          "position": 24,
+          "title": "Por qué los Agentes de Claude ahorran costos y tokens",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi45ODRDNTg0QjA4NkFBNkQy",
+          "videoId": "4DqA7PNsaZU",
+          "position": 25,
+          "title": "IA no es solo para programar. Mirá todo lo que podés hacer",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi45RjNFMDhGQ0Q2RkFCQTc1",
+          "videoId": "iUQ9x28uuVA",
+          "position": 26,
+          "title": "Claude y Gemini leyendo el MISMO contexto al mismo tiempo",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi5DRUQwODMxQzUyRTlGRkY3",
+          "videoId": "u5G3C4jcKGk",
+          "position": 27,
+          "title": "Gemini en terminal es GRATIS y así de fácil se usa",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi5BRjJDODk5REM0NjkzMUIy",
+          "videoId": "m6msPsQ2_OM",
+          "position": 28,
+          "title": "Si seguís usando IA en el navegador, lo estás haciendo mal",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi41QUZGQTY5OTE4QTREQUU4",
+          "videoId": "eWVEE8QaC4o",
+          "position": 29,
+          "title": "Cada IA tiene versión terminal y es MUCHO mejor que el browser",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi4yQUJFNUVCMzVDNjcxRTlF",
+          "videoId": "wwLxFSpa1_0",
+          "position": 30,
+          "title": "Le pedí a Claude que me cree un repo y lo hizo en segundos",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi5GM0Q3M0MzMzY5NTJFNTdE",
+          "videoId": "PBuq_sHuInM",
+          "position": 31,
+          "title": "💡 El primer prompt le hace TODAS las preguntas sobre tu producto automáticamente",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi4yMUQyQTQzMjRDNzMyQTMy",
+          "videoId": "FwnfT51-WUI",
+          "position": 32,
+          "title": "📁 Tengo una Carpeta que Me Ahorra HORAS con IA",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi45NkVENTkxRDdCQUFBMDY4",
+          "videoId": "t6M1-0MZwfk",
+          "position": 33,
+          "title": "🎙️ Este Truco Me Cambió la Forma de Escribir Prompts",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi43NDhFRTgwOTRERTU4Rjg3",
+          "videoId": "bsi9yTZp2no",
+          "position": 34,
+          "title": "⚡ 1 minuto y tu página está ONLINE: así de fácil es deployar en Vercel",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi4yQjZFRkExQjFGODk3RUFD",
+          "videoId": "wY_BKLp2-xc",
+          "position": 35,
+          "title": "📦 Qué incluye el template: página web + 3 prompts listos para usar con IA",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi5EMEEwRUY5M0RDRTU3NDJC",
+          "videoId": "3Vwe3D5UpcY",
+          "position": 36,
+          "title": "📥 Descargá el template GRATIS para crear tu landing en minutos con IA",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi45NDk1REZENzhEMzU5MDQz",
+          "videoId": "-5h9nlQLt_w",
+          "position": 37,
+          "title": "🤔 ¿Qué IA usás vos? Cursor, Claude, OpenAI, Gemini...",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi5DNzE1RjZEMUZCMjA0RDBB",
+          "videoId": "We0sGNySw2c",
+          "position": 38,
+          "title": "⚠️ El Error #1 que Cometes con IA (y Cómo Evitarlo)",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi5DNkMwRUI2MkI4QkI4NDFG",
+          "videoId": "tnQUEzCYB9U",
+          "position": 39,
+          "title": "🤖 Claude Code vs Gemini: mirá cómo construyen tu web con UN solo prompt",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi5ENDU4Q0M4RDExNzM1Mjcy",
+          "videoId": "MF0z19UkDS8",
+          "position": 40,
+          "title": "💾 Claude Code Tiene MEMORIA y Así la Configuro",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi40NzZCMERDMjVEN0RFRThB",
+          "videoId": "2lkHCOxrAKY",
+          "position": 41,
+          "title": "🧠 5 Trucos de IA que Aprendí en 6 Meses (y que Nadie me Dijo)",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi5EQUE1NTFDRjcwMDg0NEMz",
+          "videoId": "Admvlzah_rM",
+          "position": 42,
+          "title": "🚀 0 pesos, 0 experiencia, 3 prompts: así lanzo páginas web en 10 minutos",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi4wOTA3OTZBNzVEMTUzOTMy",
+          "videoId": "c8_YSSdwj0E",
+          "position": 43,
+          "title": "Mirá lo que genera la IA: cotización profesional completa",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi5DQUNERDQ2NkIzRUQxNTY1",
+          "videoId": "yl6_FcFy7N4",
+          "position": 44,
+          "title": "Así creo cotizaciones con Claude Code (paso a paso)",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi4yODlGNEE0NkRGMEEzMEQy",
+          "videoId": "89Eb9TTdUt8",
+          "position": 45,
+          "title": "De 2 horas a 10 minutos: Mi sistema de cotizaciones con IA",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi4xMkVGQjNCMUM1N0RFNEUx",
+          "videoId": "fNHBwbEUGNQ",
+          "position": 46,
+          "title": "4 técnicas para tu contexto 🚀",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi41MjE1MkI0OTQ2QzJGNzNG",
+          "videoId": "R0FmOhv-qvI",
+          "position": 47,
+          "title": "Los 4 pilares del contexto ⚡",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi41MzJCQjBCNDIyRkJDN0VD",
+          "videoId": "vsUqPbKclMM",
+          "position": 48,
+          "title": "¿Prompt engineering murió? 🤔",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi4wMTcyMDhGQUE4NTIzM0Y5",
+          "videoId": "8WMfGtKVe3A",
+          "position": 49,
+          "title": "Herramientas ocupan memoria 🛠️",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOWVOWTYyeTlBR3hZdDRKblB0cm9XQi41NkI0NEY2RDEwNTU3Q0M2",
+          "videoId": "vBPY2tuhyGE",
+          "position": 50,
+          "title": "El tercer pilar: Conocimiento 🧠",
+          "status": {
+            "privacyStatus": "public"
+          }
+        }
+      ]
+    },
+    {
+      "id": "PLItELtCfBA3-zNoJBNStLs77EdRufhpf7",
+      "snippet": {
+        "publishedAt": "2025-12-18T11:30:39.344472Z",
+        "channelId": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "title": "Shorts N8N",
+        "description": "Automatizaciones con N8N - Workflows",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/KYs-FF1G6Q4/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/KYs-FF1G6Q4/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/KYs-FF1G6Q4/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          },
+          "standard": {
+            "url": "https://i.ytimg.com/vi/KYs-FF1G6Q4/sddefault.jpg",
+            "width": 640,
+            "height": 480
+          },
+          "maxres": {
+            "url": "https://i.ytimg.com/vi/KYs-FF1G6Q4/maxresdefault.jpg",
+            "width": 1280,
+            "height": 720
+          }
+        },
+        "channelTitle": "AIPaths",
+        "localized": {
+          "title": "Shorts N8N",
+          "description": "Automatizaciones con N8N - Workflows"
+        }
+      },
+      "status": {
+        "privacyStatus": "public"
+      },
+      "contentDetails": {
+        "itemCount": 61
+      },
+      "items": [
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy4wMTYxQzVBRDI1NEVDQUZE",
+          "videoId": "KYs-FF1G6Q4",
+          "position": 0,
+          "title": "n8n: Bot de WhatsApp que registra clientes solo 👤 #n8n #supabase #whatsappbusiness",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy4zMUEyMkQwOTk0NTg4MDgw",
+          "videoId": "bEcw-Js1X64",
+          "position": 1,
+          "title": "n8n: Como editar eventos en Google Calendar 🔧 #googlecalendar",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy4wNEU1MTI4NkZEMzVBN0JF",
+          "videoId": "DnKS-lgKwMs",
+          "position": 2,
+          "title": "Bot de WhatsApp que te dice tus proximos turnos 📅 #whatsapp #chatbot #turnos",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy5GNjAwN0Y0QTFGOTVDMEMy",
+          "videoId": "o3RhtGRJCFk",
+          "position": 3,
+          "title": "n8n: Logica para ver disponibilidad en Calendar 📊 #n8n #googlecalendar",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy43NERCMDIzQzFBMERCMEE3",
+          "videoId": "o9aFm9_Jy1w",
+          "position": 4,
+          "title": "Bot de WhatsApp con memoria: historial de chat 💬 #chatbot #ia #n8n",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy41NTZEOThBNThFOUVGQkVB",
+          "videoId": "pJibAUr02Bs",
+          "position": 5,
+          "title": "n8n: Activar Google Calendar API paso a paso 📍 #n8n #tutorial #automatizacion",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy5ENjI1QUI0MDI5NEQzODFE",
+          "videoId": "MgfS96d0R1o",
+          "position": 6,
+          "title": "n8n: Base de datos + Google Calendar para bots 💡 #Shorts #n8n #supabase",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy4zMEQ1MEIyRTFGNzhDQzFB",
+          "videoId": "xI-yPZDZDK4",
+          "position": 7,
+          "title": "n8n: Como vincular WhatsApp con Google Calendar 🔑 #n8n #googlecalendar #whatsapp",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy41RTNBREYwMkI5QzU3RkY2",
+          "videoId": "gdwpEkJ_1tk",
+          "position": 8,
+          "title": "Como crear un bot para WhatsApp que agenda citas 🚀 #whatsapp #chatbot #turnos",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy5DRUQwODMxQzUyRTlGRkY3",
+          "videoId": "SJ9qCkXlFWk",
+          "position": 9,
+          "title": "El prompt que hace que tu agente lea documentos 📝",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy5CMEQ2Mjk5NTc3NDZFRUNB",
+          "videoId": "GE1kT0JdNSg",
+          "position": 10,
+          "title": "Tu agente puede leer documentos COMPLETOS así 📄",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy43MTI1NDIwOTMwQjIxMzNG",
+          "videoId": "299a3Mrub_I",
+          "position": 11,
+          "title": "Primer mensaje de WhatsApp recibido en n8n 🎉",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy4zQzFBN0RGNzNFREFCMjBE",
+          "videoId": "cb-xJXr5Pk8",
+          "position": 12,
+          "title": "Probé mi agente con filtros y el resultado es EXACTO ✅",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy44QzVGQUU2QjE2NDgxM0M4",
+          "videoId": "jy-TwfsUgTs",
+          "position": 13,
+          "title": "Agente de IA para WhatsApp con n8n (tutorial) 🧠 #n8n #whatsapp",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy5GNDg1Njc1QzZERjlFRjE5",
+          "videoId": "O231bUi1Md0",
+          "position": 14,
+          "title": "El agente lee TODO el documento y responde así 📚",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy4xOTEzQzhBQzU3MDNDNjcz",
+          "videoId": "hFnw6ZgbjC0",
+          "position": 15,
+          "title": "Mi agente hace consultas SQL automáticamente 🚀",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy5DNkMwRUI2MkI4QkI4NDFG",
+          "videoId": "J2M0JrC5M6o",
+          "position": 16,
+          "title": "Así se ve una base de datos vectorial en Supabase 🗄️",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy41MzY4MzcwOUFFRUU3QzEx",
+          "videoId": "JaSt1QmSn7s",
+          "position": 17,
+          "title": "Para datos estructurados, usá filtros (no vectores) 🎯",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy5BRjJDODk5REM0NjkzMUIy",
+          "videoId": "wNPiEnAA6_M",
+          "position": 18,
+          "title": "Así configuro los filtros de mi agente de ventas 🛠️",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy40QTA3NTU2RkM1QzlCMzYx",
+          "videoId": "tqFiQ7XL6RA",
+          "position": 19,
+          "title": "Tablas grandes? Tu agente necesita SQL 🗃️",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy5DMkU4NTY1QUFGQTYwMDE3",
+          "videoId": "4qG41Rpk4wY",
+          "position": 20,
+          "title": "Error común en WhatsApp API y cómo solucionarlo 🔧",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy45RjNFMDhGQ0Q2RkFCQTc1",
+          "videoId": "lH2nSfWRly4",
+          "position": 21,
+          "title": "Cuándo usar bases de datos vectoriales (y cuándo NO) ⚡",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy42MTI4Njc2QjM1RjU1MjlG",
+          "videoId": "huM3686imDY",
+          "position": 22,
+          "title": "Filtros en n8n: así busca tu agente en la base de datos 🔍",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy5DQ0MyQ0Y4Mzg0M0VGOEYw",
+          "videoId": "vOft8HnAqnw",
+          "position": 23,
+          "title": "El prompt que usa mi chatbot de WhatsApp 💡",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy5ENDU4Q0M4RDExNzM1Mjcy",
+          "videoId": "jw3EzPORPuQ",
+          "position": 24,
+          "title": "Le explico QUE quiero, no COMO hacerlo - la IA arma el workflow",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy40QzRDOEU0QUYwNUIxN0M1",
+          "videoId": "QfMUE8r7br0",
+          "position": 25,
+          "title": "n8n: Bot de WhatsApp que reprograma turnos solo ✏️ #whatsapp #n8n #automatizacion",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy4yQUJFNUVCMzVDNjcxRTlF",
+          "videoId": "1wo6M2zY1X8",
+          "position": 26,
+          "title": "Bot de WhatsApp consulta Google Calendar en segundos 📅 #whatsapp #chatbot #turnos",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy4yQjZFRkExQjFGODk3RUFD",
+          "videoId": "CzBmhnNdobI",
+          "position": 27,
+          "title": "Bot de WhatsApp que agenda turnos GRATIS con n8n 🤖 #whatsapp #n8n #automatizacion",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy5DNzE1RjZEMUZCMjA0RDBB",
+          "videoId": "hhwhr6MdinA",
+          "position": 28,
+          "title": "Cómo agregar números de prueba en Meta WhatsApp 📱",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy5CQkEwRDA0MDkwNUM2MDY1",
+          "videoId": "A6HJ_CBDIjU",
+          "position": 29,
+          "title": "Error comun en bots de WhatsApp (y como evitarlo) 🔄",
+          "status": {
+            "privacyStatus": "unlisted"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy42Qzk5MkEzQjVFQjYwRDA4",
+          "videoId": "RAKvY1iKlQs",
+          "position": 30,
+          "title": "n8n + Google Calendar: conexion paso a paso ⚡ #n8n #googlecalendar #oauth",
+          "status": {
+            "privacyStatus": "unlisted"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy4xMzgwMzBERjQ4NjEzNUE5",
+          "videoId": "CDJbvaf5_Ko",
+          "position": 31,
+          "title": "SQL para bot de WhatsApp: tablas de turnos (n8n) 🗄️ #supabase #sql #n8n",
+          "status": {
+            "privacyStatus": "unlisted"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy45RTgxNDRBMzUwRjQ0MDhC",
+          "videoId": "mY_M95I7uwY",
+          "position": 32,
+          "title": "Por que uso Gemini para filtrar noticias (es GRATIS)",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy45NzUwQkI1M0UxNThBMkU0",
+          "videoId": "yVGUjkEihUI",
+          "position": 33,
+          "title": "API de IA gratis para tu chatbot (Gemini) 🆓",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy4zRjM0MkVCRTg0MkYyQTM0",
+          "videoId": "Fch4ftN-iW0",
+          "position": 34,
+          "title": "Probando el chatbot con el filtro activado ✅",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy5EQUE1NTFDRjcwMDg0NEMz",
+          "videoId": "U8yVRgluanU",
+          "position": 35,
+          "title": "Este prompt crea automatizaciones de n8n desde cero",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy4yMUQyQTQzMjRDNzMyQTMy",
+          "videoId": "ZhiYGR308jQ",
+          "position": 36,
+          "title": "Ejecuto el workflow y me llega el mail con noticias de IA",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy41QTY1Q0UxMTVCODczNThE",
+          "videoId": "ndjZVcHxktw",
+          "position": 37,
+          "title": "Asi configuro la busqueda de noticias en el workflow",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy5GNjNDRDREMDQxOThCMDQ2",
+          "videoId": "3yobap-uPII",
+          "position": 38,
+          "title": "🧠 Corrí un agente de IA en n8n con Gemini GRATIS",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy45NDk1REZENzhEMzU5MDQz",
+          "videoId": "4qTh3x-CmgU",
+          "position": 39,
+          "title": "✅ n8n instalado en 10 minutos (así de rápido)",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy5DQUNERDQ2NkIzRUQxNTY1",
+          "videoId": "n9IiuHWmjjE",
+          "position": 40,
+          "title": "🔓 Este es el código fuente REAL de n8n (open source)",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy41MzJCQjBCNDIyRkJDN0VD",
+          "videoId": "OvUCiHAR48E",
+          "position": 41,
+          "title": "📚 n8n tiene templates para TODO (y son gratis)",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy4xMkVGQjNCMUM1N0RFNEUx",
+          "videoId": "tiOfC1m9BhM",
+          "position": 42,
+          "title": "💡 Guardar vs Publicar en n8n: La diferencia que IMPORTA",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy4wOTA3OTZBNzVEMTUzOTMy",
+          "videoId": "z4n6wmQiiBY",
+          "position": 43,
+          "title": "🎯 Qué es n8n y por qué DEBERÍAS usarlo en 2026",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy41MjE1MkI0OTQ2QzJGNzNG",
+          "videoId": "Ld--Xr5xhXI",
+          "position": 44,
+          "title": "🤖 Instalé n8n SIN tocar código usando Gemini (gratis)",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy4zRDBDOEZDOUM0MDY5NEEz",
+          "videoId": "qc53BGhR0lY",
+          "position": 45,
+          "title": "Documento muy grande? Usá vectores en Supabase 🗄️",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy41QUZGQTY5OTE4QTREQUU4",
+          "videoId": "B7mUp-q170A",
+          "position": 46,
+          "title": "Así funcionan las bases de datos vectoriales 📊",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy45NkVENTkxRDdCQUFBMDY4",
+          "videoId": "ck3rRs85vHc",
+          "position": 47,
+          "title": "SQL usa MENOS tokens que filtros (te muestro por qué) 💰",
+          "status": {
+            "privacyStatus": "unlisted"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy43NDhFRTgwOTRERTU4Rjg3",
+          "videoId": "FH6jbVDCWjc",
+          "position": 48,
+          "title": "Tu agente IA no responde bien? El error es este 🤖",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy44Mjc5REFBRUE2MTdFRDU0",
+          "videoId": "4ZbcHHNND3E",
+          "position": 49,
+          "title": "Crear app de WhatsApp en Meta (paso a paso) 📲",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy4yQUE2Q0JEMTk4NTM3RTZC",
+          "videoId": "vnJ7rxhzaB0",
+          "position": 50,
+          "title": "Así se configura un AI Agent en n8n 🤖",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy5GM0Q3M0MzMzY5NTJFNTdE",
+          "videoId": "k-_PSxowfoY",
+          "position": 51,
+          "title": "Tu chatbot de WhatsApp funcionando 24/7 en 30 segundos ⚡",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy4yMDhBMkNBNjRDMjQxQTg1",
+          "videoId": "RxeOyoRSxQo",
+          "position": 52,
+          "title": "Este bug rompe tu chatbot de WhatsApp (arréglalo así) 🐛",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy41Mzk2QTAxMTkzNDk4MDhF",
+          "videoId": "-CoyNA3ZDXU",
+          "position": 53,
+          "title": "El agente me pregunta que API usar antes de crear el workflow",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy4zMDg5MkQ5MEVDMEM1NTg2",
+          "videoId": "htqkwpmocpo",
+          "position": 54,
+          "title": "Le pedi a la IA que cambie mi workflow en tiempo real",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy45ODRDNTg0QjA4NkFBNkQy",
+          "videoId": "pJJtPcWXdMg",
+          "position": 55,
+          "title": "Automatiza noticias de IA GRATIS con Gemini (o Claude Code)",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy5EMEEwRUY5M0RDRTU3NDJC",
+          "videoId": "KsvXzJ1oG9o",
+          "position": 56,
+          "title": "Este workflow me manda noticias de IA todos los dias (15 min para crear)",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy40NzZCMERDMjVEN0RFRThB",
+          "videoId": "sgUa34GO9i0",
+          "position": 57,
+          "title": "🚀 n8n tiene MILLONES de templates (y esto recién empieza)",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy4wMTcyMDhGQUE4NTIzM0Y5",
+          "videoId": "upScqHvjahQ",
+          "position": 58,
+          "title": "⚡ Crea tu PRIMERA automatización en n8n (así de fácil)",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy4yODlGNEE0NkRGMEEzMEQy",
+          "videoId": "34_ejnvbJmM",
+          "position": 59,
+          "title": "✨ El truco de n8n que NADIE te cuenta: Copy & Paste workflows",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLXpOb0pCTlN0THM3N0VkUnVmaHBmNy41NkI0NEY2RDEwNTU3Q0M2",
+          "videoId": "drfBT2v4qqM",
+          "position": 60,
+          "title": "🔥 n8n es OPEN SOURCE: Corre automatizaciones gratis en tu PC",
+          "status": {
+            "privacyStatus": "public"
+          }
+        }
+      ]
+    },
+    {
+      "id": "PLItELtCfBA39I0m77IIZp8TR9KtwE1d5e",
+      "snippet": {
+        "publishedAt": "2025-12-17T21:27:20.872936Z",
+        "channelId": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "title": "N8N para Automatizar tu Negocio",
+        "description": "Tutoriales y casos prácticos de n8n para automatizar procesos de negocio, conectar WhatsApp, usar datos y construir agentes de IA.",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/2I6Y8R6jJoI/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/2I6Y8R6jJoI/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/2I6Y8R6jJoI/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          },
+          "standard": {
+            "url": "https://i.ytimg.com/vi/2I6Y8R6jJoI/sddefault.jpg",
+            "width": 640,
+            "height": 480
+          },
+          "maxres": {
+            "url": "https://i.ytimg.com/vi/2I6Y8R6jJoI/maxresdefault.jpg",
+            "width": 1280,
+            "height": 720
+          }
+        },
+        "channelTitle": "AIPaths",
+        "localized": {
+          "title": "N8N para Automatizar tu Negocio",
+          "description": "Tutoriales y casos prácticos de n8n para automatizar procesos de negocio, conectar WhatsApp, usar datos y construir agentes de IA."
+        }
+      },
+      "status": {
+        "privacyStatus": "public"
+      },
+      "contentDetails": {
+        "itemCount": 5
+      },
+      "items": [
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOUkwbTc3SUlacDhUUjlLdHdFMWQ1ZS4yODlGNEE0NkRGMEEzMEQy",
+          "videoId": "2I6Y8R6jJoI",
+          "position": 0,
+          "title": "n8n + Gemini: Automatiza Noticias de IA Paso a Paso",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOUkwbTc3SUlacDhUUjlLdHdFMWQ1ZS41NkI0NEY2RDEwNTU3Q0M2",
+          "videoId": "V_fF70x9o10",
+          "position": 1,
+          "title": "n8n Tutorial para Principiantes: Automatiza GRATIS (Para 2026)",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOUkwbTc3SUlacDhUUjlLdHdFMWQ1ZS41MjE1MkI0OTQ2QzJGNzNG",
+          "videoId": "YJbSWaf-pBE",
+          "position": 2,
+          "title": "RAG en n8n: Conecta tu Agente IA a tus Datos",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOUkwbTc3SUlacDhUUjlLdHdFMWQ1ZS4wMTcyMDhGQUE4NTIzM0Y5",
+          "videoId": "tG8GR7S80f8",
+          "position": 3,
+          "title": "Cómo Crear un Chatbot de WhatsApp con IA GRATIS (N8N Sin Programar)",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOUkwbTc3SUlacDhUUjlLdHdFMWQ1ZS4wOTA3OTZBNzVEMTUzOTMy",
+          "videoId": "kCNFRSv6CdQ",
+          "position": 4,
+          "title": "Chatbot de WhatsApp: agenda turnos automaticamente (n8n + Google Calendar)",
+          "status": {
+            "privacyStatus": "public"
+          }
+        }
+      ]
+    },
+    {
+      "id": "PLItELtCfBA39BbCy0gS8eO2OGn5xEO_cB",
+      "snippet": {
+        "publishedAt": "2025-11-25T12:57:38.381389Z",
+        "channelId": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "title": "Claude Code para Emprendedores",
+        "description": "Usá Claude Code para crear webs, documentos, presupuestos y sistemas de trabajo con IA. Tutoriales, comparativas y casos reales para emprendedores.",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/JbnSd6zm0es/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/JbnSd6zm0es/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/JbnSd6zm0es/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          },
+          "standard": {
+            "url": "https://i.ytimg.com/vi/JbnSd6zm0es/sddefault.jpg",
+            "width": 640,
+            "height": 480
+          },
+          "maxres": {
+            "url": "https://i.ytimg.com/vi/JbnSd6zm0es/maxresdefault.jpg",
+            "width": 1280,
+            "height": 720
+          }
+        },
+        "channelTitle": "AIPaths",
+        "localized": {
+          "title": "Claude Code para Emprendedores",
+          "description": "Usá Claude Code para crear webs, documentos, presupuestos y sistemas de trabajo con IA. Tutoriales, comparativas y casos reales para emprendedores."
+        }
+      },
+      "status": {
+        "privacyStatus": "public"
+      },
+      "contentDetails": {
+        "itemCount": 9
+      },
+      "items": [
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOUJiQ3kwZ1M4ZU8yT0duNXhFT19jQi5DQUNERDQ2NkIzRUQxNTY1",
+          "videoId": "JbnSd6zm0es",
+          "position": 0,
+          "title": "Claude Code: 5 Trucos que Me Tomaron 6 Meses Aprender",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOUJiQ3kwZ1M4ZU8yT0duNXhFT19jQi41MzJCQjBCNDIyRkJDN0VD",
+          "videoId": "o8vxxunfZc4",
+          "position": 1,
+          "title": "Context Engineering: Por Qué Prompt Engineering Ya No Alcanza",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOUJiQ3kwZ1M4ZU8yT0duNXhFT19jQi41NkI0NEY2RDEwNTU3Q0M2",
+          "videoId": "u_NOjT8MQIY",
+          "position": 2,
+          "title": "Cómo Usar Gemini, Claude y ChatGPT en tu Terminal (Guia Completa)",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOUJiQ3kwZ1M4ZU8yT0duNXhFT19jQi4yODlGNEE0NkRGMEEzMEQy",
+          "videoId": "2xwlBMSrBZY",
+          "position": 3,
+          "title": "Claude Code Agents vs ChatGPT: Productividad x5",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOUJiQ3kwZ1M4ZU8yT0duNXhFT19jQi4wMTcyMDhGQUE4NTIzM0Y5",
+          "videoId": "UZ5De45XZRU",
+          "position": 4,
+          "title": "Hice una web completa solo con Claude en 60 minutos",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOUJiQ3kwZ1M4ZU8yT0duNXhFT19jQi41MjE1MkI0OTQ2QzJGNzNG",
+          "videoId": "V2hp1N1XamY",
+          "position": 5,
+          "title": "Claude Code vs Cursor: Creé 2 páginas web - Esto fue lo que aprendi",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOUJiQ3kwZ1M4ZU8yT0duNXhFT19jQi4wOTA3OTZBNzVEMTUzOTMy",
+          "videoId": "GKwOVZm5q_A",
+          "position": 6,
+          "title": "Crea tu página web gratis en 10 minutos: template + 3 prompts de IA",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOUJiQ3kwZ1M4ZU8yT0duNXhFT19jQi4xMkVGQjNCMUM1N0RFNEUx",
+          "videoId": "T-sCYCl9dkw",
+          "position": 7,
+          "title": "Cómo Creo Cotizaciones para Clientes con AI (Método Completo)",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOUJiQ3kwZ1M4ZU8yT0duNXhFT19jQi5GNjNDRDREMDQxOThCMDQ2",
+          "videoId": "ElfXX43LeeM",
+          "position": 8,
+          "title": "¿El Vibe Coding es el FUTURO de los Developers?",
+          "status": {
+            "privacyStatus": "public"
+          }
+        }
+      ]
+    },
+    {
+      "id": "PLItELtCfBA3-bQA4zqBIR7c4sIHkDjYdU",
+      "snippet": {
+        "publishedAt": "2024-10-24T18:38:33.701468Z",
+        "channelId": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "title": "Shorts Chatbot Whatsapp",
+        "description": "Chatbot Whatsapp",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/2_lFxy-4HkE/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/2_lFxy-4HkE/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/2_lFxy-4HkE/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          },
+          "standard": {
+            "url": "https://i.ytimg.com/vi/2_lFxy-4HkE/sddefault.jpg",
+            "width": 640,
+            "height": 480
+          },
+          "maxres": {
+            "url": "https://i.ytimg.com/vi/2_lFxy-4HkE/maxresdefault.jpg",
+            "width": 1280,
+            "height": 720
+          }
+        },
+        "channelTitle": "AIPaths",
+        "localized": {
+          "title": "Shorts Chatbot Whatsapp",
+          "description": "Chatbot Whatsapp"
+        }
+      },
+      "status": {
+        "privacyStatus": "public"
+      },
+      "contentDetails": {
+        "itemCount": 47
+      },
+      "items": [
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS41NkI0NEY2RDEwNTU3Q0M2",
+          "videoId": "2_lFxy-4HkE",
+          "position": 0,
+          "title": "📄 Guardá el historial de conversaciones en Google Sheets con tu Chatbot #short #chatbotwhatsapp",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS4yODlGNEE0NkRGMEEzMEQy",
+          "videoId": "Oi6VLw-NSTU",
+          "position": 1,
+          "title": "🤖🔥 ¿Qué es un Chatbot de WhatsApp? ¡Te lo explico fácil! #short #chatbotwhatsapp",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS4wMTcyMDhGQUE4NTIzM0Y5",
+          "videoId": "PIuWopFQFq8",
+          "position": 2,
+          "title": "🤖🔥 Chatbot Whatsapp Providers Botones y listas  #short #chatbotwhatsapp #whatsappchatbot",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS41MjE1MkI0OTQ2QzJGNzNG",
+          "videoId": "5PqvviGutmg",
+          "position": 3,
+          "title": "🔥 ¡Integra Botones y Listas a tu Chatbot de WhatsApp! #short #chatbotwhatsapp",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS4wOTA3OTZBNzVEMTUzOTMy",
+          "videoId": "YZ5fDZd5pgg",
+          "position": 4,
+          "title": "🖼️ ¡Reconocé Imágenes con AI en tu Chatbot de WhatsApp! 🤖 #short #chatbotwhatsapp",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS4xMkVGQjNCMUM1N0RFNEUx",
+          "videoId": "e5OiQ73Zq9c",
+          "position": 5,
+          "title": "📱 ¡Crea Menús Interactivos en WhatsApp con tu Chatbot AI! #short #chatbotwhatsapp",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS41MzJCQjBCNDIyRkJDN0VD",
+          "videoId": "X4fuJ3sZXvA",
+          "position": 6,
+          "title": "🚀 ¿Querés crear un Chatbot de WhatsApp desde 0? ¡Acá te muestro cómo! #short #chatbotwhatsapp",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS5DQUNERDQ2NkIzRUQxNTY1",
+          "videoId": "xnnaTpnqZtY",
+          "position": 7,
+          "title": "Desplega tu chatbot de whatsapp en Railway #short #chatbotwhatsapp  #whatsappbot",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS45NDk1REZENzhEMzU5MDQz",
+          "videoId": "eMgCQ7SjSU0",
+          "position": 8,
+          "title": "🤯 ¡Crear un Chatbot AI es más fácil de lo que pensás! 🤖 #short #chatbotwhatsapp #whatsappapi",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS5GNjNDRDREMDQxOThCMDQ2",
+          "videoId": "CTf6yrfMvIY",
+          "position": 9,
+          "title": "Archivo de variable de entorno #openai #gpt #chatgpt #huggingface #gpt4 #gpt5  #nodejs #lmstudio",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS40NzZCMERDMjVEN0RFRThB",
+          "videoId": "h0Tyj0b9I5s",
+          "position": 10,
+          "title": "Modelos de IA 100% GRATIS  #openai #gpt #chatgpt #huggingface #gpt4 #gpt5  #nodejs #lmstudio",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS5EMEEwRUY5M0RDRTU3NDJC",
+          "videoId": "6iIoJboP-LY",
+          "position": 11,
+          "title": "Chatbot de WhatsApp? A producción! #short #chatbotwhatsapp #botwhatsapp #chatbot #chatbotwhatsapp",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS4zMUEyMkQwOTk0NTg4MDgw",
+          "videoId": "RxeOyoRSxQo",
+          "position": 12,
+          "title": "Este bug rompe tu chatbot de WhatsApp (arréglalo así) 🐛",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS42QzdBMzlBQzQzRjQ0QkQy",
+          "videoId": "k-_PSxowfoY",
+          "position": 13,
+          "title": "Tu chatbot de WhatsApp funcionando 24/7 en 30 segundos ⚡",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS41OURENDc2NEM1MDI5Mjky",
+          "videoId": "Fch4ftN-iW0",
+          "position": 14,
+          "title": "Probando el chatbot con el filtro activado ✅",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS4wRjhFM0MxMTU1MEUzQ0VB",
+          "videoId": "yVGUjkEihUI",
+          "position": 15,
+          "title": "API de IA gratis para tu chatbot (Gemini) 🆓",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS5CNTZFOTNGQzZEODg1RUQx",
+          "videoId": "hhwhr6MdinA",
+          "position": 16,
+          "title": "Cómo agregar números de prueba en Meta WhatsApp 📱",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS5CNTcxMDQ0NThBNzMxODYz",
+          "videoId": "299a3Mrub_I",
+          "position": 17,
+          "title": "Primer mensaje de WhatsApp recibido en n8n 🎉",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS5ERkUyQTM0MzEwQjZCMTY5",
+          "videoId": "vOft8HnAqnw",
+          "position": 18,
+          "title": "El prompt que usa mi chatbot de WhatsApp 💡",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS4xM0YyM0RDNDE4REQ1NDA0",
+          "videoId": "vnJ7rxhzaB0",
+          "position": 19,
+          "title": "Así se configura un AI Agent en n8n 🤖",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS42MjYzMTMyQjA0QURCN0JF",
+          "videoId": "4qG41Rpk4wY",
+          "position": 20,
+          "title": "Error común en WhatsApp API y cómo solucionarlo 🔧",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS40MDNEMzA0QTBFRThFMzBE",
+          "videoId": "4ZbcHHNND3E",
+          "position": 21,
+          "title": "Crear app de WhatsApp en Meta (paso a paso) 📲",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS42RTNCOEMxREI3Q0VDMjU2",
+          "videoId": "7dPlMxQhWeI",
+          "position": 22,
+          "title": "Configurar WhatsApp API correctamente la primera vez #whatsapp #api #tutorial",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS43QzNCNkZENzIyMDY2MjZB",
+          "videoId": "AvsAa55cu-0",
+          "position": 23,
+          "title": "Meta lanza COEXISTENCIA para WhatsApp Business 📱",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS5EQkE3RTJCQTJEQkFBQTcz",
+          "videoId": "c71ERwLR7iQ",
+          "position": 24,
+          "title": "Sin verificar tu negocio en Meta, esto te puede pasar ⚠️ Shorts #MetaBusiness #WhatsAppAPI",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS4yQzk4QTA5QjkzMTFFOEI1",
+          "videoId": "a51uQjKa_bQ",
+          "position": 25,
+          "title": "Estas 4 claves de Meta las vas a necesitar SÍ o SÍ 🔑 #APIdeWhatsApp #MetaAPI",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS45NDlDQUFFOThDMTAxQjUw",
+          "videoId": "6xanZPRs5Pc",
+          "position": 26,
+          "title": "Dónde encontrar el App ID y App Secret en Meta 🔍 #MetaDevelopers #WhatsAppAPI",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS4xN0Y2QjVBOEI2MzQ5OUM5",
+          "videoId": "fcdp5MPi6YY",
+          "position": 27,
+          "title": "Así testeo mi bot de WhatsApp con n8n en segundos ⚡ #n8n #ChatbotWhatsApp",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS5FQUY2Qzk4RUFDN0ZFRkZF",
+          "videoId": "5jGRGQScy-E",
+          "position": 28,
+          "title": "Cómo agregar tu número a WhatsApp Business API 📲 #WhatsAppBusiness #APIdeWhatsApp",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS5CMEVBRUJERkUyNTBENTkz",
+          "videoId": "Ky-i2bK1w9M",
+          "position": 29,
+          "title": "Solo necesitás estas 2 páginas para configurar Meta API 💡 #MetaBusiness #MetaDevelopers",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS4xNjIyNEE0MDEyRDlCMjBE",
+          "videoId": "GrbvQdaZatA",
+          "position": 30,
+          "title": "Qué necesitás para verificar tu negocio en Meta 📋 #VerificacionMeta #WhatsAppBusiness",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS44QTY2MEEzNzBFQUJCMUQ2",
+          "videoId": "CzBmhnNdobI",
+          "position": 31,
+          "title": "Bot de WhatsApp que agenda turnos GRATIS con n8n 🤖 #whatsapp #n8n #automatizacion",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS4zQTkzRjgxRTY0OEU0MkM3",
+          "videoId": "1wo6M2zY1X8",
+          "position": 32,
+          "title": "Bot de WhatsApp consulta Google Calendar en segundos 📅 #whatsapp #chatbot #turnos",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS4xNTZBNUQxMDZBQzFGMjkw",
+          "videoId": "QfMUE8r7br0",
+          "position": 33,
+          "title": "n8n: Bot de WhatsApp que reprograma turnos solo ✏️ #whatsapp #n8n #automatizacion",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS4wMDFGNzBEOTU4Q0Y1Q0RG",
+          "videoId": "gdwpEkJ_1tk",
+          "position": 34,
+          "title": "Como crear un bot para WhatsApp que agenda citas 🚀 #whatsapp #chatbot #turnos",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS44QTA1QTQyRTc3M0VGQzYx",
+          "videoId": "MgfS96d0R1o",
+          "position": 35,
+          "title": "n8n: Base de datos + Google Calendar para bots 💡 #Shorts #n8n #supabase",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS44MkM2RjVEQkQ5N0I2MjVE",
+          "videoId": "jy-TwfsUgTs",
+          "position": 36,
+          "title": "Agente de IA para WhatsApp con n8n (tutorial) 🧠 #n8n #whatsapp",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS40NzE2MTY1QTM3RUI3QkU3",
+          "videoId": "CDJbvaf5_Ko",
+          "position": 37,
+          "title": "SQL para bot de WhatsApp: tablas de turnos (n8n) 🗄️ #supabase #sql #n8n",
+          "status": {
+            "privacyStatus": "unlisted"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS5EMzJDRTUwQjBEOUVFQzAw",
+          "videoId": "xI-yPZDZDK4",
+          "position": 38,
+          "title": "n8n: Como vincular WhatsApp con Google Calendar 🔑 #n8n #googlecalendar #whatsapp",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS5CMUM0NzY5NzdEQzlGRjAx",
+          "videoId": "RAKvY1iKlQs",
+          "position": 39,
+          "title": "n8n + Google Calendar: conexion paso a paso ⚡ #n8n #googlecalendar #oauth",
+          "status": {
+            "privacyStatus": "unlisted"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS5GMDBDNkJGMzYzREUyMTYw",
+          "videoId": "pJibAUr02Bs",
+          "position": 40,
+          "title": "n8n: Activar Google Calendar API paso a paso 📍 #n8n #tutorial #automatizacion",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS4wQUE0QzM4MkJGQ0YwQjUx",
+          "videoId": "o9aFm9_Jy1w",
+          "position": 41,
+          "title": "Bot de WhatsApp con memoria: historial de chat 💬 #chatbot #ia #n8n",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS5DQjg2RDQyMEVGQkZFOEVF",
+          "videoId": "o3RhtGRJCFk",
+          "position": 42,
+          "title": "n8n: Logica para ver disponibilidad en Calendar 📊 #n8n #googlecalendar",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS4yM0EyQ0U1M0I2RkIwNTQ0",
+          "videoId": "A6HJ_CBDIjU",
+          "position": 43,
+          "title": "Error comun en bots de WhatsApp (y como evitarlo) 🔄",
+          "status": {
+            "privacyStatus": "unlisted"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS5ERENFNTk4Q0Q2MTZDMTA5",
+          "videoId": "DnKS-lgKwMs",
+          "position": 44,
+          "title": "Bot de WhatsApp que te dice tus proximos turnos 📅 #whatsapp #chatbot #turnos",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS41RDUzRjJFQ0Y0MUI3NzU1",
+          "videoId": "KYs-FF1G6Q4",
+          "position": 45,
+          "title": "n8n: Bot de WhatsApp que registra clientes solo 👤 #n8n #supabase #whatsappbusiness",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzLWJRQTR6cUJJUjdjNHNJSGtEallkVS5FRjdGNDMzN0I2RTI3MDlG",
+          "videoId": "bEcw-Js1X64",
+          "position": 46,
+          "title": "n8n: Como editar eventos en Google Calendar 🔧 #googlecalendar",
+          "status": {
+            "privacyStatus": "public"
+          }
+        }
+      ]
+    },
+    {
+      "id": "PLItELtCfBA3_K7Eh-OCAmbhDrlcTQ-32w",
+      "snippet": {
+        "publishedAt": "2024-03-11T12:04:41.082503Z",
+        "channelId": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "title": "IA Local, LLMs y GPTs",
+        "description": "Tutoriales técnicos sobre modelos locales, LLMs, GPTs, APIs y conexiones con datos. Biblioteca secundaria de contenido técnico de AIPaths.",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/Dn3Z39GZJEY/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/Dn3Z39GZJEY/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/Dn3Z39GZJEY/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          },
+          "standard": {
+            "url": "https://i.ytimg.com/vi/Dn3Z39GZJEY/sddefault.jpg",
+            "width": 640,
+            "height": 480
+          },
+          "maxres": {
+            "url": "https://i.ytimg.com/vi/Dn3Z39GZJEY/maxresdefault.jpg",
+            "width": 1280,
+            "height": 720
+          }
+        },
+        "channelTitle": "AIPaths",
+        "localized": {
+          "title": "IA Local, LLMs y GPTs",
+          "description": "Tutoriales técnicos sobre modelos locales, LLMs, GPTs, APIs y conexiones con datos. Biblioteca secundaria de contenido técnico de AIPaths."
+        }
+      },
+      "status": {
+        "privacyStatus": "public"
+      },
+      "contentDetails": {
+        "itemCount": 5
+      },
+      "items": [
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzX0s3RWgtT0NBbWJoRHJsY1RRLTMydy4xMkVGQjNCMUM1N0RFNEUx",
+          "videoId": "Dn3Z39GZJEY",
+          "position": 0,
+          "title": "Como conectar Whatsapp con un LLM Local? LM Studio",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzX0s3RWgtT0NBbWJoRHJsY1RRLTMydy4wOTA3OTZBNzVEMTUzOTMy",
+          "videoId": "IHSKR5QJKeU",
+          "position": 1,
+          "title": "Hugging Face - Describe imágenes Gratis!",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzX0s3RWgtT0NBbWJoRHJsY1RRLTMydy41MjE1MkI0OTQ2QzJGNzNG",
+          "videoId": "nUKqITDcntk",
+          "position": 2,
+          "title": "LLMs en tu GPU?",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzX0s3RWgtT0NBbWJoRHJsY1RRLTMydy41NkI0NEY2RDEwNTU3Q0M2",
+          "videoId": "Fm-u1Dw2IKE",
+          "position": 3,
+          "title": "Chat GPTs acciona usando una API - Schema",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzX0s3RWgtT0NBbWJoRHJsY1RRLTMydy4yODlGNEE0NkRGMEEzMEQy",
+          "videoId": "57_IeGJyUwE",
+          "position": 4,
+          "title": "GPTs + Google Sheets - Interactuando con tus datos",
+          "status": {
+            "privacyStatus": "public"
+          }
+        }
+      ]
+    },
+    {
+      "id": "PLItELtCfBA38zgirgyU6VNRsPvY4BZcJ_",
+      "snippet": {
+        "publishedAt": "2023-12-21T19:54:06.18415Z",
+        "channelId": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "title": "Private - Youtube recursos",
+        "description": "",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/C4pTMMqEfwM/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/C4pTMMqEfwM/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/C4pTMMqEfwM/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          },
+          "standard": {
+            "url": "https://i.ytimg.com/vi/C4pTMMqEfwM/sddefault.jpg",
+            "width": 640,
+            "height": 480
+          },
+          "maxres": {
+            "url": "https://i.ytimg.com/vi/C4pTMMqEfwM/maxresdefault.jpg",
+            "width": 1280,
+            "height": 720
+          }
+        },
+        "channelTitle": "AIPaths",
+        "localized": {
+          "title": "Private - Youtube recursos",
+          "description": ""
+        }
+      },
+      "status": {
+        "privacyStatus": "private"
+      },
+      "contentDetails": {
+        "itemCount": 12
+      },
+      "items": [
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOHpnaXJneVU2Vk5Sc1B2WTRCWmNKXy41NkI0NEY2RDEwNTU3Q0M2",
+          "videoId": "C4pTMMqEfwM",
+          "position": 0,
+          "title": "15 RECURSOS GRATIS para YOUTUBERS!",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOHpnaXJneVU2Vk5Sc1B2WTRCWmNKXy4yODlGNEE0NkRGMEEzMEQy",
+          "videoId": "lw2X3PxKlAY",
+          "position": 1,
+          "title": "How To Perfectly Pitch Your Seed Stage Startup With Y Combinator's Michael Seibel",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOHpnaXJneVU2Vk5Sc1B2WTRCWmNKXy4wMTcyMDhGQUE4NTIzM0Y5",
+          "videoId": "lVLsQ8Smvzw",
+          "position": 2,
+          "title": "How smart entrepreneurs grow an audience from 0 and monetize it.",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOHpnaXJneVU2Vk5Sc1B2WTRCWmNKXy41MjE1MkI0OTQ2QzJGNzNG",
+          "videoId": "sLgHqZSe2o0",
+          "position": 3,
+          "title": "How to edit SO good your viewers get addicted to your videos",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOHpnaXJneVU2Vk5Sc1B2WTRCWmNKXy4wOTA3OTZBNzVEMTUzOTMy",
+          "videoId": "4R5YWZE3s9s",
+          "position": 4,
+          "title": "10 amazing FREE Plugins for Final Cut Pro",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOHpnaXJneVU2Vk5Sc1B2WTRCWmNKXy4xMkVGQjNCMUM1N0RFNEUx",
+          "videoId": "puYWiZDJnL0",
+          "position": 5,
+          "title": "Python y WhatsApp: Cómo Hacer un Chatbot !GRATIS¡ 2023 - ASMR",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOHpnaXJneVU2Vk5Sc1B2WTRCWmNKXy41MzJCQjBCNDIyRkJDN0VD",
+          "videoId": "_TEikWd9GW0",
+          "position": 6,
+          "title": "PDFKit - Crea PDFs desde Nodejs",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOHpnaXJneVU2Vk5Sc1B2WTRCWmNKXy5DQUNERDQ2NkIzRUQxNTY1",
+          "videoId": "292l7NSsswY",
+          "position": 7,
+          "title": "What I Learned After 10,000 Hours Of Editing",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOHpnaXJneVU2Vk5Sc1B2WTRCWmNKXy45NDk1REZENzhEMzU5MDQz",
+          "videoId": "kvZvlTKcIMQ",
+          "position": 8,
+          "title": "Final Cut Pro KEYBOARD SHORTCUTS that make you a FASTER editor!",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOHpnaXJneVU2Vk5Sc1B2WTRCWmNKXy5GNjNDRDREMDQxOThCMDQ2",
+          "videoId": "YDWNiGGw71s",
+          "position": 9,
+          "title": "Small Channels: Do THIS and the Algorithm Will LOVE You!",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOHpnaXJneVU2Vk5Sc1B2WTRCWmNKXy40NzZCMERDMjVEN0RFRThB",
+          "videoId": "RLxgc3KnsIs",
+          "position": 10,
+          "title": "¿Cómo cobrar los dólares de YouTube en Argentina? - Paso a Paso y en Efectivo",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzOHpnaXJneVU2Vk5Sc1B2WTRCWmNKXy5EMEEwRUY5M0RDRTU3NDJC",
+          "videoId": "eB5oRDmkaXo",
+          "position": 11,
+          "title": "how to create a killer youtube thumbnail (to blow up your channel)",
+          "status": {
+            "privacyStatus": "public"
+          }
+        }
+      ]
+    },
+    {
+      "id": "PLItELtCfBA389ShH6qJOUkjZdRsbTQg44",
+      "snippet": {
+        "publishedAt": "2023-10-30T00:37:44.069972Z",
+        "channelId": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "title": "Chatbot de WhatsApp con IA para tu Negocio",
+        "description": "Aprendé a usar WhatsApp, la API de Meta, n8n y agentes de IA para atención, ventas, turnos y operaciones reales de negocio.",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/twia5bKW6eg/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/twia5bKW6eg/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/twia5bKW6eg/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          },
+          "standard": {
+            "url": "https://i.ytimg.com/vi/twia5bKW6eg/sddefault.jpg",
+            "width": 640,
+            "height": 480
+          },
+          "maxres": {
+            "url": "https://i.ytimg.com/vi/twia5bKW6eg/maxresdefault.jpg",
+            "width": 1280,
+            "height": 720
+          }
+        },
+        "channelTitle": "AIPaths",
+        "localized": {
+          "title": "Chatbot de WhatsApp con IA para tu Negocio",
+          "description": "Aprendé a usar WhatsApp, la API de Meta, n8n y agentes de IA para atención, ventas, turnos y operaciones reales de negocio."
+        }
+      },
+      "status": {
+        "privacyStatus": "public"
+      },
+      "contentDetails": {
+        "itemCount": 22
+      },
+      "items": [
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzODlTaEg2cUpPVWtqWmRSc2JUUWc0NC45NDk1REZENzhEMzU5MDQz",
+          "videoId": "twia5bKW6eg",
+          "position": 0,
+          "title": "Whatsapp Chatbot Crash-Course | De 0 a 100 en 60 minutos",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzODlTaEg2cUpPVWtqWmRSc2JUUWc0NC4yMUQyQTQzMjRDNzMyQTMy",
+          "videoId": "dNgGfoSgq2E",
+          "position": 1,
+          "title": "¡Vender en Whatsapp es Más Fácil con Este Chatbot!",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzODlTaEg2cUpPVWtqWmRSc2JUUWc0NC4zRjM0MkVCRTg0MkYyQTM0",
+          "videoId": "tG8GR7S80f8",
+          "position": 2,
+          "title": "Cómo Crear un Chatbot de WhatsApp con IA GRATIS (N8N Sin Programar)",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzODlTaEg2cUpPVWtqWmRSc2JUUWc0NC43MTI1NDIwOTMwQjIxMzNG",
+          "videoId": "kCNFRSv6CdQ",
+          "position": 3,
+          "title": "Chatbot de WhatsApp: agenda turnos automaticamente (n8n + Google Calendar)",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzODlTaEg2cUpPVWtqWmRSc2JUUWc0NC45NzUwQkI1M0UxNThBMkU0",
+          "videoId": "lnHaENblJJA",
+          "position": 4,
+          "title": "API de WhatsApp en Meta: Todo lo que necesitas saber 2026",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzODlTaEg2cUpPVWtqWmRSc2JUUWc0NC45ODRDNTg0QjA4NkFBNkQy",
+          "videoId": "r5Q5M66pxaY",
+          "position": 5,
+          "title": "Crear un Chatbot de WhatsApp con la API de Meta | Tutorial Paso a Paso Usando NodeJS",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzODlTaEg2cUpPVWtqWmRSc2JUUWc0NC5GM0Q3M0MzMzY5NTJFNTdE",
+          "videoId": "zy_4RTApiik",
+          "position": 6,
+          "title": "De Cero a Entrega: Chatbot para un Cliente",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzODlTaEg2cUpPVWtqWmRSc2JUUWc0NC40NzZCMERDMjVEN0RFRThB",
+          "videoId": "LW0s2eLTPGo",
+          "position": 7,
+          "title": "WhatsApp Chatbot: ¡Agenda Turnos SIN HABLAR CON NADIE!",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzODlTaEg2cUpPVWtqWmRSc2JUUWc0NC5EMEEwRUY5M0RDRTU3NDJC",
+          "videoId": "-dpfUCMnTPw",
+          "position": 8,
+          "title": "Agenda turnos por Whatsapp con Google Sheets | Curso Chatbot Whatsapp NodeJs",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzODlTaEg2cUpPVWtqWmRSc2JUUWc0NC45RTgxNDRBMzUwRjQ0MDhC",
+          "videoId": "jL_u5LL7iz4",
+          "position": 9,
+          "title": "Aprende RÁPIDO a Usar la API de WhatsApp con IA en Node.js",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzODlTaEg2cUpPVWtqWmRSc2JUUWc0NC5ENDU4Q0M4RDExNzM1Mjcy",
+          "videoId": "nQCfFvz9eXc",
+          "position": 10,
+          "title": "Crea tu propio Asistente de OpenAI en Whatsapp solo con NodeJS",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzODlTaEg2cUpPVWtqWmRSc2JUUWc0NC5GNjNDRDREMDQxOThCMDQ2",
+          "videoId": "Mc0QC9b1aIM",
+          "position": 11,
+          "title": "Es posible vincular Google Sheets con Whatsapp?",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzODlTaEg2cUpPVWtqWmRSc2JUUWc0NC41QTY1Q0UxMTVCODczNThE",
+          "videoId": "YGo28dFPYco",
+          "position": 12,
+          "title": "Como agregarle Botones y Listas a tu Chatbot de Whatsapp | Meta API",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzODlTaEg2cUpPVWtqWmRSc2JUUWc0NC4zMDg5MkQ5MEVDMEM1NTg2",
+          "videoId": "7gDqIjF6i2c",
+          "position": 13,
+          "title": "Aprende a interpretar imagenes por Whatsapp con Gemini",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzODlTaEg2cUpPVWtqWmRSc2JUUWc0NC4yMDhBMkNBNjRDMjQxQTg1",
+          "videoId": "-2LAr8A-lQI",
+          "position": 14,
+          "title": "Agrega tu chatbot a un GRUPO de WHATSAPP con NodeJS",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzODlTaEg2cUpPVWtqWmRSc2JUUWc0NC4wOTA3OTZBNzVEMTUzOTMy",
+          "videoId": "vZyN-MYGiqU",
+          "position": 15,
+          "title": "5 Pasos para crear un CHATBOT AI de Wpp | Cliente REAL",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzODlTaEg2cUpPVWtqWmRSc2JUUWc0NC4wMTcyMDhGQUE4NTIzM0Y5",
+          "videoId": "MOKygryvVxM",
+          "position": 16,
+          "title": "Whatsapp AI Bot en CLOUD 24/7 para tu negocio",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzODlTaEg2cUpPVWtqWmRSc2JUUWc0NC41NkI0NEY2RDEwNTU3Q0M2",
+          "videoId": "aS3oFnRWrQY",
+          "position": 17,
+          "title": "Whatsapp Chatbot FACIL, GRATIS y RAPIDO",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzODlTaEg2cUpPVWtqWmRSc2JUUWc0NC4yODlGNEE0NkRGMEEzMEQy",
+          "videoId": "nqhx7v3ub2M",
+          "position": 18,
+          "title": "Whatsapp Chatbot + ChatGPT funciones",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzODlTaEg2cUpPVWtqWmRSc2JUUWc0NC4xMkVGQjNCMUM1N0RFNEUx",
+          "videoId": "2nj6WLyGgbM",
+          "position": 19,
+          "title": "Guia para VENDER tu primer AI Chatbot para Whatsapp",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzODlTaEg2cUpPVWtqWmRSc2JUUWc0NC41MzJCQjBCNDIyRkJDN0VD",
+          "videoId": "Dn3Z39GZJEY",
+          "position": 20,
+          "title": "Como conectar Whatsapp con un LLM Local? LM Studio",
+          "status": {
+            "privacyStatus": "public"
+          }
+        },
+        {
+          "playlistItemId": "UExJdEVMdENmQkEzODlTaEg2cUpPVWtqWmRSc2JUUWc0NC5DMkU4NTY1QUFGQTYwMDE3",
+          "videoId": "IHSKR5QJKeU",
+          "position": 21,
+          "title": "Hugging Face - Describe imágenes Gratis!",
+          "status": {
+            "privacyStatus": "public"
+          }
+        }
+      ]
+    }
+  ],
+  "channelSections": [
+    {
+      "kind": "youtube#channelSection",
+      "etag": "x9ASNR9O_Cqavh2k0v0_yy3HOzQ",
+      "id": "UCkk1guGQ6C6I4_XJ2Pa3SiA.jNQXAC9IVRw",
+      "snippet": {
+        "type": "singleplaylist",
+        "channelId": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "position": 0
+      },
+      "contentDetails": {
+        "playlists": [
+          "PLItELtCfBA39ig81F5j9wcMqclkhfdKaL"
+        ]
+      }
+    },
+    {
+      "kind": "youtube#channelSection",
+      "etag": "R6ipzIDVd0_koQ9Ge_VsLDD_0PA",
+      "id": "UCkk1guGQ6C6I4_XJ2Pa3SiA.LeAltgu_pbM",
+      "snippet": {
+        "type": "singleplaylist",
+        "channelId": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "position": 1
+      },
+      "contentDetails": {
+        "playlists": [
+          "PLItELtCfBA39BbCy0gS8eO2OGn5xEO_cB"
+        ]
+      }
+    },
+    {
+      "kind": "youtube#channelSection",
+      "etag": "-IiMVA85susrSVFQ14L2caZ-sM8",
+      "id": "UCkk1guGQ6C6I4_XJ2Pa3SiA.nGzAI5pLbMY",
+      "snippet": {
+        "type": "singleplaylist",
+        "channelId": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "position": 2
+      },
+      "contentDetails": {
+        "playlists": [
+          "PLItELtCfBA389ShH6qJOUkjZdRsbTQg44"
+        ]
+      }
+    },
+    {
+      "kind": "youtube#channelSection",
+      "etag": "rYSKUhWBUx5gTv8M2s8M93sTUq0",
+      "id": "UCkk1guGQ6C6I4_XJ2Pa3SiA.__WLXNpu6u8",
+      "snippet": {
+        "type": "channelsectiontypeundefined",
+        "channelId": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "position": 3
+      }
+    },
+    {
+      "kind": "youtube#channelSection",
+      "etag": "gKKbR5Slx69Ny1KaB3cRD_9sUks",
+      "id": "UCkk1guGQ6C6I4_XJ2Pa3SiA.Zx4DA4xg9IM",
+      "snippet": {
+        "type": "channelsectiontypeundefined",
+        "channelId": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "position": 4
+      }
+    },
+    {
+      "kind": "youtube#channelSection",
+      "etag": "Bm3t6F-mBo1z6EiqXbVg8jXNDqw",
+      "id": "UCkk1guGQ6C6I4_XJ2Pa3SiA.MykmTeTiooA",
+      "snippet": {
+        "type": "channelsectiontypeundefined",
+        "channelId": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "position": 5
+      }
+    },
+    {
+      "kind": "youtube#channelSection",
+      "etag": "glAUGG3FRg8XQ26jNn9GNyxiaY8",
+      "id": "UCkk1guGQ6C6I4_XJ2Pa3SiA.iJLXf_7B368",
+      "snippet": {
+        "type": "channelsectiontypeundefined",
+        "channelId": "UCkk1guGQ6C6I4_XJ2Pa3SiA",
+        "position": 6
+      }
+    }
+  ]
+}

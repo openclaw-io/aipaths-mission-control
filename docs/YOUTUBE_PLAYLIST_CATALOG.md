@@ -20,7 +20,15 @@ The 2026-07-31 seed artifacts are:
 
 Every seeded playlist's `source_metadata` records both stable repository-relative source paths and their SHA-256 hashes. This makes the editorial approval and observed-live evidence independently auditable even if the external outgoing directory changes.
 
-Playlists proposed by the architecture but lacking an observed playlist ID (for example Tutoriales Técnicos, Casos Reales, and the proposed official series) are intentionally omitted rather than assigned synthetic IDs.
+The owner-finalized live reconciliation from 2026-08-02 supersedes the seed for current operations:
+
+- `data/youtube-playlists/2026-08-02-catalog.json`: all 11 public long-form playlists with their final live title/description and approved editorial metadata.
+- `data/youtube-playlists/2026-08-02-memberships.tsv`: the 101 ordered live memberships.
+- `data/youtube-playlists/sources/youtube-live-snapshot-2026-08-02.json`: the credential-free OAuth snapshot captured at `2026-08-02T13:03:54.734Z`, SHA-256 `773a65226fba4f0b36c615d97ebc489e71f7f0e706dd312e2add56e4a33e5e76`.
+- The five newly materialized playlists are Tutoriales Técnicos, Casos Reales, Curso Técnico de WhatsApp, Curso n8n, and Vender Chatbots. Their IDs and memberships come only from the live snapshot; editorial purpose and taxonomy remain grounded in `architecture-v2.md`.
+- All three Shorts playlists and the private resources playlist remain intentionally excluded.
+
+Before those playlists had real IDs, the 2026-07-31 seed intentionally omitted them rather than assigning synthetic IDs.
 
 ## Schema
 
@@ -33,22 +41,22 @@ The same additive tables, indexes, and RLS posture are present in `ops/local-pos
 
 ## Validate and import
 
-Validation is dry-run by default and does not require a database:
+Validation is dry-run by default and does not require a database. Use the latest owner-finalized snapshot for current operations:
 
 ```bash
 npm run import:youtube-playlists -- \
-  --catalog data/youtube-playlists/2026-07-31-catalog.json \
-  --memberships data/youtube-playlists/2026-07-31-memberships.tsv \
+  --catalog data/youtube-playlists/2026-08-02-catalog.json \
+  --memberships data/youtube-playlists/2026-08-02-memberships.tsv \
   --dry-run
 ```
 
-After migration review, import into an explicitly selected local database:
+After review, import into the explicitly selected local database:
 
 ```bash
 MISSION_CONTROL_DATABASE_URL="postgresql://${USER}@127.0.0.1:5432/aipaths_mission_control_local" \
   npm run import:youtube-playlists -- \
-  --catalog data/youtube-playlists/2026-07-31-catalog.json \
-  --memberships data/youtube-playlists/2026-07-31-memberships.tsv \
+  --catalog data/youtube-playlists/2026-08-02-catalog.json \
+  --memberships data/youtube-playlists/2026-08-02-memberships.tsv \
   --apply
 ```
 
