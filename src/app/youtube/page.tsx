@@ -3,6 +3,7 @@ import { normalizeRows } from "@/lib/db/mission-control";
 import { query } from "@/lib/db/postgres";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { YouTubeDecisionBoard } from "@/components/youtube/YouTubeDecisionBoard";
+import { isYouTubeLaunchPlaylistEligible, listYouTubePlaylists } from "@/lib/youtube/playlists";
 
 export const dynamic = "force-dynamic";
 
@@ -43,6 +44,21 @@ export interface LinkedWorkItem {
 
 export default async function YouTubePage() {
   const localSupabasePlaceholder = isLocalSupabasePlaceholder();
+
+  const governedPlaylists = await listYouTubePlaylists({
+    useCases: [],
+    tags: [],
+    status: "active",
+    includeVideos: false,
+    resolve: null,
+  });
+  const playlistOptions = governedPlaylists
+    .filter(isYouTubeLaunchPlaylistEligible)
+    .map((playlist) => ({
+      playlist_id: playlist.playlist_id,
+      title: playlist.title,
+      purpose: playlist.purpose,
+    }));
 
   let videos: VideoPipelineItem[] = [];
   let linkedWorkItems: LinkedWorkItem[] = [];
@@ -93,7 +109,13 @@ export default async function YouTubePage() {
     linkedWorkItems = (workItems ?? []) as unknown as LinkedWorkItem[];
   }
 
-  return <YouTubeDecisionBoard initialItems={videos} initialWorkItems={linkedWorkItems} />;
+  return (
+    <YouTubeDecisionBoard
+      initialItems={videos}
+      initialWorkItems={linkedWorkItems}
+      playlistOptions={playlistOptions}
+    />
+  );
 }
 
 function isLocalSupabasePlaceholder() {

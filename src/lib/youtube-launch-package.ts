@@ -10,6 +10,7 @@ export type YouTubeLaunchPackageInput = {
   title?: string | null;
   playlistContextUrl?: string | null;
   playlistId?: string | null;
+  requireGovernedPlaylist?: boolean;
   cta?: string | null;
   targetEmailSendAt?: string | null;
   emailTrackingRef?: string | null;
@@ -69,6 +70,7 @@ export type ScheduledYouTubeLaunchSpecContext = {
   publishAt: string;
   launchGeneration?: string | null;
   playlistContextUrl?: string | null;
+  playlistId?: string | null;
   targetCommunityPublishAt: string;
   targetEmailSendAt: string;
   emailTrackingRef: string;
@@ -374,6 +376,7 @@ function communityDraftInstruction(input: ScheduledYouTubeLaunchSpecContext) {
     video_id: input.videoId,
     watch_url: input.youtubeUrl,
     playlist_context_url: input.playlistContextUrl || null,
+    playlist_id: input.playlistId || null,
     publish_at: input.publishAt,
     target_publish_at: input.targetCommunityPublishAt,
     cta: input.cta || null,
@@ -409,6 +412,7 @@ function pinnedCommentDraftInstruction(input: ScheduledYouTubeLaunchSpecContext)
     video_id: input.videoId,
     watch_url: input.youtubeUrl,
     playlist_context_url: input.playlistContextUrl || null,
+    playlist_id: input.playlistId || null,
     publish_at: input.publishAt,
     cta: input.cta || null,
     target_publication_rule: "after_gonza_approval_and_live_check_only",
@@ -449,6 +453,7 @@ function marketingEmailInstruction(input: ScheduledYouTubeLaunchSpecContext) {
     video_id: input.videoId,
     watch_url: input.youtubeUrl,
     playlist_context_url: input.playlistContextUrl || null,
+    playlist_id: input.playlistId || null,
     publish_at: input.publishAt,
     target_send_at: input.targetEmailSendAt,
     email_tracking_ref: input.emailTrackingRef,
@@ -1099,7 +1104,7 @@ export function buildScheduledYouTubeLaunchWorkSpecs(context: ScheduledYouTubeLa
     live_check_relation_type: "video_launch_activate",
   };
 
-  return [
+  const specs: ScheduledYouTubeLaunchWorkSpec[] = [
     {
       relationType: "youtube_launch_preflight",
       mapRelationType: "followup",
@@ -1244,6 +1249,13 @@ export function buildScheduledYouTubeLaunchWorkSpecs(context: ScheduledYouTubeLa
       payloadExtra: { launch_step: "snapshot", snapshot_label: "+28d", playlist_context_url: context.playlistContextUrl || null },
     },
   ];
+  return specs.map((spec) => ({
+    ...spec,
+    payloadExtra: {
+      ...(spec.payloadExtra || {}),
+      playlist_id: context.playlistId || null,
+    },
+  }));
 }
 
 export async function createScheduledYouTubeLaunchPackage(db: SupabaseClient, input: YouTubeLaunchPackageInput) {

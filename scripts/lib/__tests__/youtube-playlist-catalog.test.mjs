@@ -46,6 +46,15 @@ test("resolver uses exact ID, slug, or alias only and reports ambiguity instead 
   assert.deepEqual(Array.from(ambiguous.candidates), ["PL-agent", "PL-archive"]);
 });
 
+test("normal launch eligibility is active long-form catalog content only", () => {
+  const { isYouTubeLaunchPlaylistEligible } = loadCatalog();
+  assert.equal(isYouTubeLaunchPlaylistEligible({ status: "active", kind: "hub" }), true);
+  assert.equal(isYouTubeLaunchPlaylistEligible({ status: "active", kind: "official_series" }), true);
+  assert.equal(isYouTubeLaunchPlaylistEligible({ status: "active", kind: "shorts" }), false);
+  assert.equal(isYouTubeLaunchPlaylistEligible({ status: "active", kind: "archive" }), false);
+  assert.equal(isYouTubeLaunchPlaylistEligible({ status: "archived", kind: "hub" }), false);
+});
+
 test("catalog read model applies array filters with parameters and deterministically nests memberships", async () => {
   const calls = [];
   const { listYouTubePlaylists } = loadCatalog(async (sql, params) => {

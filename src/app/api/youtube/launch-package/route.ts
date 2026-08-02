@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { getLocalMissionControlUser, isLocalAuthDisabled } from "@/lib/auth/local";
 import { extractYouTubeVideoId, type JsonRecord } from "@/lib/youtube-launch-package";
 import { createScheduledYouTubeLaunchPackageLocal } from "@/lib/youtube-launch-package-local";
+import { isYouTubeLaunchPlaylistEligible, listYouTubePlaylists } from "@/lib/youtube/playlists";
 
 export const dynamic = "force-dynamic";
 
@@ -37,6 +38,19 @@ function bodyString(body: JsonRecord, keys: string[]) {
   return null;
 }
 
+function bodyStringAliasSet(body: JsonRecord, keys: string[], fieldName: string) {
+  const normalizedValues: string[] = [];
+  for (const key of keys) {
+    const value = trimToNull(body[key]);
+    if (value) normalizedValues.push(value);
+  }
+  const distinctValues = new Set(normalizedValues);
+  return {
+    value: normalizedValues[0] || null,
+    error: distinctValues.size > 1 ? `${fieldName} aliases must resolve to the same value` : null,
+  };
+}
+
 function isUuid(value: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
@@ -55,7 +69,7 @@ export async function GET() {
       youtube_url: "https://www.youtube.com/watch?v=Dn1pJz5fq-w",
       publish_at: "2026-07-07T14:00:00Z",
       title: "Cómo construí un equipo usando IA",
-      playlist_context_url: "https://www.youtube.com/watch?v=Dn1pJz5fq-w&list=PLAYLIST_ID",
+      playlist_id: "Exact ID from the active governed playlist catalog (required)",
       target_email_send_at: "Optional ISO date; defaults to publish_at+3h",
       email_tracking_ref: "Optional; defaults to email-youtube-<video_id>",
       optional_diagnostic_cta: "Optional diagnostic CTA URL for Marketing context",
@@ -97,16 +111,25 @@ export async function POST(request: NextRequest) {
   const videoId = explicitVideoId || urlVideoId;
   const publishAt = bodyString(body, ["publish_at", "publishAt", "scheduled_publish_at"]);
   const title = bodyString(body, ["title", "video_title"]);
-  const playlistContextUrl = bodyString(body, ["playlist_context_url", "playlistContextUrl", "playlist_url", "playlistUrl"]);
-  const playlistId = bodyString(body, ["playlist_id", "playlistId"]);
+  const playlistContextAliases = bodyStringAliasSet(
+    body,
+    ["playlist_context_url", "playlistContextUrl", "playlist_url", "playlistUrl"],
+    "playlist_context_url",
+  );
+  const playlistIdAliases = bodyStringAliasSet(body, ["playlist_id", "playlistId"], "playlist_id");
+  const playlistContextUrl = playlistContextAliases.value;
+  const playlistId = playlistIdAliases.value;
   const cta = bodyString(body, ["cta", "community_cta", "communityCta"]);
   const targetEmailSendAt = bodyString(body, ["target_email_send_at", "targetEmailSendAt"]);
   const emailTrackingRef = bodyString(body, ["email_tracking_ref", "emailTrackingRef"]);
   const optionalDiagnosticCta = bodyString(body, ["optional_diagnostic_cta", "optionalDiagnosticCta", "diagnostic_cta", "diagnosticCta"]);
   const preparedAt = bodyString(body, ["prepared_at", "preparedAt"]);
 
+  if (playlistContextAliases.error) return NextResponse.json({ error: playlistContextAliases.error }, { status: 400 });
+  if (playlistIdAliases.error) return NextResponse.json({ error: playlistIdAliases.error }, { status: 400 });
   if (!publishAt) return NextResponse.json({ error: "publish_at is required" }, { status: 400 });
   if (!youtubeUrl && !videoId) return NextResponse.json({ error: "youtube_url or video_id is required" }, { status: 400 });
+  if (!playlistId) return NextResponse.json({ error: "playlist_id is required" }, { status: 400 });
   if (pipelineItemId && !isUuid(pipelineItemId)) return NextResponse.json({ error: "pipeline_item_id must be a UUID" }, { status: 400 });
   if (youtubeUrl && !urlVideoId) return NextResponse.json({ error: "youtube_url must be a supported YouTube video URL" }, { status: 400 });
   if (!videoId || !/^[a-zA-Z0-9_-]{11}$/.test(videoId)) return NextResponse.json({ error: "video_id must be a valid 11-character YouTube ID" }, { status: 400 });
@@ -116,6 +139,22 @@ export async function POST(request: NextRequest) {
   if (!isTimezoneQualifiedIso(publishAt)) return NextResponse.json({ error: "publish_at must be a timezone-qualified ISO timestamp" }, { status: 400 });
 
   try {
+    const activePlaylists = await listYouTubePlaylists({
+      useCases: [],
+      tags: [],
+      status: "active",
+      includeVideos: false,
+      resolve: null,
+    });
+    const eligiblePlaylistMatches = activePlaylists.filter((playlist) =>
+      playlist.playlist_id === playlistId && isYouTubeLaunchPlaylistEligible(playlist));
+    if (eligiblePlaylistMatches.length !== 1) {
+      return NextResponse.json(
+        { error: "playlist_id must reference exactly one active eligible playlist in the governed YouTube catalog" },
+        { status: 400 },
+      );
+    }
+
     const launchInput = {
       pipelineItemId,
       youtubeUrl,
@@ -123,7 +162,8 @@ export async function POST(request: NextRequest) {
       publishAt,
       title,
       playlistContextUrl,
-      playlistId,
+      playlistId: eligiblePlaylistMatches[0].playlist_id,
+      requireGovernedPlaylist: true,
       cta,
       targetEmailSendAt,
       emailTrackingRef,
@@ -143,6 +183,7 @@ export async function POST(request: NextRequest) {
       pinned_comment_item_id: result.pinnedCommentItem.id,
       video_id: result.videoId,
       youtube_url: result.youtubeUrl,
+      playlist_id: result.playlistId,
       playlist_context_url: result.playlistContextUrl,
       publish_at: result.publishAt,
       target_community_publish_at: result.targetCommunityPublishAt,
@@ -163,8 +204,17 @@ export async function POST(request: NextRequest) {
       email_campaign_handoff: "included_v1_marketing_owned",
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : typeof err === "string" ? err : JSON.stringify(err);
-    const status = /not found/i.test(message) ? 404 : /cannot schedule|must reference/i.test(message) ? 409 : 500;
+    const message = err instanceof Error
+      ? err.message
+      : err && typeof err === "object" && "message" in err && typeof (err as { message?: unknown }).message === "string"
+        ? (err as { message: string }).message
+        : typeof err === "string" ? err : JSON.stringify(err);
+    const explicitStatus = err && typeof err === "object" && "status" in err
+      ? Number((err as { status?: unknown }).status)
+      : null;
+    const status = explicitStatus === 400 || explicitStatus === 409
+      ? explicitStatus
+      : /not found/i.test(message) ? 404 : /cannot schedule|must reference/i.test(message) ? 409 : 500;
     return NextResponse.json({ error: message }, { status });
   }
 }

@@ -39,6 +39,7 @@ type ItemDetails = {
   selectedTitle: string | null;
   youtubeUrl: string | null;
   videoId: string | null;
+  playlistId: string | null;
   nextAction: string | null;
   shortDescription: string | null;
   ideaSection: JsonRecord | null;
@@ -59,6 +60,13 @@ type StageForm = {
   youtubeUrl: string;
   videoId: string;
   publishAt: string;
+  playlistId: string;
+};
+
+export type YouTubePlaylistOption = {
+  playlist_id: string;
+  title: string;
+  purpose: string | null;
 };
 
 type BoardItemModel = {
@@ -123,12 +131,20 @@ const STATUS_STYLES: Record<string, string> = {
 
 const OPEN_WORK_STATUSES = new Set(["draft", "ready", "blocked", "in_progress"]);
 
-export function YouTubeDecisionBoard({ initialItems, initialWorkItems }: { initialItems: VideoPipelineItem[]; initialWorkItems: LinkedWorkItem[] }) {
+export function YouTubeDecisionBoard({
+  initialItems,
+  initialWorkItems,
+  playlistOptions,
+}: {
+  initialItems: VideoPipelineItem[];
+  initialWorkItems: LinkedWorkItem[];
+  playlistOptions: YouTubePlaylistOption[];
+}) {
   const router = useRouter();
   const [items, setItems] = useRealtimeYouTube(initialItems);
   const realtimeWorkItems = useRealtimeWorkItems(initialWorkItems);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [stageForm, setStageForm] = useState<StageForm>({ status: "draft", note: "", youtubeUrl: "", videoId: "", publishAt: "" });
+  const [stageForm, setStageForm] = useState<StageForm>({ status: "draft", note: "", youtubeUrl: "", videoId: "", publishAt: "", playlistId: "" });
   const [activeView, setActiveView] = useState<WorkflowViewKey>("prep");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -179,12 +195,18 @@ export function YouTubeDecisionBoard({ initialItems, initialWorkItems }: { initi
       youtubeUrl: selectedModel.details.youtubeUrl || "",
       videoId: selectedModel.details.videoId || "",
       publishAt: toDateTimeLocalValue(selectedModel.item.scheduled_for),
+      playlistId: selectedModel.details.playlistId || "",
     });
     setError(null);
   }, [selectedModel]);
 
   async function submitStageChange() {
     if (!selectedModel) return;
+
+    if (stageForm.status === "scheduled" && !stageForm.playlistId.trim()) {
+      setError("Scheduled requires a governed YouTube playlist selection.");
+      return;
+    }
 
     if (stageForm.status === "scheduled" && ((!stageForm.youtubeUrl.trim() && !stageForm.videoId.trim()) || !stageForm.publishAt)) {
       setError("Scheduled requires a YouTube URL or video ID and a publish date.");
@@ -204,6 +226,7 @@ export function YouTubeDecisionBoard({ initialItems, initialWorkItems }: { initi
               title: selectedModel.item.title,
               youtube_url: stageForm.youtubeUrl,
               video_id: stageForm.videoId,
+              playlist_id: stageForm.playlistId,
               publish_at: new Date(stageForm.publishAt).toISOString(),
             }
           : {
@@ -313,6 +336,7 @@ export function YouTubeDecisionBoard({ initialItems, initialWorkItems }: { initi
           details={selectedModel.details}
           workItems={selectedModel.workItems}
           form={stageForm}
+          playlistOptions={playlistOptions}
           busy={busy}
           error={error}
           onClose={() => setSelectedId(null)}
@@ -448,6 +472,7 @@ function DetailDrawer({
   details,
   workItems,
   form,
+  playlistOptions,
   busy,
   error,
   onClose,
@@ -458,6 +483,7 @@ function DetailDrawer({
   details: ItemDetails;
   workItems: LinkedWorkItem[];
   form: StageForm;
+  playlistOptions: YouTubePlaylistOption[];
   busy: boolean;
   error: string | null;
   onClose: () => void;
@@ -547,14 +573,31 @@ function DetailDrawer({
                   />
                 </Field>
                 {form.status === "scheduled" && (
-                  <Field label="Scheduled publish time">
-                    <input
-                      type="datetime-local"
-                      value={form.publishAt}
-                      onChange={(event) => onFormChange({ publishAt: event.target.value })}
-                      className="w-full rounded-lg border border-gray-800 bg-[#0a0a0f] px-3 py-2 text-sm text-white outline-none transition focus:border-blue-500"
-                    />
-                  </Field>
+                  <>
+                    <Field label="Playlist (required)">
+                      <select
+                        required
+                        value={form.playlistId}
+                        onChange={(event) => onFormChange({ playlistId: event.target.value })}
+                        className="w-full rounded-lg border border-gray-800 bg-[#0a0a0f] px-3 py-2 text-sm text-white outline-none transition focus:border-blue-500"
+                      >
+                        <option value="">Select a governed playlist</option>
+                        {playlistOptions.map((option) => (
+                          <option key={option.playlist_id} value={option.playlist_id}>
+                            {option.title}{option.purpose ? ` — ${option.purpose}` : ""}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                    <Field label="Scheduled publish time">
+                      <input
+                        type="datetime-local"
+                        value={form.publishAt}
+                        onChange={(event) => onFormChange({ publishAt: event.target.value })}
+                        className="w-full rounded-lg border border-gray-800 bg-[#0a0a0f] px-3 py-2 text-sm text-white outline-none transition focus:border-blue-500"
+                      />
+                    </Field>
+                  </>
                 )}
               </div>
             )}
@@ -641,6 +684,19 @@ function getItemDetails(item: VideoPipelineItem): ItemDetails {
     ["published", "video_id"],
     ["video", "id"],
   ]) || extractYouTubeVideoId(youtubeUrl);
+  const playlistContextUrl = firstStringFromPaths([youtubeV0, metadata], [
+    ["playlist_context_url"],
+    ["playlist_url"],
+    ["launch_package", "playlist_context_url"],
+    ["launch_package", "playlist_url"],
+    ["publication", "playlist_context_url"],
+    ["publication", "playlist_url"],
+  ]);
+  const playlistId = firstStringFromPaths([youtubeV0, metadata], [
+    ["playlist_id"],
+    ["launch_package", "playlist_id"],
+    ["publication", "playlist_id"],
+  ]) || extractYouTubePlaylistId(playlistContextUrl || youtubeUrl);
   const nextAction = firstStringFromPaths([youtubeV0, metadata], [
     ["next_action"],
     ["next"],
@@ -726,6 +782,7 @@ function getItemDetails(item: VideoPipelineItem): ItemDetails {
     selectedTitle,
     youtubeUrl,
     videoId,
+    playlistId,
     nextAction,
     shortDescription,
     ideaSection,
@@ -1162,6 +1219,11 @@ function extractYouTubeVideoId(url: string | null) {
   const shortMatch = url.match(/youtu\.be\/([^?&/]+)/);
   if (shortMatch?.[1]) return shortMatch[1];
   return null;
+}
+
+function extractYouTubePlaylistId(url: string | null) {
+  if (!url) return null;
+  return url.match(/[?&]list=([^&#]+)/)?.[1] || null;
 }
 
 function formatStatus(status: string) {

@@ -41,6 +41,12 @@ export interface YouTubePlaylist {
   videos?: YouTubePlaylistVideo[];
 }
 
+export function isYouTubeLaunchPlaylistEligible(
+  playlist: Pick<YouTubePlaylist, "status" | "kind">,
+) {
+  return playlist.status === "active" && playlist.kind !== "shorts" && playlist.kind !== "archive";
+}
+
 export interface PlaylistQuery {
   useCases: string[];
   tags: string[];

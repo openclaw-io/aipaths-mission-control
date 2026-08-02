@@ -58,6 +58,167 @@ function toRecord(value: unknown): JsonRecord {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonRecord) : {};
 }
 
+export class GovernedPlaylistValidationError extends Error {
+  readonly status: 400 | 409;
+
+  constructor(message: string, status: 400 | 409 = 400) {
+    super(message);
+    this.name = "GovernedPlaylistValidationError";
+    this.status = status;
+  }
+}
+
+function valueAtPath(record: JsonRecord, path: string[]) {
+  let current: unknown = record;
+  for (const key of path) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) return null;
+    current = (current as JsonRecord)[key];
+  }
+  return trimToNull(current);
+}
+
+function governedPlaylistIdFromCandidate(value: unknown, allowRawPlaylistId = false) {
+  const raw = trimToNull(value);
+  if (!raw) return null;
+  if (allowRawPlaylistId && /^[a-zA-Z0-9_-]+$/.test(raw)) return raw;
+  try {
+    const url = new URL(raw);
+    const host = url.hostname.toLowerCase().replace(/^www\./, "");
+    if (url.protocol !== "https:" || url.username || url.password || url.port || url.hash
+      || (host !== "youtu.be" && host !== "youtube.com" && !host.endsWith(".youtube.com"))) return null;
+    const playlistId = trimToNull(url.searchParams.get("list"));
+    return playlistId && /^[a-zA-Z0-9_-]+$/.test(playlistId) ? playlistId : null;
+  } catch {
+    return null;
+  }
+}
+
+function assertGovernedCandidate(input: {
+  value: unknown;
+  selectedPlaylistId: string;
+  label: string;
+  allowRawPlaylistId?: boolean;
+  existingState?: boolean;
+}) {
+  const raw = trimToNull(input.value);
+  if (!raw) return;
+  const candidatePlaylistId = governedPlaylistIdFromCandidate(raw, input.allowRawPlaylistId);
+  if (!candidatePlaylistId || candidatePlaylistId !== input.selectedPlaylistId) {
+    throw new GovernedPlaylistValidationError(
+      `${input.existingState ? "Existing scheduled launch" : input.label} conflicts with governed playlist_id ${input.selectedPlaylistId}`,
+      input.existingState ? 409 : 400,
+    );
+  }
+}
+
+async function lockGovernedPlaylist(client: PoolClient, playlistId: string | null) {
+  if (!playlistId || !/^[a-zA-Z0-9_-]+$/.test(playlistId)) {
+    throw new GovernedPlaylistValidationError("playlist_id is required for governed YouTube launches");
+  }
+  const result = await client.query(
+    `select playlist_id
+       from public.youtube_playlists
+      where playlist_id = $1
+        and status = 'active'
+        and kind in ('hub', 'official_series')
+      for share`,
+    [playlistId],
+  );
+  if (result.rowCount !== 1) {
+    throw new GovernedPlaylistValidationError(
+      "playlist_id must reference exactly one active eligible playlist in the governed YouTube catalog",
+    );
+  }
+  return String(result.rows[0].playlist_id);
+}
+
+function assertGovernedPlaylistInputs(input: {
+  launchInput: YouTubeLaunchPackageInput;
+  refs: JsonRecord;
+  youtubeUrl: string;
+  selectedPlaylistId: string;
+  existingVideoMetadata: JsonRecord;
+}) {
+  assertGovernedCandidate({
+    value: input.launchInput.playlistContextUrl,
+    selectedPlaylistId: input.selectedPlaylistId,
+    label: "playlist_context_url",
+  });
+  const refIdPaths = [["playlist_id"], ["playlistId"], ["playlist", "id"]];
+  const refUrlPaths = [
+    ["playlist_context_url"], ["playlistContextUrl"], ["playlist_url"], ["playlistUrl"],
+    ["playlist", "context_url"], ["playlist", "url"],
+    ["source", "playlist_context_url"], ["source", "playlist_url"],
+  ];
+  for (const path of refIdPaths) {
+    assertGovernedCandidate({
+      value: valueAtPath(input.refs, path),
+      selectedPlaylistId: input.selectedPlaylistId,
+      label: `refs.${path.join(".")}`,
+      allowRawPlaylistId: true,
+    });
+  }
+  for (const path of refUrlPaths) {
+    assertGovernedCandidate({
+      value: valueAtPath(input.refs, path),
+      selectedPlaylistId: input.selectedPlaylistId,
+      label: `refs.${path.join(".")}`,
+    });
+  }
+  const youtubePlaylistId = governedPlaylistIdFromCandidate(input.youtubeUrl);
+  if (youtubePlaylistId && youtubePlaylistId !== input.selectedPlaylistId) {
+    throw new GovernedPlaylistValidationError(
+      `youtube_url conflicts with governed playlist_id ${input.selectedPlaylistId}`,
+    );
+  }
+
+  const existingLaunch = toRecord(input.existingVideoMetadata.launch_package);
+  if (existingLaunch.kind === "scheduled_youtube_launch_package_v1" && existingLaunch.status === "scheduled") {
+    const existingIdPaths = [
+      ["launch_package", "playlist_id"],
+      ["youtube_v0", "playlist_id"],
+      ["publication", "playlist_id"],
+      ["source", "playlist_id"],
+    ];
+    const existingUrlPaths = [
+      ["launch_package", "playlist_context_url"], ["launch_package", "playlist_url"],
+      ["youtube_v0", "playlist_context_url"], ["youtube_v0", "playlist_url"],
+      ["publication", "playlist_context_url"], ["publication", "playlist_url"],
+      ["source", "playlist_context_url"], ["source", "playlist_url"],
+    ];
+    for (const path of existingIdPaths) {
+      assertGovernedCandidate({
+        value: valueAtPath(input.existingVideoMetadata, path),
+        selectedPlaylistId: input.selectedPlaylistId,
+        label: `existing metadata.${path.join(".")}`,
+        allowRawPlaylistId: true,
+        existingState: true,
+      });
+    }
+    for (const path of existingUrlPaths) {
+      assertGovernedCandidate({
+        value: valueAtPath(input.existingVideoMetadata, path),
+        selectedPlaylistId: input.selectedPlaylistId,
+        label: `existing metadata.${path.join(".")}`,
+        existingState: true,
+      });
+    }
+    for (const path of [
+      ["launch_package", "youtube_url"],
+      ["youtube_v0", "youtube_url"],
+      ["publication", "youtube_url"],
+    ]) {
+      const existingYoutubePlaylistId = governedPlaylistIdFromCandidate(valueAtPath(input.existingVideoMetadata, path));
+      if (existingYoutubePlaylistId && existingYoutubePlaylistId !== input.selectedPlaylistId) {
+        throw new GovernedPlaylistValidationError(
+          `Existing scheduled launch conflicts with governed playlist_id ${input.selectedPlaylistId}`,
+          409,
+        );
+      }
+    }
+  }
+}
+
 function normalizeIsoDate(value: string, fieldName: string) {
   if (!/(?:Z|[+-]\d{2}:\d{2})$/i.test(value)) {
     throw new Error(`A timezone-qualified ${fieldName} is required`);
@@ -221,6 +382,7 @@ async function ensureVideoPipelineItem(client: PoolClient, input: {
   youtubeUrl: string;
   videoId: string;
   playlistContextUrl: string | null;
+  playlistId: string | null;
   targetCommunityPublishAt: string;
   targetEmailSendAt: string;
   emailTrackingRef: string;
@@ -248,6 +410,7 @@ async function ensureVideoPipelineItem(client: PoolClient, input: {
     video_id: input.videoId,
     youtube_url: input.youtubeUrl,
     playlist_context_url: input.playlistContextUrl,
+    playlist_id: input.playlistId,
     publish_at: input.publishAt,
     target_community_publish_at: input.targetCommunityPublishAt,
     target_email_send_at: input.targetEmailSendAt,
@@ -266,6 +429,7 @@ async function ensureVideoPipelineItem(client: PoolClient, input: {
       video_id: input.videoId,
       youtube_url: input.youtubeUrl,
       playlist_context_url: input.playlistContextUrl,
+      playlist_id: input.playlistId,
       scheduled_publish_at: input.publishAt,
       stage: "scheduled",
       launch_package_status: "scheduled",
@@ -275,6 +439,7 @@ async function ensureVideoPipelineItem(client: PoolClient, input: {
       video_id: input.videoId,
       youtube_url: input.youtubeUrl,
       playlist_context_url: input.playlistContextUrl,
+      playlist_id: input.playlistId,
       scheduled_publish_at: input.publishAt,
     },
     launch_package: launchPackage,
@@ -327,6 +492,7 @@ async function ensureCommunityPipelineItem(client: PoolClient, input: {
   publishAt: string;
   targetPublishAt: string;
   playlistContextUrl: string | null;
+  playlistId: string | null;
   cta: string | null;
   requestedBy: string;
 }) {
@@ -356,6 +522,7 @@ async function ensureCommunityPipelineItem(client: PoolClient, input: {
       video_url: input.youtubeUrl,
       video_id: input.videoId,
       playlist_context_url: input.playlistContextUrl,
+      playlist_id: input.playlistId,
       publish_at: input.publishAt,
     },
     copy: toRecord(existingMetadata.copy),
@@ -372,6 +539,7 @@ async function ensureCommunityPipelineItem(client: PoolClient, input: {
       video_id: input.videoId,
       youtube_url: input.youtubeUrl,
       playlist_context_url: input.playlistContextUrl,
+      playlist_id: input.playlistId,
       publish_at: input.publishAt,
       target_publish_at: input.targetPublishAt,
       cta: input.cta,
@@ -449,6 +617,7 @@ async function ensureMarketingEmailPipelineItem(client: PoolClient, input: {
   videoId: string;
   publishAt: string;
   playlistContextUrl: string | null;
+  playlistId: string | null;
   targetSendAt: string;
   emailTrackingRef: string;
   optionalDiagnosticCta: string | null;
@@ -469,6 +638,7 @@ async function ensureMarketingEmailPipelineItem(client: PoolClient, input: {
       video_url: input.youtubeUrl,
       video_id: input.videoId,
       playlist_context_url: input.playlistContextUrl,
+      playlist_id: input.playlistId,
       publish_at: input.publishAt,
     },
     schedule: {
@@ -485,6 +655,7 @@ async function ensureMarketingEmailPipelineItem(client: PoolClient, input: {
       video_id: input.videoId,
       youtube_url: input.youtubeUrl,
       playlist_context_url: input.playlistContextUrl,
+      playlist_id: input.playlistId,
       publish_at: input.publishAt,
       target_send_at: input.targetSendAt,
       email_tracking_ref: input.emailTrackingRef,
@@ -545,6 +716,7 @@ async function ensurePinnedCommentPipelineItem(client: PoolClient, input: {
   videoId: string;
   publishAt: string;
   playlistContextUrl: string | null;
+  playlistId: string | null;
   cta: string | null;
   requestedBy: string;
 }) {
@@ -572,6 +744,7 @@ async function ensurePinnedCommentPipelineItem(client: PoolClient, input: {
       video_url: input.youtubeUrl,
       video_id: input.videoId,
       playlist_context_url: input.playlistContextUrl,
+      playlist_id: input.playlistId,
       publish_at: input.publishAt,
     },
     draft: toRecord(existingMetadata.draft),
@@ -582,6 +755,7 @@ async function ensurePinnedCommentPipelineItem(client: PoolClient, input: {
       video_id: input.videoId,
       youtube_url: input.youtubeUrl,
       playlist_context_url: input.playlistContextUrl,
+      playlist_id: input.playlistId,
       publish_at: input.publishAt,
       cta: input.cta,
       prepublication_draft_authorized: true,
@@ -683,6 +857,8 @@ async function upsertLaunchWorkItem(client: PoolClient, spec: ScheduledYouTubeLa
   videoId: string;
   videoPipelineItemId: string;
   youtubeUrl: string;
+  playlistContextUrl: string | null;
+  playlistId: string | null;
   publishAt: string;
   launchGeneration: string;
   requestedBy: string;
@@ -709,6 +885,8 @@ async function upsertLaunchWorkItem(client: PoolClient, spec: ScheduledYouTubeLa
     schedule_kind: "youtube_launch_package",
     video_id: common.videoId,
     youtube_url: common.youtubeUrl,
+    playlist_context_url: common.playlistContextUrl,
+    playlist_id: common.playlistId,
     publish_at: common.publishAt,
     launch_generation: common.launchGeneration,
     newsletter_scope: "excluded_v1",
@@ -802,6 +980,9 @@ export async function createScheduledYouTubeLaunchPackageLocal(input: YouTubeLau
     for (const lockScope of lockScopes.sort()) {
       await client.query("select pg_advisory_xact_lock(hashtext($1))", [lockScope]);
     }
+    const governedPlaylistId = input.requireGovernedPlaylist
+      ? await lockGovernedPlaylist(client, trimToNull(input.playlistId))
+      : null;
 
     // Discover identity without a row lock, then follow the global work ->
     // pipeline row-lock order shared with work-item completion.
@@ -842,31 +1023,42 @@ export async function createScheduledYouTubeLaunchPackageLocal(input: YouTubeLau
       publishAt,
     }) || newLaunchGeneration(videoId, publishAt);
     const existingVideoMetadata = toRecord(existingVideoContext?.metadata);
-    const playlistContextUrl =
-      resolveYouTubePlaylistContextUrl(videoId, input.playlistContextUrl, { allowPlaylistOnly: true }) ||
-      firstPlaylistContextUrlFromRecords(videoId, [refs], [
-        ["playlist_context_url"],
-        ["playlistContextUrl"],
-        ["playlist_url"],
-        ["playlistUrl"],
-        ["playlist", "context_url"],
-        ["playlist", "url"],
-        ["source", "playlist_context_url"],
-        ["source", "playlist_url"],
-      ], { allowPlaylistOnly: true }) ||
-      firstPlaylistContextUrlFromRecords(videoId, [existingVideoMetadata], [
-        ["launch_package", "playlist_context_url"],
-        ["launch_package", "playlist_url"],
-        ["source", "playlist_context_url"],
-        ["source", "playlist_url"],
-        ["youtube_v0", "playlist_context_url"],
-        ["youtube_v0", "playlist_url"],
-        ["publication", "playlist_context_url"],
-        ["publication", "playlist_url"],
-      ], { allowPlaylistOnly: true }) ||
-      resolveYouTubePlaylistContextUrl(videoId, youtubeUrl) ||
-      resolveYouTubePlaylistContextUrl(videoId, trimToNull(input.playlistId) || firstStringFromRecords([refs], [["playlist_id"], ["playlistId"], ["playlist", "id"]]), { allowRawPlaylistId: true });
+    if (governedPlaylistId) {
+      assertGovernedPlaylistInputs({
+        launchInput: input,
+        refs,
+        youtubeUrl,
+        selectedPlaylistId: governedPlaylistId,
+        existingVideoMetadata,
+      });
+    }
+    const playlistContextUrl = governedPlaylistId
+      ? resolveYouTubePlaylistContextUrl(videoId, governedPlaylistId, { allowRawPlaylistId: true })
+      : resolveYouTubePlaylistContextUrl(videoId, input.playlistContextUrl, { allowPlaylistOnly: true }) ||
+        firstPlaylistContextUrlFromRecords(videoId, [refs], [
+          ["playlist_context_url"],
+          ["playlistContextUrl"],
+          ["playlist_url"],
+          ["playlistUrl"],
+          ["playlist", "context_url"],
+          ["playlist", "url"],
+          ["source", "playlist_context_url"],
+          ["source", "playlist_url"],
+        ], { allowPlaylistOnly: true }) ||
+        firstPlaylistContextUrlFromRecords(videoId, [existingVideoMetadata], [
+          ["launch_package", "playlist_context_url"],
+          ["launch_package", "playlist_url"],
+          ["source", "playlist_context_url"],
+          ["source", "playlist_url"],
+          ["youtube_v0", "playlist_context_url"],
+          ["youtube_v0", "playlist_url"],
+          ["publication", "playlist_context_url"],
+          ["publication", "playlist_url"],
+        ], { allowPlaylistOnly: true }) ||
+        resolveYouTubePlaylistContextUrl(videoId, youtubeUrl) ||
+        resolveYouTubePlaylistContextUrl(videoId, trimToNull(input.playlistId) || firstStringFromRecords([refs], [["playlist_id"], ["playlistId"], ["playlist", "id"]]), { allowRawPlaylistId: true });
     requireCommunityPlaylistContextUrl(videoId, playlistContextUrl);
+    const playlistId = governedPlaylistId || governedPlaylistIdFromCandidate(playlistContextUrl);
     const targetEmailSendAt = input.targetEmailSendAt
       ? normalizeIsoDate(input.targetEmailSendAt, "target_email_send_at")
       : addMilliseconds(publishAt, 3 * 60 * 60 * 1000);
@@ -883,6 +1075,7 @@ export async function createScheduledYouTubeLaunchPackageLocal(input: YouTubeLau
       videoId,
       publishAt,
       playlistContextUrl,
+      playlistId,
       targetCommunityPublishAt,
       targetEmailSendAt,
       emailTrackingRef,
@@ -899,6 +1092,7 @@ export async function createScheduledYouTubeLaunchPackageLocal(input: YouTubeLau
       publishAt,
       targetPublishAt: targetCommunityPublishAt,
       playlistContextUrl,
+      playlistId,
       cta,
       requestedBy,
     });
@@ -909,6 +1103,7 @@ export async function createScheduledYouTubeLaunchPackageLocal(input: YouTubeLau
       videoId,
       publishAt,
       playlistContextUrl,
+      playlistId,
       targetSendAt: targetEmailSendAt,
       emailTrackingRef,
       optionalDiagnosticCta,
@@ -921,6 +1116,7 @@ export async function createScheduledYouTubeLaunchPackageLocal(input: YouTubeLau
       videoId,
       publishAt,
       playlistContextUrl,
+      playlistId,
       cta,
       requestedBy,
     });
@@ -929,6 +1125,8 @@ export async function createScheduledYouTubeLaunchPackageLocal(input: YouTubeLau
       videoId,
       videoPipelineItemId: video.item.id,
       youtubeUrl,
+      playlistContextUrl,
+      playlistId,
       publishAt,
       launchGeneration,
       requestedBy,
@@ -941,6 +1139,7 @@ export async function createScheduledYouTubeLaunchPackageLocal(input: YouTubeLau
       publishAt,
       launchGeneration,
       playlistContextUrl,
+      playlistId,
       targetCommunityPublishAt,
       targetEmailSendAt,
       emailTrackingRef,
@@ -1018,6 +1217,8 @@ export async function createScheduledYouTubeLaunchPackageLocal(input: YouTubeLau
         JSON.stringify({
           video_id: videoId,
           youtube_url: youtubeUrl,
+          playlist_id: playlistId,
+          playlist_context_url: playlistContextUrl,
           publish_at: publishAt,
           launch_generation: launchGeneration,
           activation_work_item_id: activationWorkItemId,
@@ -1048,6 +1249,7 @@ export async function createScheduledYouTubeLaunchPackageLocal(input: YouTubeLau
       publishAt,
       targetCommunityPublishAt,
       targetEmailSendAt,
+      playlistId,
       playlistContextUrl,
       youtubeUrl,
       videoId,

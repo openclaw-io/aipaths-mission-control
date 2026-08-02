@@ -114,6 +114,25 @@ async function readLaunchRows(videoId) {
   });
 }
 
+async function seedGovernedPlaylist(playlistId, overrides = {}) {
+  return withClient(async (client) => {
+    const slug = `test-${playlistId.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
+    const values = {
+      status: "active",
+      kind: "hub",
+      ...overrides,
+    };
+    await client.query(
+      `insert into public.youtube_playlists
+         (playlist_id, canonical_slug, title, url, kind, status)
+       values ($1, $2, $3, $4, $5, $6)
+       on conflict (playlist_id) do update
+         set kind=excluded.kind, status=excluded.status, updated_at=now()`,
+      [playlistId, slug, `Test ${playlistId}`, `https://www.youtube.com/playlist?list=${playlistId}`, values.kind, values.status],
+    );
+  });
+}
+
 async function insertVideoPipelineItem(overrides = {}) {
   return withClient(async (client) => {
     const values = {
@@ -192,6 +211,149 @@ test("local scheduled launch package derives playlist context from a full YouTub
   const community = workByRelation(rows.work).get("launch_community_draft");
   assert.equal(community.payload.playlist_context_url, playlistContextUrl);
   assert.match(community.instruction, /"playlist_context_url": "https:\/\/www\.youtube\.com\/watch\?v=V2mvpAAA101&list=PLabc123"/);
+});
+
+test("governed launch persists the exact selected playlist provenance across parent, children, and work items", async () => {
+  const videoId = "GovPersist1";
+  const playlistId = "PLGovernedPersist";
+  const playlistContextUrl = `https://www.youtube.com/watch?v=${videoId}&list=${playlistId}`;
+  await seedGovernedPlaylist(playlistId);
+
+  const result = await createScheduledYouTubeLaunchPackageLocal({
+    videoId,
+    title: "Governed provenance",
+    publishAt: "2026-08-20T14:00:00.000Z",
+    playlistId,
+    requireGovernedPlaylist: true,
+    requestedBy: "test:governed",
+  });
+
+  assert.equal(result.playlistId, playlistId);
+  assert.equal(result.playlistContextUrl, playlistContextUrl);
+  const rows = await readLaunchRows(videoId);
+  assert.equal(rows.pipeline.length, 4);
+  for (const row of rows.pipeline) {
+    const launch = row.metadata.launch_package;
+    assert.equal(launch.playlist_id, playlistId, `${row.pipeline_type} launch_package provenance`);
+    assert.equal(launch.playlist_context_url, playlistContextUrl, `${row.pipeline_type} context provenance`);
+    if (row.pipeline_type === "video") {
+      assert.equal(row.metadata.youtube_v0.playlist_id, playlistId);
+      assert.equal(row.metadata.publication.playlist_id, playlistId);
+    } else {
+      assert.equal(row.metadata.source.playlist_id, playlistId);
+    }
+  }
+  assert.equal(rows.work.length, 9);
+  for (const work of rows.work) {
+    assert.equal(work.payload.playlist_id, playlistId, `${work.payload.relation_type} playlist_id`);
+    assert.equal(work.payload.playlist_context_url, playlistContextUrl, `${work.payload.relation_type} context URL`);
+  }
+
+  const rerun = await createScheduledYouTubeLaunchPackageLocal({
+    pipelineItemId: result.videoItem.id,
+    videoId,
+    publishAt: "2026-08-20T14:00:00.000Z",
+    playlistId,
+    requireGovernedPlaylist: true,
+    requestedBy: "test:governed",
+  });
+  assert.equal(rerun.videoItem.id, result.videoItem.id);
+  assert.equal(rerun.playlistId, playlistId);
+});
+
+test("governed launch rejects conflicting explicit, refs, and youtube_url playlist provenance without mutations", async () => {
+  const playlistId = "PLGovernedConflict";
+  await seedGovernedPlaylist(playlistId);
+  const cases = [
+    { videoId: "GovInput001", playlistContextUrl: "https://www.youtube.com/playlist?list=PLUntrustedInput" },
+    { videoId: "GovRefs0001", refs: { playlist_id: "PLUntrustedRefs" } },
+    { videoId: "GovUrl00001", youtubeUrl: "https://www.youtube.com/watch?v=GovUrl00001&list=PLUntrustedUrl" },
+  ];
+
+  for (const candidate of cases) {
+    await assert.rejects(
+      () => createScheduledYouTubeLaunchPackageLocal({
+        ...candidate,
+        publishAt: "2026-08-21T14:00:00.000Z",
+        playlistId,
+        requireGovernedPlaylist: true,
+        requestedBy: "test:governed-conflict",
+      }),
+      (error) => error?.status === 400 && /conflicts with governed playlist_id/i.test(error.message),
+    );
+    const rows = await readLaunchRows(candidate.videoId);
+    assert.equal(rows.pipeline.length, 0);
+    assert.equal(rows.work.length, 0);
+  }
+});
+
+test("governed reschedule fails closed on contradictory existing active launch metadata", async () => {
+  const videoId = "GovExist001";
+  const playlistId = "PLGovernedExisting";
+  await seedGovernedPlaylist(playlistId);
+  const parent = await insertVideoPipelineItem({
+    metadata: {
+      youtube_v0: { stage: "editing" },
+      launch_package: {
+        kind: "scheduled_youtube_launch_package_v1",
+        status: "scheduled",
+        video_id: videoId,
+        playlist_id: "PLLegacyExisting",
+        playlist_context_url: `https://www.youtube.com/watch?v=${videoId}&list=PLLegacyExisting`,
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => createScheduledYouTubeLaunchPackageLocal({
+      pipelineItemId: parent.id,
+      videoId,
+      publishAt: "2026-08-22T14:00:00.000Z",
+      playlistId,
+      requireGovernedPlaylist: true,
+      requestedBy: "test:governed-existing",
+    }),
+    (error) => error?.status === 409 && /existing scheduled launch.*conflicts/i.test(error.message),
+  );
+  const preserved = await withClient((client) => client.query(
+    "select status,metadata from public.pipeline_items where id=$1",
+    [parent.id],
+  ));
+  assert.equal(preserved.rows[0].status, "editing");
+  assert.equal(preserved.rows[0].metadata.launch_package.playlist_id, "PLLegacyExisting");
+  const rows = await readLaunchRows(videoId);
+  assert.equal(rows.work.length, 0);
+  assert.equal(rows.pipeline.length, 1);
+});
+
+test("governed catalog row is revalidated and share-locked inside the transaction before mutations", async () => {
+  const catalogCases = [
+    { videoId: "GovMiss0001", playlistId: "PLGovernedMissing" },
+    { videoId: "GovArch0001", playlistId: "PLGovernedArchived", status: "archived", kind: "hub" },
+    { videoId: "GovShort001", playlistId: "PLGovernedShorts", status: "active", kind: "shorts" },
+  ];
+  await seedGovernedPlaylist(catalogCases[1].playlistId, catalogCases[1]);
+  await seedGovernedPlaylist(catalogCases[2].playlistId, catalogCases[2]);
+
+  for (const candidate of catalogCases) {
+    await assert.rejects(
+      () => createScheduledYouTubeLaunchPackageLocal({
+        videoId: candidate.videoId,
+        publishAt: "2026-08-23T14:00:00.000Z",
+        playlistId: candidate.playlistId,
+        requireGovernedPlaylist: true,
+        requestedBy: "test:governed-catalog",
+      }),
+      (error) => error?.status === 400 && /active eligible playlist.*governed.*catalog/i.test(error.message),
+    );
+    const rows = await readLaunchRows(candidate.videoId);
+    assert.equal(rows.pipeline.length, 0);
+    assert.equal(rows.work.length, 0);
+  }
+
+  const source = readFileSync(resolve(repoRoot, "src/lib/youtube-launch-package-local.ts"), "utf8");
+  assert.match(source, /from public\.youtube_playlists[\s\S]*playlist_id = \$1[\s\S]*status = 'active'[\s\S]*kind in \('hub', 'official_series'\)[\s\S]*for share/);
+  assert.ok(source.indexOf("lockGovernedPlaylist(client") < source.indexOf("findExistingVideoItem(client", source.indexOf("createScheduledYouTubeLaunchPackageLocal")));
 });
 
 test("local scheduled launch package rejects bare AIPaths YouTube URLs before creating launch rows", async () => {
@@ -330,12 +492,15 @@ test("exact pipelineItemId reuses the selected video card, schedules it, and doe
   assert.equal(result.videoItem.current_url, null);
   assert.equal(result.videoItem.metadata.youtube_v0.stage, "scheduled");
   assert.equal(result.videoItem.metadata.launch_package.status, "scheduled");
+  assert.equal(result.playlistContextUrl, `https://www.youtube.com/watch?v=${videoId}&list=PLabc123`);
+  assert.equal(result.videoItem.metadata.launch_package.playlist_context_url, result.playlistContextUrl);
 
   const rows = await withClient((client) => client.query(
-    "select id, status from public.pipeline_items where pipeline_type='video' and (id=$1 or id=$2)",
+    "select id, status, metadata from public.pipeline_items where pipeline_type='video' and (id=$1 or id=$2)",
     [exact.id, decoy.id],
   ));
   assert.equal(rows.rowCount, 2);
+  assert.equal(rows.rows.find((row) => row.id === exact.id).metadata.launch_package.playlist_context_url, result.playlistContextUrl);
   assert.equal(rows.rows.find((row) => row.id === decoy.id).status, "editing");
 });
 
