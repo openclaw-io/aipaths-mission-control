@@ -10,6 +10,7 @@ import {
 import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/admin";
 import { createPipelineWorkItem } from "@/lib/work-items/pipeline-materializer";
+import { buildScheduledLaunchPublicActionPayload } from "@/lib/youtube-launch-package";
 
 export const dynamic = "force-dynamic";
 
@@ -248,6 +249,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         status: "approved",
         approved_at: now,
         approved_by: actorIdentity,
+        launch_generation: readString(asObject(metadata.launch_package).launch_generation),
       },
       runtime_feedback: {
         ...asObject(metadata.runtime_feedback),
@@ -306,14 +308,29 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
           requires_live_check_passed: true,
           requires_gonza_approval: true,
           source_video_id: readString(asObject(metadata.source).video_id),
+          ...buildScheduledLaunchPublicActionPayload({
+            metadata,
+            ownerAgent: "marketing",
+            action: "send_email_campaign",
+            destination: "ai_paths_email",
+          }),
         } : {}),
       },
     };
     const result = await createPipelineWorkItem(db!, workInput);
+    const alignedPayload = {
+      ...asObject(result.workItem.payload),
+      trigger: workInput.trigger,
+      pipeline_type: workInput.pipelineType,
+      pipeline_item_id: workInput.pipelineItemId,
+      relation_type: workInput.relationType,
+      action: workInput.action,
+      ...workInput.payloadExtra,
+    };
 
     // If an open send work item already existed, createPipelineWorkItem dedupes it;
-    // keep its schedule/instructions aligned with the latest selected date.
-    await db!
+    // keep its schedule, instructions, and governed launch contract aligned.
+    const { data: alignedWorkItem, error: alignedWorkItemError } = await db!
       .from("work_items")
       .update({
         title: `Send email campaign: ${item.title}`,
@@ -326,9 +343,15 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         }),
         scheduled_for: scheduledFor,
         status: result.workItem.status === "in_progress" ? "in_progress" : "ready",
+        payload: alignedPayload,
         updated_at: now,
       })
-      .eq("id", result.workItem.id);
+      .eq("id", result.workItem.id)
+      .select("id,status,scheduled_for,payload")
+      .single();
+    if (alignedWorkItemError || !alignedWorkItem) {
+      return NextResponse.json({ error: "Failed to align scheduled email work item" }, { status: 500 });
+    }
 
     const nextMetadata = {
       ...metadata,
@@ -360,7 +383,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
     if (!updated) return NextResponse.json({ error: "Failed to schedule email campaign" }, { status: 500 });
 
-    return NextResponse.json({ item: updated, workItem: { ...result.workItem, scheduled_for: scheduledFor } });
+    return NextResponse.json({ item: updated, workItem: alignedWorkItem });
   }
 
   return NextResponse.json({ error: "Invalid action" }, { status: 400 });

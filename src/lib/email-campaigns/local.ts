@@ -1,5 +1,6 @@
 import { normalizeRow } from "@/lib/db/mission-control";
 import { withTransaction } from "@/lib/db/postgres";
+import { buildScheduledLaunchPublicActionPayload } from "@/lib/youtube-launch-package";
 
 export type JsonRecord = Record<string, unknown>;
 
@@ -275,6 +276,12 @@ async function upsertSendEmailWorkItem(client: QueryClient, input: {
       requires_live_check_passed: true,
       requires_gonza_approval: true,
       source_video_id: sourceVideoId,
+      ...buildScheduledLaunchPublicActionPayload({
+        metadata: input.metadata,
+        ownerAgent: "marketing",
+        action: "send_email_campaign",
+        destination: "ai_paths_email",
+      }),
     } : {}),
   };
 
@@ -664,6 +671,7 @@ export async function approveEmailCampaignLocalAtomic(input: {
         status: "approved",
         approved_at: now,
         approved_by: input.actorIdentity,
+        launch_generation: readString(asObject(metadata.launch_package).launch_generation),
       },
       runtime_feedback: {
         ...asObject(metadata.runtime_feedback),

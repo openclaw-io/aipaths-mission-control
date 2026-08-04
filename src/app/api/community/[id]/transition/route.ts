@@ -12,6 +12,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createServiceClient } from "@/lib/supabase/admin";
 import { resolveCommunityPublicationSlot, getCommunityPublicationSegment } from "@/lib/publication/scheduling";
 import { createPipelineWorkItem } from "@/lib/work-items/pipeline-materializer";
+import { buildScheduledLaunchPublicActionPayload } from "@/lib/youtube-launch-package";
 
 export const dynamic = "force-dynamic";
 
@@ -199,6 +200,12 @@ export async function POST(
     return NextResponse.json({ error: "Community post already has a publication record" }, { status: 409 });
   }
 
+  const launchGenerationFor = (transitionItem: { metadata?: Record<string, unknown> | null }) => {
+    const launchPackage = (transitionItem.metadata || {}).launch_package;
+    if (!launchPackage || typeof launchPackage !== "object" || Array.isArray(launchPackage)) return null;
+    const value = (launchPackage as Record<string, unknown>).launch_generation;
+    return typeof value === "string" && value.trim() ? value.trim() : null;
+  };
   const buildMetadata = (transitionItem: { metadata?: Record<string, unknown> | null }): Record<string, unknown> => ({
     ...(transitionItem.metadata || {}),
     review: {
@@ -214,6 +221,7 @@ export async function POST(
         ? {
             approved_at: new Date().toISOString(),
             approved_by: actorIdentity,
+            launch_generation: launchGenerationFor(transitionItem),
           }
         : {}),
     },
@@ -276,6 +284,12 @@ export async function POST(
           const sourceUrl = [source.url, source.video_url, source.playlist_url]
             .find((value) => typeof value === "string" && value.trim()) as string | undefined;
           const allowsYouTubePreview = source.type === "video" && !!sourceUrl && /(?:youtube\.com|youtu\.be)/i.test(sourceUrl);
+          const launchPublicPayload = buildScheduledLaunchPublicActionPayload({
+            metadata: localMetadata,
+            ownerAgent: "community",
+            action: "publish_community_post",
+            destination: target.channelId,
+          });
           const { workItem } = await createPipelineWorkItemLocal({
             pipelineItemId: lockedItem.id,
             pipelineType: "community_post",
@@ -301,6 +315,7 @@ export async function POST(
                 requires_live_check_passed: true,
                 requires_gonza_approval: true,
                 source_video_id: typeof source.video_id === "string" ? source.video_id : null,
+                ...launchPublicPayload,
               } : {}),
             },
           }, client);
@@ -406,6 +421,12 @@ export async function POST(
       const sourceUrl = [source.url, source.video_url, source.playlist_url]
         .find((value) => typeof value === "string" && value.trim()) as string | undefined;
       const allowsYouTubePreview = source.type === "video" && !!sourceUrl && /(?:youtube\.com|youtu\.be)/i.test(sourceUrl);
+      const launchPublicPayload = buildScheduledLaunchPublicActionPayload({
+        metadata,
+        ownerAgent: "community",
+        action: "publish_community_post",
+        destination: target.channelId,
+      });
       const workInput = {
         pipelineItemId: item.id,
         pipelineType: "community_post",
@@ -431,6 +452,7 @@ export async function POST(
             requires_live_check_passed: true,
             requires_gonza_approval: true,
             source_video_id: typeof source.video_id === "string" ? source.video_id : null,
+            ...launchPublicPayload,
           } : {}),
         },
       };

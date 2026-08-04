@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 export type JsonRecord = Record<string, unknown>;
@@ -102,6 +103,25 @@ function trimToNull(value: unknown) {
 
 function toRecord(value: unknown): JsonRecord {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonRecord) : {};
+}
+
+const GENERATION_SCOPED_WORK_PAYLOAD_KEYS = new Set([
+  "runtime_retry_state", "dead_letter_reason", "dead_lettered_at", "remediation",
+  "external_delivery_claim", "external_delivery_result", "external_delivery_idempotency_key",
+  "dispatch_state", "dispatch_failure_class", "dispatch_failure_reason", "scheduled_launch_failure_class",
+  "wake_failure_count", "last_wake_failed_at", "last_wake_error", "preflight_attempt_count",
+  "output", "result", "live_gate_checked_at", "live_gate_failures", "live_gate_remediation",
+  "dispatch_session_id", "execution_attempt_id", "attempt_id", "wake_attempt",
+]);
+
+function reusablePayloadForLaunchGeneration(payload: JsonRecord, launchGeneration: string) {
+  if (trimToNull(payload.launch_generation) === launchGeneration) return payload;
+  const reusable: JsonRecord = {};
+  for (const [key, value] of Object.entries(payload)) {
+    if (GENERATION_SCOPED_WORK_PAYLOAD_KEYS.has(key) || key.startsWith("generic_notify_")) continue;
+    reusable[key] = value;
+  }
+  return reusable;
 }
 
 function normalizeIsoDate(value: string, fieldName: string) {
@@ -240,6 +260,31 @@ export function firstPlaylistContextUrlFromRecords(videoId: string, records: Jso
     }
   }
   return null;
+}
+
+function playlistIdFromContextUrl(videoId: string, value: string | null | undefined) {
+  const raw = trimToNull(value);
+  return raw ? playlistIdFromYouTubeUrl(videoId, raw, true) : null;
+}
+
+function reusableLaunchGenerationFromMetadata(input: {
+  videoItem: PipelineItemRow | null | undefined;
+  videoId: string;
+  publishAt: string;
+}) {
+  if (!input.videoItem || input.videoItem.published_at || input.videoItem.status !== "scheduled") return null;
+  const launch = toRecord(toRecord(input.videoItem.metadata).launch_package);
+  const generation = trimToNull(launch.launch_generation);
+  if (launch.kind !== "scheduled_youtube_launch_package_v1"
+    || launch.status !== "scheduled"
+    || launch.video_id !== input.videoId
+    || launch.publish_at !== input.publishAt
+    || !generation) return null;
+  return generation;
+}
+
+function newLaunchGeneration(videoId: string, publishAt: string) {
+  return `youtube-launch-v1:${videoId}:${publishAt}:${randomUUID()}`;
 }
 
 export function requireCommunityPlaylistContextUrl(videoId: string, value: string | null | undefined) {
@@ -491,6 +536,127 @@ function snapshotInstruction(input: { title: string; youtubeUrl: string; videoId
   ].join("\n");
 }
 
+export const YOUTUBE_LAUNCH_RESPONSIBLE_PRIVATE_CHANNELS: Record<string, string> = {
+  strategist: "1474045438989697115",
+  youtube: "1473373627750682664",
+  content: "1473373703197691934",
+  marketing: "1473373756557623481",
+  dev: "1473373777755639982",
+  community: "1473373793375490058",
+  systems: "1493166685543206924",
+};
+
+function privateChannelForAgent(agent: string) {
+  return YOUTUBE_LAUNCH_RESPONSIBLE_PRIVATE_CHANNELS[agent] || YOUTUBE_LAUNCH_RESPONSIBLE_PRIVATE_CHANNELS.systems;
+}
+
+function stableLaunchHash(value: string) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function launchDeliveryIdempotencyKey(
+  context: Pick<ScheduledYouTubeLaunchSpecContext, "videoId" | "publishAt" | "launchGeneration">,
+  action: string,
+  destination: string,
+) {
+  const seed = [
+    context.launchGeneration || `youtube-launch-v1:${context.videoId}:${context.publishAt}`,
+    action,
+    destination,
+  ].join("|");
+  return `ytlaunch:${context.videoId}:${stableLaunchHash(seed)}`;
+}
+
+function launchRetryContract(
+  context: Pick<ScheduledYouTubeLaunchSpecContext, "videoId" | "publishAt" | "launchGeneration">,
+  action: string,
+  destination: string,
+) {
+  return {
+    runtime_retry_contract: "scheduled_launch_v2_retry_v1",
+    retry_policy: {
+      retryable_delays_minutes: [1, 5, 15],
+      retryable_failure_classes: ["runtime_unavailable", "provider_timeout", "transient_network"],
+      nonretryable_gate_failures_dead_letter: true,
+    },
+    external_delivery_idempotency_key: launchDeliveryIdempotencyKey(context, action, destination),
+    idempotency_scope: {
+      launch_generation: context.launchGeneration || null,
+      action,
+      destination,
+    },
+  };
+}
+
+export function buildScheduledLaunchPublicActionPayload(input: {
+  metadata?: unknown;
+  ownerAgent: string;
+  action: string;
+  destination: string;
+}) {
+  const metadata = toRecord(input.metadata);
+  const launchPackage = toRecord(metadata.launch_package);
+  if (launchPackage.kind !== "scheduled_youtube_launch_package_v1") return {};
+
+  const videoId = trimToNull(launchPackage.video_id);
+  const publishAt = trimToNull(launchPackage.publish_at);
+  const launchGeneration = trimToNull(launchPackage.launch_generation);
+  const sourceVideoPipelineItemId = trimToNull(launchPackage.source_video_pipeline_item_id);
+  if (!videoId || !publishAt || !launchGeneration || !sourceVideoPipelineItemId) return {};
+  const review = toRecord(metadata.review);
+  const schedule = toRecord(metadata.schedule);
+  const reviewStatus = trimToNull(review.status);
+  const approved = reviewStatus === "approved"
+    || Boolean(trimToNull(review.approved_by))
+    || Boolean(trimToNull(schedule.approved_by));
+
+  return {
+    launch_state_contract: "scheduled_launch_v2",
+    launch_generation: launchGeneration,
+    source_video_pipeline_item_id: sourceVideoPipelineItemId,
+    publish_at: publishAt,
+    youtube_url: trimToNull(launchPackage.youtube_url),
+    playlist_context_url: trimToNull(launchPackage.playlist_context_url),
+    playlist_id: trimToNull(launchPackage.playlist_id),
+    customer_facing_guard: true,
+    public_gate_applies_to: "publish_or_send_only",
+    requires_preflight_passed: true,
+    preflight_relation_type: "youtube_launch_preflight",
+    requires_live_check_passed: true,
+    live_check_relation_type: "video_launch_activate",
+    requires_gonza_approval: true,
+    approval_status: approved ? "approved" : reviewStatus,
+    notify_project_thread: false,
+    suppress_task_router_webhook: true,
+    failure_alert_destination: "responsible_agent_private_channel",
+    private_director_channel_id: privateChannelForAgent(input.ownerAgent),
+    ...launchRetryContract({ videoId, publishAt, launchGeneration }, input.action, input.destination),
+  };
+}
+
+function approvalReminderInstruction(input: ScheduledYouTubeLaunchSpecContext & {
+  artifact: "community announcement" | "email campaign" | "pinned comment draft";
+  privateChannelId: string;
+  approvalPath: string;
+}) {
+  return [
+    ...packageHeader(input),
+    "",
+    "Task:",
+    `- Check whether Gonza approval is already recorded for the ${input.artifact}.`,
+    "- If approval is still missing, remind Gonza from this responsible agent profile in the private director channel only.",
+    `- Private director channel: <#${input.privateChannelId}>.`,
+    "- Never post this reminder to the project thread or public/community channels.",
+    `- Approval path to inspect: ${input.approvalPath}.`,
+    "- Complete with output.approval_reminder = { status, reminded_at, destination_channel_id, approval_status }.",
+  ].join("\n");
+}
+
 async function findExistingVideoItem(db: SupabaseClient, videoId: string, youtubeUrl: string) {
   const selectors = [
     { column: "metadata->launch_package->>video_id", value: videoId },
@@ -529,10 +695,12 @@ async function findExactVideoItem(db: SupabaseClient, pipelineItemId: string) {
 
 async function ensureVideoPipelineItem(db: SupabaseClient, input: Required<Pick<YouTubeLaunchPackageInput, "publishAt" | "requestedBy">> & {
   pipelineItemId: string | null;
+  launchGeneration: string;
   title: string;
   youtubeUrl: string;
   videoId: string;
   playlistContextUrl: string | null;
+  playlistId: string | null;
   targetCommunityPublishAt: string;
   targetEmailSendAt: string;
   emailTrackingRef: string;
@@ -551,15 +719,20 @@ async function ensureVideoPipelineItem(db: SupabaseClient, input: Required<Pick<
   if (existing && (Boolean(existing.published_at) || !["recorded", "editing", "scheduled"].includes(existing.status))) {
     throw new Error(`Cannot schedule video in ${existing.status || "unknown"} state`);
   }
-  const launchPackage = {
+  const launchPackage: JsonRecord = {
     ...existingLaunchPackage,
     kind: "scheduled_youtube_launch_package_v1",
     status: "scheduled",
+    launch_state: "awaiting_approval",
+    launch_generation: input.launchGeneration,
     newsletter_scope: "excluded_v1",
     video_id: input.videoId,
     youtube_url: input.youtubeUrl,
     playlist_context_url: input.playlistContextUrl,
+    playlist_id: input.playlistId,
     publish_at: input.publishAt,
+    approval_deadline_at: addMinutes(input.publishAt, -60),
+    preflight_required_at: addMinutes(input.publishAt, -30),
     target_community_publish_at: input.targetCommunityPublishAt,
     target_email_send_at: input.targetEmailSendAt,
     email_tracking_ref: input.emailTrackingRef,
@@ -570,6 +743,14 @@ async function ensureVideoPipelineItem(db: SupabaseClient, input: Required<Pick<
     updated_at: now,
     created_at: existingLaunchPackage.created_at || now,
   };
+  const scheduleIdentityChanged = Boolean(existing)
+    && (trimToNull(existingLaunchPackage.launch_generation) !== input.launchGeneration
+      || trimToNull(existingLaunchPackage.publish_at) !== input.publishAt);
+  if (scheduleIdentityChanged) {
+    for (const key of ["preflight", "live_check", "public_verified", "activated_at", "activation_evidence"]) {
+      delete launchPackage[key];
+    }
+  }
   const metadata = {
     ...existingMetadata,
     youtube_v0: {
@@ -577,15 +758,18 @@ async function ensureVideoPipelineItem(db: SupabaseClient, input: Required<Pick<
       video_id: input.videoId,
       youtube_url: input.youtubeUrl,
       playlist_context_url: input.playlistContextUrl,
+      playlist_id: input.playlistId,
       scheduled_publish_at: input.publishAt,
       stage: "scheduled",
       launch_package_status: "scheduled",
+      launch_state: "awaiting_approval",
     },
     publication: {
       ...existingPublication,
       video_id: input.videoId,
       youtube_url: input.youtubeUrl,
       playlist_context_url: input.playlistContextUrl,
+      playlist_id: input.playlistId,
       scheduled_publish_at: input.publishAt,
     },
     launch_package: launchPackage,
@@ -636,12 +820,14 @@ async function ensureVideoPipelineItem(db: SupabaseClient, input: Required<Pick<
 
 async function ensureCommunityPipelineItem(db: SupabaseClient, input: {
   videoItem: PipelineItemRow;
+  launchGeneration: string;
   title: string;
   youtubeUrl: string;
   videoId: string;
   publishAt: string;
   targetPublishAt: string;
   playlistContextUrl: string | null;
+  playlistId: string | null;
   cta: string | null;
   requestedBy: string;
 }) {
@@ -657,6 +843,7 @@ async function ensureCommunityPipelineItem(db: SupabaseClient, input: {
   const existing = existingRows?.[0] as PipelineItemRow | undefined;
   const now = new Date().toISOString();
   const existingMetadata = toRecord(existing?.metadata);
+  const sameLaunchGeneration = trimToNull(toRecord(existingMetadata.launch_package).launch_generation) === input.launchGeneration;
   const metadata = {
     ...existingMetadata,
     kind: "video_launch_announcement",
@@ -671,11 +858,13 @@ async function ensureCommunityPipelineItem(db: SupabaseClient, input: {
       video_url: input.youtubeUrl,
       video_id: input.videoId,
       playlist_context_url: input.playlistContextUrl,
+      playlist_id: input.playlistId,
       publish_at: input.publishAt,
     },
     copy: toRecord(existingMetadata.copy),
+    review: sameLaunchGeneration ? toRecord(existingMetadata.review) : {},
     schedule: {
-      ...toRecord(existingMetadata.schedule),
+      ...(sameLaunchGeneration ? toRecord(existingMetadata.schedule) : {}),
       target_publish_at: input.targetPublishAt,
       requires_approval: true,
       auto_publish: false,
@@ -684,10 +873,15 @@ async function ensureCommunityPipelineItem(db: SupabaseClient, input: {
     launch_package: {
       ...toRecord(existingMetadata.launch_package),
       source_video_pipeline_item_id: input.videoItem.id,
+      launch_generation: input.launchGeneration,
       video_id: input.videoId,
       youtube_url: input.youtubeUrl,
       playlist_context_url: input.playlistContextUrl,
+      playlist_id: input.playlistId,
       publish_at: input.publishAt,
+      launch_state: "awaiting_approval",
+      approval_deadline_at: addMinutes(input.publishAt, -60),
+      preflight_required_at: addMinutes(input.publishAt, -30),
       target_publish_at: input.targetPublishAt,
       cta: input.cta,
       suppress_link_previews: false,
@@ -710,7 +904,9 @@ async function ensureCommunityPipelineItem(db: SupabaseClient, input: {
       .from("pipeline_items")
       .update({
         title: `Announce video: ${input.title}`,
-        status: TERMINAL_WORK_STATUSES.has(existing.status) || existing.status === "published" ? existing.status : existing.status || "draft",
+        status: sameLaunchGeneration
+          ? (TERMINAL_WORK_STATUSES.has(existing.status) || existing.status === "published" ? existing.status : existing.status || "draft")
+          : "draft",
         owner_agent: "community",
         requested_by: existing.requested_by || input.requestedBy,
         source_type: "manual",
@@ -748,11 +944,13 @@ async function ensureCommunityPipelineItem(db: SupabaseClient, input: {
 
 async function ensureMarketingEmailPipelineItem(db: SupabaseClient, input: {
   videoItem: PipelineItemRow;
+  launchGeneration: string;
   title: string;
   youtubeUrl: string;
   videoId: string;
   publishAt: string;
   playlistContextUrl: string | null;
+  playlistId: string | null;
   targetSendAt: string;
   emailTrackingRef: string;
   optionalDiagnosticCta: string | null;
@@ -782,6 +980,7 @@ async function ensureMarketingEmailPipelineItem(db: SupabaseClient, input: {
   }
   const now = new Date().toISOString();
   const existingMetadata = toRecord(existing?.metadata);
+  const sameLaunchGeneration = trimToNull(toRecord(existingMetadata.launch_package).launch_generation) === input.launchGeneration;
   const metadata = {
     ...existingMetadata,
     kind: "video_announcement",
@@ -794,10 +993,12 @@ async function ensureMarketingEmailPipelineItem(db: SupabaseClient, input: {
       video_url: input.youtubeUrl,
       video_id: input.videoId,
       playlist_context_url: input.playlistContextUrl,
+      playlist_id: input.playlistId,
       publish_at: input.publishAt,
     },
+    review: sameLaunchGeneration ? toRecord(existingMetadata.review) : {},
     schedule: {
-      ...toRecord(existingMetadata.schedule),
+      ...(sameLaunchGeneration ? toRecord(existingMetadata.schedule) : {}),
       target_send_at: input.targetSendAt,
       requires_approval: true,
       auto_send: false,
@@ -807,10 +1008,15 @@ async function ensureMarketingEmailPipelineItem(db: SupabaseClient, input: {
     launch_package: {
       ...toRecord(existingMetadata.launch_package),
       source_video_pipeline_item_id: input.videoItem.id,
+      launch_generation: input.launchGeneration,
       video_id: input.videoId,
       youtube_url: input.youtubeUrl,
       playlist_context_url: input.playlistContextUrl,
+      playlist_id: input.playlistId,
       publish_at: input.publishAt,
+      launch_state: "awaiting_approval",
+      approval_deadline_at: addMinutes(input.publishAt, -60),
+      preflight_required_at: addMinutes(input.publishAt, -30),
       target_send_at: input.targetSendAt,
       email_tracking_ref: input.emailTrackingRef,
       optional_diagnostic_cta: input.optionalDiagnosticCta,
@@ -827,7 +1033,9 @@ async function ensureMarketingEmailPipelineItem(db: SupabaseClient, input: {
       .from("pipeline_items")
       .update({
         title: `Email announcement: ${input.title}`,
-        status: TERMINAL_WORK_STATUSES.has(existing.status) || existing.status === "sent" ? existing.status : existing.status || "drafting",
+        status: sameLaunchGeneration
+          ? (TERMINAL_WORK_STATUSES.has(existing.status) || existing.status === "sent" ? existing.status : existing.status || "drafting")
+          : "drafting",
         owner_agent: "marketing",
         requested_by: existing.requested_by || input.requestedBy,
         source_type: "manual",
@@ -867,11 +1075,13 @@ async function ensureMarketingEmailPipelineItem(db: SupabaseClient, input: {
 
 async function ensurePinnedCommentPipelineItem(db: SupabaseClient, input: {
   videoItem: PipelineItemRow;
+  launchGeneration: string;
   title: string;
   youtubeUrl: string;
   videoId: string;
   publishAt: string;
   playlistContextUrl: string | null;
+  playlistId: string | null;
   cta: string | null;
   requestedBy: string;
 }) {
@@ -887,6 +1097,7 @@ async function ensurePinnedCommentPipelineItem(db: SupabaseClient, input: {
   const existing = existingRows?.[0] as PipelineItemRow | undefined;
   const now = new Date().toISOString();
   const existingMetadata = toRecord(existing?.metadata);
+  const sameLaunchGeneration = trimToNull(toRecord(existingMetadata.launch_package).launch_generation) === input.launchGeneration;
   const metadata = {
     ...existingMetadata,
     kind: "youtube_pinned_comment",
@@ -899,17 +1110,23 @@ async function ensurePinnedCommentPipelineItem(db: SupabaseClient, input: {
       video_url: input.youtubeUrl,
       video_id: input.videoId,
       playlist_context_url: input.playlistContextUrl,
+      playlist_id: input.playlistId,
       publish_at: input.publishAt,
     },
     draft: toRecord(existingMetadata.draft),
-    review: toRecord(existingMetadata.review),
+    review: sameLaunchGeneration ? toRecord(existingMetadata.review) : {},
     launch_package: {
       ...toRecord(existingMetadata.launch_package),
       source_video_pipeline_item_id: input.videoItem.id,
+      launch_generation: input.launchGeneration,
       video_id: input.videoId,
       youtube_url: input.youtubeUrl,
       playlist_context_url: input.playlistContextUrl,
+      playlist_id: input.playlistId,
       publish_at: input.publishAt,
+      launch_state: "awaiting_approval",
+      approval_deadline_at: addMinutes(input.publishAt, -60),
+      preflight_required_at: addMinutes(input.publishAt, -30),
       cta: input.cta,
       prepublication_draft_authorized: true,
       public_gate_applies_to: "publish_or_send_only",
@@ -924,7 +1141,9 @@ async function ensurePinnedCommentPipelineItem(db: SupabaseClient, input: {
       .from("pipeline_items")
       .update({
         title: `Pinned comment draft: ${input.title}`,
-        status: TERMINAL_WORK_STATUSES.has(existing.status) || existing.status === "published" ? existing.status : existing.status || "drafting",
+        status: sameLaunchGeneration
+          ? (TERMINAL_WORK_STATUSES.has(existing.status) || existing.status === "published" ? existing.status : existing.status || "drafting")
+          : "drafting",
         owner_agent: "youtube",
         requested_by: existing.requested_by || input.requestedBy,
         source_type: "manual",
@@ -960,27 +1179,50 @@ async function ensurePinnedCommentPipelineItem(db: SupabaseClient, input: {
   return { item: data as PipelineItemRow, created: true };
 }
 
-async function findExistingWorkItemByVideoRelation(db: SupabaseClient, videoPipelineItemId: string, videoId: string, relationType: string) {
+async function findExistingWorkItemByVideoRelation(db: SupabaseClient, input: {
+  videoPipelineItemId: string;
+  videoId: string;
+  relationType: string;
+  launchGeneration: string;
+  publishAt: string;
+  allowLegacyVideoFallback: boolean;
+}) {
   const exact = await db
     .from("work_items")
     .select("id,status,payload")
-    .eq("payload->>source_video_pipeline_item_id", videoPipelineItemId)
-    .eq("payload->>relation_type", relationType)
-    .order("created_at", { ascending: false })
-    .limit(1);
+    .eq("payload->>source_video_pipeline_item_id", input.videoPipelineItemId)
+    .eq("payload->>relation_type", input.relationType)
+    .order("created_at", { ascending: false });
   if (exact.error) throw exact.error;
-  if (exact.data?.[0]) return exact.data[0] as WorkItemRow;
+  const exactItems = (exact.data || []) as WorkItemRow[];
+  const exactOpen = exactItems.filter((item) => !TERMINAL_WORK_STATUSES.has(item.status));
+  if (exactOpen.length > 1) throw new Error(`Duplicate open YouTube launch work for ${input.relationType}`);
+  if (exactOpen[0]) return exactOpen[0];
+  const exactTerminal = exactItems.find((item) => {
+    const itemPayload = toRecord(item.payload);
+    return itemPayload.launch_generation === input.launchGeneration
+      || (!itemPayload.launch_generation && itemPayload.publish_at === input.publishAt);
+  });
+  if (exactTerminal) return exactTerminal;
+  if (!input.allowLegacyVideoFallback) return null;
 
   const { data, error } = await db
     .from("work_items")
     .select("id,status,payload")
-    .eq("payload->>video_id", videoId)
-    .eq("payload->>relation_type", relationType)
-    .order("created_at", { ascending: false })
-    .limit(1);
+    .eq("payload->>video_id", input.videoId)
+    .eq("payload->>relation_type", input.relationType)
+    .order("created_at", { ascending: false });
 
   if (error) throw error;
-  return (data?.[0] || null) as WorkItemRow | null;
+  const legacyItems = ((data || []) as WorkItemRow[]).filter((item) => !toRecord(item.payload).source_video_pipeline_item_id);
+  const legacyOpen = legacyItems.filter((item) => !TERMINAL_WORK_STATUSES.has(item.status));
+  if (legacyOpen.length > 1) throw new Error(`Duplicate open legacy YouTube launch work for ${input.relationType}`);
+  if (legacyOpen[0]) return legacyOpen[0];
+  return legacyItems.find((item) => {
+    const itemPayload = toRecord(item.payload);
+    return itemPayload.launch_generation === input.launchGeneration
+      || (!itemPayload.launch_generation && itemPayload.publish_at === input.publishAt);
+  }) || null;
 }
 
 async function mapWorkItem(db: SupabaseClient, pipelineItemId: string, workItemId: string, relationType: string) {
@@ -996,13 +1238,24 @@ async function upsertLaunchWorkItem(db: SupabaseClient, spec: LaunchWorkSpec, co
   videoId: string;
   videoPipelineItemId: string;
   youtubeUrl: string;
+  playlistContextUrl: string | null;
+  playlistId: string | null;
   publishAt: string;
+  launchGeneration: string;
   requestedBy: string;
+  allowLegacyVideoFallback: boolean;
 }) {
   const now = new Date().toISOString();
-  const existing = await findExistingWorkItemByVideoRelation(db, common.videoPipelineItemId, common.videoId, spec.relationType);
+  const existing = await findExistingWorkItemByVideoRelation(db, {
+    videoPipelineItemId: common.videoPipelineItemId,
+    videoId: common.videoId,
+    relationType: spec.relationType,
+    launchGeneration: common.launchGeneration,
+    publishAt: common.publishAt,
+    allowLegacyVideoFallback: common.allowLegacyVideoFallback,
+  });
   const payload = {
-    ...toRecord(existing?.payload),
+    ...reusablePayloadForLaunchGeneration(toRecord(existing?.payload), common.launchGeneration),
     trigger: "youtube_launch_package_v1",
     pipeline_type: spec.pipelineType,
     pipeline_item_id: spec.sourcePipelineItemId,
@@ -1013,7 +1266,10 @@ async function upsertLaunchWorkItem(db: SupabaseClient, spec: LaunchWorkSpec, co
     schedule_kind: "youtube_launch_package",
     video_id: common.videoId,
     youtube_url: common.youtubeUrl,
+    playlist_context_url: common.playlistContextUrl,
+    playlist_id: common.playlistId,
     publish_at: common.publishAt,
+    launch_generation: common.launchGeneration,
     newsletter_scope: "excluded_v1",
     ...(spec.payloadExtra || {}),
   };
@@ -1091,15 +1347,28 @@ export function buildScheduledYouTubeLaunchWorkSpecs(context: ScheduledYouTubeLa
     playlistContextUrl: context.playlistContextUrl || null,
   };
   const preflightAt = maxIsoDate(addMinutes(context.publishAt, -30), preparedAt);
+  const approvalReminderAt = maxIsoDate(addMinutes(context.publishAt, -60), preparedAt);
+  const baseLaunchPayload = {
+    launch_state_contract: "scheduled_launch_v2",
+    launch_generation: context.launchGeneration || null,
+    notify_project_thread: false,
+    suppress_task_router_webhook: true,
+    completion_log_destination: "responsible_agent_private_channel",
+    failure_alert_destination: "responsible_agent_private_channel",
+  };
   const draftGatePayload = {
+    ...baseLaunchPayload,
     prepublication_draft_authorized: true,
     public_gate_applies_to: "publish_or_send_only",
     requires_gonza_approval: true,
     customer_facing_guard: false,
   };
   const publicActionGatePayload = {
+    ...baseLaunchPayload,
     customer_facing_guard: true,
     public_gate_applies_to: "activation_only",
+    requires_preflight_passed: true,
+    preflight_relation_type: "youtube_launch_preflight",
     requires_live_check_passed: true,
     live_check_relation_type: "video_launch_activate",
   };
@@ -1116,7 +1385,20 @@ export function buildScheduledYouTubeLaunchWorkSpecs(context: ScheduledYouTubeLa
       ownerAgent: "youtube",
       action: "youtube_launch_preflight",
       scheduledFor: preflightAt,
-      payloadExtra: { launch_step: "preflight", scheduled_preflight_at: addMinutes(context.publishAt, -30), playlist_context_url: context.playlistContextUrl || null },
+      payloadExtra: {
+        ...baseLaunchPayload,
+        launch_step: "preflight",
+        t_minus_minutes: 30,
+        scheduled_preflight_at: addMinutes(context.publishAt, -30),
+        playlist_context_url: context.playlistContextUrl || null,
+        preflight_validates: [
+          "canonical_video_identity",
+          "scheduled_visibility",
+          "required_playlist_membership",
+          "gonza_approvals",
+          "runtime_health",
+        ],
+      },
     },
     {
       relationType: "video_launch_activate",
@@ -1129,7 +1411,15 @@ export function buildScheduledYouTubeLaunchWorkSpecs(context: ScheduledYouTubeLa
       ownerAgent: "strategist",
       action: "video_launch_activate",
       scheduledFor: addMinutes(context.publishAt, 2),
-      payloadExtra: { launch_step: "live_check", customer_facing_guard: true, playlist_context_url: context.playlistContextUrl || null },
+      payloadExtra: {
+        ...baseLaunchPayload,
+        launch_step: "live_check",
+        customer_facing_guard: true,
+        public_gate_applies_to: "activation_only",
+        requires_preflight_passed: true,
+        preflight_relation_type: "youtube_launch_preflight",
+        playlist_context_url: context.playlistContextUrl || null,
+      },
     },
     {
       relationType: "launch_community_draft",
@@ -1158,6 +1448,34 @@ export function buildScheduledYouTubeLaunchWorkSpecs(context: ScheduledYouTubeLa
       },
     },
     {
+      relationType: "community_approval_reminder",
+      mapRelationType: "followup",
+      mapPipelineItemId: communityPipelineItemId,
+      sourcePipelineItemId: communityPipelineItemId,
+      pipelineType: "community_post",
+      title: `Reminder: approve community launch copy: ${context.title}`,
+      instruction: approvalReminderInstruction({
+        ...context,
+        artifact: "community announcement",
+        privateChannelId: YOUTUBE_LAUNCH_RESPONSIBLE_PRIVATE_CHANNELS.community,
+        approvalPath: "community_post.metadata.review.status or metadata.schedule.approved_by",
+      }),
+      ownerAgent: "community",
+      action: "launch_approval_reminder",
+      scheduledFor: approvalReminderAt,
+      payloadExtra: {
+        ...baseLaunchPayload,
+        launch_step: "community_approval_reminder",
+        approval_target_relation_type: "launch_community_draft",
+        approval_target_pipeline_item_id: communityPipelineItemId,
+        private_director_channel_id: YOUTUBE_LAUNCH_RESPONSIBLE_PRIVATE_CHANNELS.community,
+        completion_log_destination: "responsible_agent_private_channel",
+        suppress_task_router_webhook: true,
+        requires_gonza_approval: true,
+        reminder_deadline: addMinutes(context.publishAt, -60),
+      },
+    },
+    {
       relationType: "youtube_pinned_comment_draft",
       mapRelationType: "pinned_comment",
       mapPipelineItemId: pinnedCommentPipelineItemId,
@@ -1171,8 +1489,41 @@ export function buildScheduledYouTubeLaunchWorkSpecs(context: ScheduledYouTubeLa
       payloadExtra: {
         launch_step: "pinned_comment_draft",
         ...draftGatePayload,
+        youtube_pinned_comment_publishing: "manual_out_of_scope",
+        auto_publish_forbidden: true,
         playlist_context_url: context.playlistContextUrl || null,
         cta: context.cta || null,
+      },
+    },
+    {
+      relationType: "pinned_comment_approval_reminder",
+      mapRelationType: "followup",
+      mapPipelineItemId: pinnedCommentPipelineItemId,
+      sourcePipelineItemId: pinnedCommentPipelineItemId,
+      pipelineType: "youtube_pinned_comment",
+      title: `Reminder: review pinned comment draft: ${context.title}`,
+      instruction: approvalReminderInstruction({
+        ...context,
+        artifact: "pinned comment draft",
+        privateChannelId: YOUTUBE_LAUNCH_RESPONSIBLE_PRIVATE_CHANNELS.youtube,
+        approvalPath: "youtube_pinned_comment.metadata.review.status; publishing remains manual/out of scope",
+      }),
+      ownerAgent: "youtube",
+      action: "launch_approval_reminder",
+      scheduledFor: approvalReminderAt,
+      payloadExtra: {
+        ...baseLaunchPayload,
+        launch_step: "pinned_comment_approval_reminder",
+        approval_target_relation_type: "youtube_pinned_comment_draft",
+        approval_target_pipeline_item_id: pinnedCommentPipelineItemId,
+        private_director_channel_id: YOUTUBE_LAUNCH_RESPONSIBLE_PRIVATE_CHANNELS.youtube,
+        completion_log_destination: "responsible_agent_private_channel",
+        suppress_task_router_webhook: true,
+        requires_gonza_approval: true,
+        approval_manual_out_of_scope: true,
+        youtube_pinned_comment_publishing: "manual_out_of_scope",
+        auto_publish_forbidden: true,
+        reminder_deadline: addMinutes(context.publishAt, -60),
       },
     },
     {
@@ -1186,7 +1537,12 @@ export function buildScheduledYouTubeLaunchWorkSpecs(context: ScheduledYouTubeLa
       ownerAgent: "dev",
       action: "website_publish_video",
       scheduledFor: addMinutes(context.publishAt, 15),
-      payloadExtra: { launch_step: "website_publish", ...publicActionGatePayload, playlist_context_url: context.playlistContextUrl || null },
+      payloadExtra: {
+        launch_step: "website_publish",
+        ...publicActionGatePayload,
+        ...launchRetryContract(context, "website_publish_video", "aipaths_website"),
+        playlist_context_url: context.playlistContextUrl || null,
+      },
     },
     {
       relationType: "marketing_email_campaign",
@@ -1207,6 +1563,34 @@ export function buildScheduledYouTubeLaunchWorkSpecs(context: ScheduledYouTubeLa
         optional_diagnostic_cta: context.optionalDiagnosticCta || null,
         playlist_context_url: context.playlistContextUrl || null,
         email_campaign_kind: "video_announcement",
+      },
+    },
+    {
+      relationType: "marketing_approval_reminder",
+      mapRelationType: "followup",
+      mapPipelineItemId: marketingPipelineItemId,
+      sourcePipelineItemId: marketingPipelineItemId,
+      pipelineType: "email_campaign",
+      title: `Reminder: approve launch email: ${context.title}`,
+      instruction: approvalReminderInstruction({
+        ...context,
+        artifact: "email campaign",
+        privateChannelId: YOUTUBE_LAUNCH_RESPONSIBLE_PRIVATE_CHANNELS.marketing,
+        approvalPath: "email_campaign.metadata.review.status",
+      }),
+      ownerAgent: "marketing",
+      action: "launch_approval_reminder",
+      scheduledFor: approvalReminderAt,
+      payloadExtra: {
+        ...baseLaunchPayload,
+        launch_step: "marketing_approval_reminder",
+        approval_target_relation_type: "marketing_email_campaign",
+        approval_target_pipeline_item_id: marketingPipelineItemId,
+        private_director_channel_id: YOUTUBE_LAUNCH_RESPONSIBLE_PRIVATE_CHANNELS.marketing,
+        completion_log_destination: "responsible_agent_private_channel",
+        suppress_task_router_webhook: true,
+        requires_gonza_approval: true,
+        reminder_deadline: addMinutes(context.publishAt, -60),
       },
     },
     {
@@ -1252,7 +1636,10 @@ export function buildScheduledYouTubeLaunchWorkSpecs(context: ScheduledYouTubeLa
   return specs.map((spec) => ({
     ...spec,
     payloadExtra: {
+      ...baseLaunchPayload,
       ...(spec.payloadExtra || {}),
+      private_director_channel_id: privateChannelForAgent(spec.ownerAgent),
+      log_channel_id: privateChannelForAgent(spec.ownerAgent),
       playlist_id: context.playlistId || null,
     },
   }));
@@ -1302,18 +1689,26 @@ export async function createScheduledYouTubeLaunchPackage(db: SupabaseClient, in
     resolveYouTubePlaylistContextUrl(videoId, youtubeUrl) ||
     resolveYouTubePlaylistContextUrl(videoId, trimToNull(input.playlistId) || firstStringFromRecords([refs], [["playlist_id"], ["playlistId"], ["playlist", "id"]]), { allowRawPlaylistId: true });
   requireCommunityPlaylistContextUrl(videoId, playlistContextUrl);
+  const playlistId = playlistIdFromContextUrl(videoId, playlistContextUrl);
   const targetEmailSendAt = input.targetEmailSendAt ? normalizeIsoDate(input.targetEmailSendAt, "target_email_send_at") : addMilliseconds(publishAt, 3 * 60 * 60 * 1000);
   const emailTrackingRef = trimToNull(input.emailTrackingRef) || `email-youtube-${videoId}`;
   const optionalDiagnosticCta = trimToNull(input.optionalDiagnosticCta) || firstStringFromRecords([refs], [["optional_diagnostic_cta"], ["diagnostic_cta"]]);
   const cta = trimToNull(input.cta) || firstStringFromRecords([refs], [["cta"], ["community", "cta"]]);
+  const launchGeneration = reusableLaunchGenerationFromMetadata({
+    videoItem: existingVideoContext,
+    videoId,
+    publishAt,
+  }) || newLaunchGeneration(videoId, publishAt);
 
   const video = await ensureVideoPipelineItem(db, {
     pipelineItemId,
+    launchGeneration,
     title,
     youtubeUrl,
     videoId,
     publishAt,
     playlistContextUrl,
+    playlistId,
     targetCommunityPublishAt,
     targetEmailSendAt,
     emailTrackingRef,
@@ -1325,23 +1720,27 @@ export async function createScheduledYouTubeLaunchPackage(db: SupabaseClient, in
 
   const community = await ensureCommunityPipelineItem(db, {
     videoItem: video.item,
+    launchGeneration,
     title,
     youtubeUrl,
     videoId,
     publishAt,
     targetPublishAt: targetCommunityPublishAt,
     playlistContextUrl,
+    playlistId,
     cta,
     requestedBy,
   });
 
   const marketing = await ensureMarketingEmailPipelineItem(db, {
     videoItem: video.item,
+    launchGeneration,
     title,
     youtubeUrl,
     videoId,
     publishAt,
     playlistContextUrl,
+    playlistId,
     targetSendAt: targetEmailSendAt,
     emailTrackingRef,
     optionalDiagnosticCta,
@@ -1350,22 +1749,36 @@ export async function createScheduledYouTubeLaunchPackage(db: SupabaseClient, in
 
   const pinnedComment = await ensurePinnedCommentPipelineItem(db, {
     videoItem: video.item,
+    launchGeneration,
     title,
     youtubeUrl,
     videoId,
     publishAt,
     playlistContextUrl,
+    playlistId,
     cta,
     requestedBy,
   });
 
-  const common = { videoId, videoPipelineItemId: video.item.id, youtubeUrl, publishAt, requestedBy };
+  const common = {
+    videoId,
+    videoPipelineItemId: video.item.id,
+    youtubeUrl,
+    playlistContextUrl,
+    playlistId,
+    publishAt,
+    launchGeneration,
+    requestedBy,
+    allowLegacyVideoFallback: !pipelineItemId,
+  };
   const specs = buildScheduledYouTubeLaunchWorkSpecs({
     title,
     youtubeUrl,
     videoId,
     publishAt,
+    launchGeneration,
     playlistContextUrl,
+    playlistId,
     targetCommunityPublishAt,
     targetEmailSendAt,
     emailTrackingRef,
@@ -1382,6 +1795,50 @@ export async function createScheduledYouTubeLaunchPackage(db: SupabaseClient, in
   for (const spec of specs) {
     workItems.push({ relationType: spec.relationType, ...(await upsertLaunchWorkItem(db, spec, common)) });
   }
+  const activationWorkItemId = workItems.find((entry) => entry.relationType === "video_launch_activate")?.workItem?.id;
+  if (!activationWorkItemId || workItems.length !== 12) {
+    throw new Error("YouTube launch package did not reconcile exactly twelve current work items");
+  }
+  const { data: activationRows, error: activationError } = await db
+    .from("work_items")
+    .select("id,status,source_type,source_id,payload")
+    .eq("payload->>source_video_pipeline_item_id", video.item.id)
+    .eq("payload->>relation_type", "video_launch_activate")
+    .order("created_at", { ascending: false });
+  if (activationError) throw activationError;
+  const openActivations = ((activationRows || []) as Array<WorkItemRow & { source_type?: string | null; source_id?: string | null }>)
+    .filter((row) => !TERMINAL_WORK_STATUSES.has(row.status));
+  const currentActivation = openActivations[0];
+  const currentActivationPayload = toRecord(currentActivation?.payload);
+  if (openActivations.length !== 1
+    || currentActivation?.id !== activationWorkItemId
+    || currentActivation?.source_type !== "pipeline_item"
+    || currentActivation?.source_id !== video.item.id
+    || currentActivationPayload.trigger !== "youtube_launch_package_v1"
+    || currentActivationPayload.action !== "video_launch_activate"
+    || currentActivationPayload.pipeline_item_id !== video.item.id
+    || currentActivationPayload.source_video_pipeline_item_id !== video.item.id
+    || currentActivationPayload.launch_generation !== launchGeneration
+    || currentActivationPayload.publish_at !== publishAt) {
+    throw new Error("YouTube launch package requires exactly one valid open current-generation activation");
+  }
+  const finalizedMetadata = {
+    ...toRecord(video.item.metadata),
+    launch_package: {
+      ...toRecord(toRecord(video.item.metadata).launch_package),
+      launch_generation: launchGeneration,
+      activation_work_item_id: activationWorkItemId,
+      launch_state: "awaiting_approval",
+    },
+  };
+  const { data: finalizedVideoItem, error: finalizeError } = await db
+    .from("pipeline_items")
+    .update({ metadata: finalizedMetadata, updated_at: new Date().toISOString() })
+    .eq("id", video.item.id)
+    .select("*")
+    .single();
+  if (finalizeError) throw finalizeError;
+  video.item = finalizedVideoItem as PipelineItemRow;
 
   await db.from("pipeline_events").insert({
     pipeline_item_id: video.item.id,
@@ -1390,7 +1847,11 @@ export async function createScheduledYouTubeLaunchPackage(db: SupabaseClient, in
     payload: {
       video_id: videoId,
       youtube_url: youtubeUrl,
+      playlist_id: playlistId,
+      playlist_context_url: playlistContextUrl,
       publish_at: publishAt,
+      launch_generation: launchGeneration,
+      activation_work_item_id: activationWorkItemId,
       community_pipeline_item_id: community.item.id,
       marketing_pipeline_item_id: marketing.item.id,
       pinned_comment_pipeline_item_id: pinnedComment.item.id,
@@ -1418,6 +1879,7 @@ export async function createScheduledYouTubeLaunchPackage(db: SupabaseClient, in
     targetCommunityPublishAt,
     targetEmailSendAt,
     playlistContextUrl,
+    playlistId,
     youtubeUrl,
     videoId,
     workItems,

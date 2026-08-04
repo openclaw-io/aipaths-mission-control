@@ -10,9 +10,20 @@ import {
   type YouTubeGateStatus,
 } from "@/lib/youtube-pipeline";
 import {
+  buildScheduledLaunchPublicActionPayload,
   extractYouTubeVideoId,
   validateCommunityLaunchDraftOutput,
 } from "@/lib/youtube-launch-package";
+import { validateYouTubeLaunchPreflight } from "@/lib/youtube-launch-state";
+import {
+  markExternalDeliveryAccepted,
+  markExternalDeliveryAmbiguous,
+  markExternalDeliveryPreDeliveryFailure,
+} from "@/lib/work-items/external-delivery";
+import {
+  buildScheduledLaunchGateBlockedTransition,
+  nextScheduledLaunchRetryTransition,
+} from "@/lib/work-items/scheduled-launch-runtime";
 import { verifyRepositoryCommit } from "@/lib/work-items/git-artifact";
 
 export type JsonRecord = Record<string, unknown>;
@@ -60,6 +71,52 @@ export type CompletionOrchestrationInput = {
   publicationVerification?: PreparedPublicationVerification | null;
 };
 
+type YouTubePreflightItem = Parameters<typeof validateYouTubeLaunchPreflight>[0]["item"];
+type YouTubePreflightApprovals = NonNullable<Parameters<typeof validateYouTubeLaunchPreflight>[0]["authoritativeApprovals"]>;
+
+function authoritativeApprovalFromPipelineItem(row: JsonRecord | undefined, launchGeneration: string, manualPublication = false) {
+  const metadata = asRecord(row?.metadata);
+  const review = asRecord(metadata.review);
+  const schedule = asRecord(metadata.schedule);
+  const approvedBy = readString(review.approved_by) || readString(schedule.approved_by);
+  const reviewStatus = readString(review.status);
+  const approvalLaunchGeneration = readString(review.launch_generation) || readString(schedule.approval_launch_generation);
+  return {
+    status: approvalLaunchGeneration === launchGeneration && (reviewStatus === "approved" || approvedBy) ? "approved" : reviewStatus,
+    approvedBy,
+    launchGeneration: approvalLaunchGeneration,
+    manualPublication,
+  };
+}
+
+async function lockAuthoritativeLaunchApprovals(
+  client: CompletionQueryClient,
+  parentPipelineItemId: string,
+  launchGeneration: string,
+): Promise<YouTubePreflightApprovals> {
+  const childResult = await client.query<JsonRecord>(
+    `SELECT id,pipeline_type,metadata
+       FROM public.pipeline_items
+      WHERE id <> $1::uuid
+        AND metadata -> 'launch_package' ->> 'source_video_pipeline_item_id' = $1::text
+        AND metadata -> 'launch_package' ->> 'launch_generation' = $2::text
+        AND pipeline_type IN ('community_post','email_campaign','youtube_pinned_comment')
+      ORDER BY id
+      FOR UPDATE`,
+    [parentPipelineItemId, launchGeneration],
+  );
+  const rowsFor = (pipelineType: string) => childResult.rows.filter((row) => readString(row.pipeline_type) === pipelineType);
+  const singleRowFor = (pipelineType: string) => {
+    const rows = rowsFor(pipelineType);
+    return rows.length === 1 ? rows[0] : undefined;
+  };
+  return {
+    community: authoritativeApprovalFromPipelineItem(singleRowFor("community_post"), launchGeneration),
+    marketing: authoritativeApprovalFromPipelineItem(singleRowFor("email_campaign"), launchGeneration),
+    pinnedComment: authoritativeApprovalFromPipelineItem(singleRowFor("youtube_pinned_comment"), launchGeneration, true),
+  };
+}
+
 function asRecord(value: unknown): JsonRecord {
   return value && typeof value === "object" && !Array.isArray(value) ? value as JsonRecord : {};
 }
@@ -74,6 +131,129 @@ function getNestedString(value: unknown, path: string[]) {
 
 function readString(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function externalDeliveryReport(body: JsonRecord) {
+  const output = asRecord(body.output);
+  return asRecord(output.external_delivery);
+}
+
+async function reconcileScheduledLaunchRuntimeOutcome(
+  client: CompletionQueryClient,
+  existing: WorkItemRow,
+  updated: WorkItemRow,
+  body: JsonRecord,
+) {
+  const payload = asRecord(existing.payload);
+  if (payload.runtime_retry_contract !== "scheduled_launch_v2_retry_v1") return null;
+  if (body.status !== "done" && body.status !== "failed") return null;
+
+  const now = new Date().toISOString();
+  const key = readString(payload.external_delivery_idempotency_key);
+  const claim = asRecord(payload.external_delivery_claim);
+  const claimToken = readString(claim.claim_token);
+  const report = externalDeliveryReport(body);
+  const reportStatus = readString(report.status);
+  const providerDeliveryId = readString(report.provider_delivery_id) || readString(report.provider_id) || readString(report.message_id);
+  const error = readString(report.error)
+    || readString(asRecord(body.output).error)
+    || readString(body.result)
+    || "scheduled_launch_runtime_failure";
+
+  if (key && claimToken && body.status === "done" && reportStatus === "accepted" && providerDeliveryId) {
+    const accepted = await markExternalDeliveryAccepted(client, {
+      key,
+      claimToken,
+      workItemId: existing.id,
+      acceptedAt: readString(report.accepted_at) || readString(report.sent_at) || readString(report.published_at) || now,
+      providerDeliveryId,
+      result: report,
+    });
+    const nextPayload = {
+      ...asRecord(updated.payload),
+      external_delivery_claim: { ...claim, status: "accepted", accepted_at: accepted.providerAcceptedAt },
+      external_delivery_result: {
+        status: "accepted",
+        provider_delivery_id: accepted.providerDeliveryId,
+        accepted_at: accepted.providerAcceptedAt,
+      },
+    };
+    await client.query("update public.work_items set payload=$2::jsonb,updated_at=now() where id=$1", [existing.id, JSON.stringify(nextPayload)]);
+    updated.payload = nextPayload;
+    return null;
+  }
+
+  if (key && claimToken && body.status === "failed" && reportStatus === "not_attempted") {
+    await markExternalDeliveryPreDeliveryFailure(client, {
+      key,
+      claimToken,
+      workItemId: existing.id,
+      failedAt: now,
+      error,
+    });
+    const failureClass = readString(report.failure_class) || "runtime_unavailable";
+    const transition = nextScheduledLaunchRetryTransition({
+      ...asRecord(updated.payload),
+      external_delivery_claim: { ...claim, status: "failed_pre_delivery", failed_at: now },
+    }, { now, failureClass, error });
+    await client.query(
+      `update public.work_items
+          set status=$2,scheduled_for=$3::timestamptz,completed_at=null,payload=$4::jsonb,updated_at=now()
+        where id=$1`,
+      [existing.id, transition.status, transition.scheduledFor, JSON.stringify(transition.payload)],
+    );
+    updated.status = transition.status;
+    updated.payload = transition.payload;
+    return { applied: true, effect: transition.retryable ? "scheduled_launch_retry_scheduled" : "scheduled_launch_dead_lettered" };
+  }
+
+  if (!key && body.status === "failed") {
+    const output = asRecord(body.output);
+    const failureClass = readString(output.failure_class) || "runtime_unavailable";
+    const transition = nextScheduledLaunchRetryTransition(asRecord(updated.payload), { now, failureClass, error });
+    await client.query(
+      `update public.work_items
+          set status=$2,scheduled_for=$3::timestamptz,completed_at=null,payload=$4::jsonb,updated_at=now()
+        where id=$1`,
+      [existing.id, transition.status, transition.scheduledFor, JSON.stringify(transition.payload)],
+    );
+    updated.status = transition.status;
+    updated.payload = transition.payload;
+    return { applied: true, effect: transition.retryable ? "scheduled_launch_retry_scheduled" : "scheduled_launch_dead_lettered" };
+  }
+
+  // Once a provider request may have been issued, absence of a positive accepted
+  // result is ambiguous. Persist that ambiguity and block forever until a human
+  // reconciles the provider; automatic replay is deliberately impossible.
+  if (key && claimToken) {
+    await markExternalDeliveryAmbiguous(client, {
+      key,
+      claimToken,
+      workItemId: existing.id,
+      observedAt: now,
+      error: error || "external_delivery_outcome_ambiguous",
+      result: Object.keys(report).length ? report : { status: "ambiguous", error: "missing_external_delivery_result" },
+    });
+  }
+  const blocked = buildScheduledLaunchGateBlockedTransition(asRecord(updated.payload), {
+    now,
+    failures: ["external_delivery_outcome_ambiguous"],
+    remediation: "Reconcile the provider using the external delivery key. Never resend; manually record the accepted result or resolve the ambiguity.",
+  });
+  const blockedPayload: JsonRecord = {
+    ...blocked.payload,
+    external_delivery_claim: { ...claim, status: "ambiguous", observed_at: now },
+    external_delivery_result: Object.keys(report).length ? report : { status: "ambiguous" },
+  };
+  await client.query(
+    `update public.work_items
+        set status='blocked',scheduled_for=null,completed_at=null,payload=$2::jsonb,updated_at=now()
+      where id=$1`,
+    [existing.id, JSON.stringify(blockedPayload)],
+  );
+  updated.status = "blocked";
+  updated.payload = blockedPayload;
+  return { applied: true, effect: "scheduled_launch_external_delivery_ambiguous" };
 }
 
 function completePlan(plan: unknown) {
@@ -660,6 +840,11 @@ function extractYouTubeLiveCheck(body: JsonRecord) {
   };
 }
 
+function extractYouTubePreflight(body: JsonRecord) {
+  const output = asRecord(body.output);
+  return asRecord(output.preflight || body.preflight);
+}
+
 function communityPublishTarget(metadata: JsonRecord) {
   const destinationKey = readString(metadata.intel_destination_key);
   const destinationLabel = readString(metadata.destination_label)?.toLowerCase() || "";
@@ -758,6 +943,12 @@ async function ensureCommunityPublishWorkItem(client: CompletionQueryClient, ite
   const copy = asRecord(metadata.copy);
   const target = communityPublishTarget(metadata);
   const title = readString(item.title) || readString(workItem.title) || "Community post";
+  const launchPublicPayload = buildScheduledLaunchPublicActionPayload({
+    metadata,
+    ownerAgent: "community",
+    action: "publish_community_post",
+    destination: target.channelId,
+  });
   return ensureMappedWorkItem(client, {
     pipelineItemId: String(item.id),
     relationType: "publish",
@@ -783,6 +974,7 @@ async function ensureCommunityPublishWorkItem(client: CompletionQueryClient, ite
       target_channel_name: target.channelName,
       log_channel_id: "1473660854800224316",
       suppress_link_previews: true,
+      ...launchPublicPayload,
     },
   });
 }
@@ -910,6 +1102,9 @@ export async function orchestrateWorkItemCompletion(
   const v2TaskExecution = await reconcileV2TaskExecution(client, existing, body);
   if (v2TaskExecution) return v2TaskExecution;
 
+  const scheduledLaunchRuntime = await reconcileScheduledLaunchRuntimeOutcome(client, existing, updated, body);
+  if (scheduledLaunchRuntime) return scheduledLaunchRuntime;
+
   // V1 primary_execution orchestration is intentionally unchanged below.
   if (body.status === "canceled" && existing.status !== "canceled") {
     return reconcilePrimaryLoopNeedsAttention(client, updated, "canceled");
@@ -949,6 +1144,91 @@ export async function orchestrateWorkItemCompletion(
   const activeScheduledYouTubeLaunch = pipelineType === "video"
     && asRecord(metadata.launch_package).kind === "scheduled_youtube_launch_package_v1"
     && asRecord(metadata.launch_package).status === "scheduled";
+
+  if (pipelineType === "video" && action === "youtube_launch_preflight") {
+    const youtubeV0 = asRecord(metadata.youtube_v0);
+    const launchPackage = asRecord(metadata.launch_package);
+    const launchGeneration = readString(launchPackage.launch_generation);
+    if (readString(payload.trigger) !== "youtube_launch_package_v1"
+      || relationType !== "youtube_launch_preflight"
+      || readString(payload.source_video_pipeline_item_id) !== pipelineItemId
+      || readString(payload.pipeline_item_id) !== pipelineItemId
+      || readString(existing.source_id) !== pipelineItemId
+      || readString(existing.source_type) !== "pipeline_item") {
+      throw new Error("YouTube preflight work-item identity is invalid");
+    }
+    if (!launchGeneration || readString(payload.launch_generation) !== launchGeneration) {
+      throw new Error("YouTube preflight launch generation is stale");
+    }
+    if (pipelineItem.status !== "scheduled"
+      || launchPackage.kind !== "scheduled_youtube_launch_package_v1"
+      || launchPackage.status !== "scheduled") {
+      throw new Error("YouTube preflight requires an active scheduled parent and launch package");
+    }
+    const expectedVideoId = readString(launchPackage.video_id) || readString(youtubeV0.video_id);
+    if (!expectedVideoId || !/^[a-zA-Z0-9_-]{11}$/.test(expectedVideoId)) {
+      throw new Error("YouTube preflight parent is missing its expected video ID");
+    }
+
+    const authoritativeApprovals = await lockAuthoritativeLaunchApprovals(client, pipelineItemId, launchGeneration);
+    const databaseTimeResult = await client.query<JsonRecord>("SELECT now() AS current_time");
+    const databaseNow = databaseTimeResult.rows[0]?.current_time;
+    if (!(databaseNow instanceof Date) && !readString(databaseNow)) {
+      throw new Error("YouTube preflight database clock is unavailable");
+    }
+    const preflight = validateYouTubeLaunchPreflight({
+      item: pipelineItem as YouTubePreflightItem,
+      preflight: extractYouTubePreflight(body),
+      authoritativeApprovals,
+      now: databaseNow instanceof Date ? databaseNow : readString(databaseNow),
+    });
+    await updatePipelineItem(client, pipelineItemId, "scheduled", {
+      ...metadata,
+      launch_package: {
+        ...launchPackage,
+        launch_state: preflight.ok ? "scheduled" : "blocked",
+        preflight: {
+          status: preflight.status,
+          checked_at: preflight.checkedAt,
+          launch_generation: launchGeneration,
+          publish_at: readString(launchPackage.publish_at),
+          blockers: preflight.blockers,
+          gates: preflight.gates,
+          evidence: {
+            ...preflight.evidence,
+            launch_generation: launchGeneration,
+            publish_at: readString(launchPackage.publish_at),
+          },
+          remediation: preflight.remediation,
+        },
+      },
+      runtime_feedback: {
+        ...asRecord(metadata.runtime_feedback),
+        last_status: preflight.ok ? "youtube_launch_preflight_passed" : "youtube_launch_preflight_blocked",
+        last_work_item_id: updated.id,
+        updated_at: now,
+      },
+    });
+    if (!preflight.ok) {
+      const blockedPayload = {
+        ...payload,
+        ...asRecord(updated.payload),
+        dispatch_state: "blocked_launch_gate",
+        dispatch_failure_class: "nonretryable_gate",
+        dead_letter_reason: "youtube_launch_preflight_blocked",
+        dead_lettered_at: now,
+        remediation: preflight.remediation,
+        preflight_attempt_count: Number(payload.preflight_attempt_count || 0) + 1,
+      };
+      await client.query(
+        `UPDATE public.work_items
+            SET status='blocked',completed_at=null,updated_at=now(),payload=$2::jsonb
+          WHERE id=$1`,
+        [existing.id, JSON.stringify(blockedPayload)],
+      );
+    }
+    return { applied: true, effect: preflight.ok ? "youtube_launch_preflight_passed" : "youtube_launch_preflight_blocked", verified: preflight.ok };
+  }
 
   if (pipelineType === "video" && action === "video_launch_activate") {
     const youtubeV0 = asRecord(metadata.youtube_v0);
@@ -991,6 +1271,9 @@ export async function orchestrateWorkItemCompletion(
       || launchPackage.kind !== "scheduled_youtube_launch_package_v1"
       || launchPackage.status !== "scheduled") {
       throw new Error("YouTube live-check requires an active scheduled parent and launch package");
+    }
+    if (readString(asRecord(launchPackage.preflight).status) !== "pass") {
+      throw new Error("YouTube live-check requires a passed launch preflight");
     }
 
     const expectedVideoId = readString(launchPackage.video_id) || readString(youtubeV0.video_id);
@@ -1271,6 +1554,32 @@ export async function orchestrateWorkItemCompletion(
   }
 
   if (pipelineType === "email_campaign") {
+    if (action === "send_email_campaign") {
+      const output = asRecord(body.output);
+      const delivery = asRecord(output.external_delivery);
+      const sentAt = readString(output.sent_at) || readString(delivery.accepted_at) || now;
+      const providerDeliveryId = readString(delivery.provider_delivery_id)
+        || readString(output.provider_delivery_id)
+        || readString(output.campaign_id);
+      await updatePipelineItem(client, pipelineItemId, "sent", {
+        ...metadata,
+        delivery: {
+          ...asRecord(metadata.delivery),
+          status: "accepted",
+          sent_at: sentAt,
+          provider_delivery_id: providerDeliveryId,
+          source_work_item_id: updated.id,
+        },
+        runtime_feedback: {
+          ...asRecord(metadata.runtime_feedback),
+          last_status: "sent",
+          last_work_item_id: updated.id,
+          updated_at: now,
+        },
+      }, { publishedAt: sentAt });
+      return { applied: true, effect: "email_sent" };
+    }
+
     const emailDraft = asRecord(asRecord(body.output).email_draft);
     if (Object.keys(emailDraft).length) {
       await updatePipelineItem(client, pipelineItemId, "ready_for_review", {

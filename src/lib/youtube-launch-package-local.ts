@@ -405,10 +405,11 @@ async function ensureVideoPipelineItem(client: PoolClient, input: {
   if (existing && (Boolean(existing.published_at) || !["recorded", "editing", "scheduled"].includes(existing.status))) {
     throw new Error(`Cannot schedule video in ${existing.status || "unknown"} state`);
   }
-  const launchPackage = {
+  const launchPackage: JsonRecord = {
     ...existingLaunchPackage,
     kind: "scheduled_youtube_launch_package_v1",
     status: "scheduled",
+    launch_state: "awaiting_approval",
     launch_generation: input.launchGeneration,
     newsletter_scope: "excluded_v1",
     video_id: input.videoId,
@@ -416,6 +417,8 @@ async function ensureVideoPipelineItem(client: PoolClient, input: {
     playlist_context_url: input.playlistContextUrl,
     playlist_id: input.playlistId,
     publish_at: input.publishAt,
+    approval_deadline_at: addMinutes(input.publishAt, -60),
+    preflight_required_at: addMinutes(input.publishAt, -30),
     target_community_publish_at: input.targetCommunityPublishAt,
     target_email_send_at: input.targetEmailSendAt,
     email_tracking_ref: input.emailTrackingRef,
@@ -426,6 +429,14 @@ async function ensureVideoPipelineItem(client: PoolClient, input: {
     updated_at: now,
     created_at: existingLaunchPackage.created_at || now,
   };
+  const scheduleIdentityChanged = Boolean(existing)
+    && (trimToNull(existingLaunchPackage.launch_generation) !== input.launchGeneration
+      || trimToNull(existingLaunchPackage.publish_at) !== input.publishAt);
+  if (scheduleIdentityChanged) {
+    for (const key of ["preflight", "live_check", "public_verified", "activated_at", "activation_evidence"]) {
+      delete launchPackage[key];
+    }
+  }
   const metadata = {
     ...existingMetadata,
     youtube_v0: {
@@ -437,6 +448,7 @@ async function ensureVideoPipelineItem(client: PoolClient, input: {
       scheduled_publish_at: input.publishAt,
       stage: "scheduled",
       launch_package_status: "scheduled",
+      launch_state: "awaiting_approval",
     },
     publication: {
       ...existingPublication,
@@ -490,6 +502,7 @@ async function ensureVideoPipelineItem(client: PoolClient, input: {
 
 async function ensureCommunityPipelineItem(client: PoolClient, input: {
   videoItem: PipelineItemRow;
+  launchGeneration: string;
   title: string;
   youtubeUrl: string;
   videoId: string;
@@ -512,6 +525,7 @@ async function ensureCommunityPipelineItem(client: PoolClient, input: {
   const existing = existingResult.rows[0] ? pipelineItem(existingResult.rows[0]) : null;
   const now = new Date().toISOString();
   const existingMetadata = toRecord(existing?.metadata);
+  const sameLaunchGeneration = trimToNull(toRecord(existingMetadata.launch_package).launch_generation) === input.launchGeneration;
   const metadata = {
     ...existingMetadata,
     kind: "video_launch_announcement",
@@ -530,8 +544,9 @@ async function ensureCommunityPipelineItem(client: PoolClient, input: {
       publish_at: input.publishAt,
     },
     copy: toRecord(existingMetadata.copy),
+    review: sameLaunchGeneration ? toRecord(existingMetadata.review) : {},
     schedule: {
-      ...toRecord(existingMetadata.schedule),
+      ...(sameLaunchGeneration ? toRecord(existingMetadata.schedule) : {}),
       target_publish_at: input.targetPublishAt,
       requires_approval: true,
       auto_publish: false,
@@ -540,11 +555,15 @@ async function ensureCommunityPipelineItem(client: PoolClient, input: {
     launch_package: {
       ...toRecord(existingMetadata.launch_package),
       source_video_pipeline_item_id: input.videoItem.id,
+      launch_generation: input.launchGeneration,
       video_id: input.videoId,
       youtube_url: input.youtubeUrl,
       playlist_context_url: input.playlistContextUrl,
       playlist_id: input.playlistId,
       publish_at: input.publishAt,
+      launch_state: "awaiting_approval",
+      approval_deadline_at: addMinutes(input.publishAt, -60),
+      preflight_required_at: addMinutes(input.publishAt, -30),
       target_publish_at: input.targetPublishAt,
       cta: input.cta,
       suppress_link_previews: false,
@@ -571,7 +590,9 @@ async function ensureCommunityPipelineItem(client: PoolClient, input: {
         returning ${PIPELINE_ITEM_COLUMNS}`,
       [
         `Announce video: ${input.title}`,
-        TERMINAL_WORK_STATUSES.has(existing.status) || existing.status === "published" ? existing.status : existing.status || "draft",
+        sameLaunchGeneration
+          ? (TERMINAL_WORK_STATUSES.has(existing.status) || existing.status === "published" ? existing.status : existing.status || "draft")
+          : "draft",
         existing.requested_by || input.requestedBy,
         input.videoItem.id,
         JSON.stringify(metadata),
@@ -616,6 +637,7 @@ async function findExistingMarketingItem(client: PoolClient, videoId: string, vi
 
 async function ensureMarketingEmailPipelineItem(client: PoolClient, input: {
   videoItem: PipelineItemRow;
+  launchGeneration: string;
   title: string;
   youtubeUrl: string;
   videoId: string;
@@ -630,6 +652,7 @@ async function ensureMarketingEmailPipelineItem(client: PoolClient, input: {
   const existing = await findExistingMarketingItem(client, input.videoId, input.videoItem.id);
   const now = new Date().toISOString();
   const existingMetadata = toRecord(existing?.metadata);
+  const sameLaunchGeneration = trimToNull(toRecord(existingMetadata.launch_package).launch_generation) === input.launchGeneration;
   const metadata = {
     ...existingMetadata,
     kind: "video_announcement",
@@ -646,21 +669,26 @@ async function ensureMarketingEmailPipelineItem(client: PoolClient, input: {
       publish_at: input.publishAt,
     },
     schedule: {
-      ...toRecord(existingMetadata.schedule),
+      ...(sameLaunchGeneration ? toRecord(existingMetadata.schedule) : {}),
       target_send_at: input.targetSendAt,
       requires_approval: true,
       auto_send: false,
       source: "youtube_launch_package_v1",
     },
     draft: toRecord(existingMetadata.draft),
+    review: sameLaunchGeneration ? toRecord(existingMetadata.review) : {},
     launch_package: {
       ...toRecord(existingMetadata.launch_package),
       source_video_pipeline_item_id: input.videoItem.id,
+      launch_generation: input.launchGeneration,
       video_id: input.videoId,
       youtube_url: input.youtubeUrl,
       playlist_context_url: input.playlistContextUrl,
       playlist_id: input.playlistId,
       publish_at: input.publishAt,
+      launch_state: "awaiting_approval",
+      approval_deadline_at: addMinutes(input.publishAt, -60),
+      preflight_required_at: addMinutes(input.publishAt, -30),
       target_send_at: input.targetSendAt,
       email_tracking_ref: input.emailTrackingRef,
       optional_diagnostic_cta: input.optionalDiagnosticCta,
@@ -682,7 +710,9 @@ async function ensureMarketingEmailPipelineItem(client: PoolClient, input: {
         returning ${PIPELINE_ITEM_COLUMNS}`,
       [
         `Email announcement: ${input.title}`,
-        TERMINAL_WORK_STATUSES.has(existing.status) || existing.status === "sent" ? existing.status : existing.status || "drafting",
+        sameLaunchGeneration
+          ? (TERMINAL_WORK_STATUSES.has(existing.status) || existing.status === "sent" ? existing.status : existing.status || "drafting")
+          : "drafting",
         existing.requested_by || input.requestedBy,
         input.videoItem.id,
         input.targetSendAt,
@@ -715,6 +745,7 @@ async function ensureMarketingEmailPipelineItem(client: PoolClient, input: {
 
 async function ensurePinnedCommentPipelineItem(client: PoolClient, input: {
   videoItem: PipelineItemRow;
+  launchGeneration: string;
   title: string;
   youtubeUrl: string;
   videoId: string;
@@ -736,6 +767,7 @@ async function ensurePinnedCommentPipelineItem(client: PoolClient, input: {
   const existing = existingResult.rows[0] ? pipelineItem(existingResult.rows[0]) : null;
   const now = new Date().toISOString();
   const existingMetadata = toRecord(existing?.metadata);
+  const sameLaunchGeneration = trimToNull(toRecord(existingMetadata.launch_package).launch_generation) === input.launchGeneration;
   const metadata = {
     ...existingMetadata,
     kind: "youtube_pinned_comment",
@@ -752,15 +784,19 @@ async function ensurePinnedCommentPipelineItem(client: PoolClient, input: {
       publish_at: input.publishAt,
     },
     draft: toRecord(existingMetadata.draft),
-    review: toRecord(existingMetadata.review),
+    review: sameLaunchGeneration ? toRecord(existingMetadata.review) : {},
     launch_package: {
       ...toRecord(existingMetadata.launch_package),
       source_video_pipeline_item_id: input.videoItem.id,
+      launch_generation: input.launchGeneration,
       video_id: input.videoId,
       youtube_url: input.youtubeUrl,
       playlist_context_url: input.playlistContextUrl,
       playlist_id: input.playlistId,
       publish_at: input.publishAt,
+      launch_state: "awaiting_approval",
+      approval_deadline_at: addMinutes(input.publishAt, -60),
+      preflight_required_at: addMinutes(input.publishAt, -30),
       cta: input.cta,
       prepublication_draft_authorized: true,
       public_gate_applies_to: "publish_or_send_only",
@@ -779,7 +815,9 @@ async function ensurePinnedCommentPipelineItem(client: PoolClient, input: {
         returning ${PIPELINE_ITEM_COLUMNS}`,
       [
         `Pinned comment draft: ${input.title}`,
-        TERMINAL_WORK_STATUSES.has(existing.status) || existing.status === "published" ? existing.status : existing.status || "drafting",
+        sameLaunchGeneration
+          ? (TERMINAL_WORK_STATUSES.has(existing.status) || existing.status === "published" ? existing.status : existing.status || "drafting")
+          : "drafting",
         existing.requested_by || input.requestedBy,
         input.videoItem.id,
         JSON.stringify(metadata),
@@ -857,6 +895,40 @@ async function mapWorkItem(client: PoolClient, pipelineItemId: string, workItemI
   );
 }
 
+const GENERATION_SCOPED_WORK_PAYLOAD_KEYS = new Set([
+  "runtime_retry_state",
+  "dead_letter_reason",
+  "dead_lettered_at",
+  "remediation",
+  "external_delivery_idempotency_key",
+  "external_delivery_claim",
+  "external_delivery_result",
+  "dispatch_state",
+  "dispatch_failure_class",
+  "dispatch_failure_reason",
+  "dispatch_session_id",
+  "execution_attempt_id",
+  "attempt_id",
+  "wake_failure_count",
+  "last_wake_failed_at",
+  "last_wake_error",
+  "preflight_attempt_count",
+  "output",
+  "result",
+  "live_gate_checked_at",
+  "live_gate_failures",
+  "live_gate_remediation",
+]);
+
+function reusablePayloadForLaunchGeneration(payload: JsonRecord, launchGeneration: string) {
+  if (trimToNull(payload.launch_generation) === launchGeneration) return payload;
+  return Object.fromEntries(Object.entries(payload).filter(([key]) => (
+    !GENERATION_SCOPED_WORK_PAYLOAD_KEYS.has(key)
+      && !key.startsWith("generic_notify_")
+      && !key.startsWith("scheduled_launch_failure_")
+  )));
+}
+
 async function upsertLaunchWorkItem(client: PoolClient, spec: ScheduledYouTubeLaunchWorkSpec, common: {
   videoId: string;
   videoPipelineItemId: string;
@@ -877,8 +949,9 @@ async function upsertLaunchWorkItem(client: PoolClient, spec: ScheduledYouTubeLa
     publishAt: common.publishAt,
     allowLegacyVideoFallback: common.allowLegacyVideoFallback,
   });
+  const existingPayload = reusablePayloadForLaunchGeneration(toRecord(existing?.payload), common.launchGeneration);
   const payload = {
-    ...toRecord(existing?.payload),
+    ...existingPayload,
     trigger: "youtube_launch_package_v1",
     pipeline_type: spec.pipelineType,
     pipeline_item_id: spec.sourcePipelineItemId,
@@ -1090,6 +1163,7 @@ export async function createScheduledYouTubeLaunchPackageLocal(input: YouTubeLau
     });
     const community = await ensureCommunityPipelineItem(client, {
       videoItem: video.item,
+      launchGeneration,
       title,
       youtubeUrl,
       videoId,
@@ -1102,6 +1176,7 @@ export async function createScheduledYouTubeLaunchPackageLocal(input: YouTubeLau
     });
     const marketing = await ensureMarketingEmailPipelineItem(client, {
       videoItem: video.item,
+      launchGeneration,
       title,
       youtubeUrl,
       videoId,
@@ -1115,6 +1190,7 @@ export async function createScheduledYouTubeLaunchPackageLocal(input: YouTubeLau
     });
     const pinnedComment = await ensurePinnedCommentPipelineItem(client, {
       videoItem: video.item,
+      launchGeneration,
       title,
       youtubeUrl,
       videoId,
@@ -1160,8 +1236,8 @@ export async function createScheduledYouTubeLaunchPackageLocal(input: YouTubeLau
       workItems.push({ relationType: spec.relationType, ...(await upsertLaunchWorkItem(client, spec, common)) });
     }
     const activationWorkItemId = workItems.find((entry) => entry.relationType === "video_launch_activate")?.workItem?.id;
-    if (!activationWorkItemId || workItems.length !== 9) {
-      throw new Error("YouTube launch package did not reconcile exactly nine current work items");
+    if (!activationWorkItemId || workItems.length !== 12) {
+      throw new Error("YouTube launch package did not reconcile exactly twelve current work items");
     }
     const openActivations = await client.query(
       `select w.id, w.source_type, w.source_id, w.payload
@@ -1201,6 +1277,7 @@ export async function createScheduledYouTubeLaunchPackageLocal(input: YouTubeLau
         ...toRecord(toRecord(video.item.metadata).launch_package),
         launch_generation: launchGeneration,
         activation_work_item_id: activationWorkItemId,
+        launch_state: "awaiting_approval",
       },
     };
     const finalizedVideoResult = await client.query(

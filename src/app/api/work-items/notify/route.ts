@@ -6,12 +6,21 @@ import { AGENT_ROUTING, isRoutedAgent } from "@/lib/agent-routing";
 import { isLocalAuthDisabled } from "@/lib/auth/local";
 import { query, withTransaction } from "@/lib/db/postgres";
 import { buildLoopWakeContext } from "@/lib/loops/execution-instruction";
+import { evaluateYouTubeLaunchActionReadiness } from "@/lib/youtube-launch-state";
 import {
   genericNotifyIdentityMatches,
   isVisualQaLikeWorkItem,
   parseGenericNotifyClassificationIdentity,
 } from "@/lib/work-items/generic-notify-contract";
 import { serializeWorkItemStatusPayload } from "@/lib/work-items/status-payload";
+import {
+  claimExternalDelivery,
+  markExternalDeliveryPreDeliveryFailure,
+} from "@/lib/work-items/external-delivery";
+import {
+  buildScheduledLaunchGateBlockedTransition,
+  nextScheduledLaunchRetryTransition,
+} from "@/lib/work-items/scheduled-launch-runtime";
 
 export const dynamic = "force-dynamic";
 
@@ -68,6 +77,15 @@ type WorkItemRow = {
   source_type: string | null;
   source_id: string | null;
   payload: Record<string, unknown> | null;
+};
+
+type LaunchReadinessItem = Parameters<typeof evaluateYouTubeLaunchActionReadiness>[0]["item"];
+type LaunchReadinessWorkItem = Parameters<typeof evaluateYouTubeLaunchActionReadiness>[0]["workItem"];
+type LaunchReadinessLocalClient = {
+  query<T extends Record<string, unknown> = Record<string, unknown>>(
+    text: string,
+    params?: unknown[],
+  ): Promise<{ rows: T[] }>;
 };
 
 const GENERIC_NOTIFY_LEASE_VERSION = "generic_notify_lease_v1" as const;
@@ -149,6 +167,99 @@ function genericNotifyReplayBody(item: WorkItemRow, agent: string, lease: Generi
     outcome: lease.outcome,
     error: lease.error,
   };
+}
+
+function textValue(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function externalDeliveryKey(payload: Record<string, unknown>) {
+  return textValue(payload.external_delivery_idempotency_key);
+}
+
+function externalDeliveryScope(payload: Record<string, unknown>) {
+  return recordValue(payload.idempotency_scope);
+}
+
+function externalDeliveryInstruction(payload: Record<string, unknown>) {
+  const key = externalDeliveryKey(payload);
+  const claim = recordValue(payload.external_delivery_claim);
+  const token = textValue(claim.claim_token);
+  if (!key || !token) return "";
+  return `\n## REQUIRED: Durable external-delivery contract\nMission Control atomically claimed external delivery key ${key} with claim token ${token}. This key and token are server-owned and immutable. Issue the Community publish or Email provider request at most once, pass ${key} as the provider idempotency key when supported, and never retry an ambiguous/provider-pending request. Before completing, report output.external_delivery = { status: \"accepted\", accepted_at, provider_delivery_id } only after provider acceptance; report { status: \"not_attempted\", failure_class, error } only when no provider request was issued; otherwise report { status: \"ambiguous\", error }.\n`;
+}
+
+function externalDeliveryReplayBody(item: WorkItemRow, agent: string, claim: Awaited<ReturnType<typeof claimExternalDelivery>>) {
+  const accepted = claim.kind === "accepted_replay";
+  return {
+    ok: accepted,
+    accepted,
+    pending: !accepted,
+    agent,
+    woke: false,
+    workItemId: item.id,
+    idempotent: true,
+    externalDeliveryKey: claim.key,
+    externalDeliveryOutcome: claim.status,
+    providerDeliveryId: claim.providerDeliveryId,
+  };
+}
+
+function needsScheduledLaunchReadiness(payload: Record<string, unknown>) {
+  return payload.launch_state_contract === "scheduled_launch_v2"
+    && (payload.requires_preflight_passed === true || payload.requires_live_check_passed === true);
+}
+
+async function checkScheduledLaunchReadiness(input: {
+  useLocalMode: boolean;
+  db: ReturnType<typeof createServiceClient> | null;
+  localClient?: LaunchReadinessLocalClient;
+  item: WorkItemRow;
+  payload: Record<string, unknown>;
+}) {
+  if (!needsScheduledLaunchReadiness(input.payload)) return null;
+  const pipelineItemId = textValue(input.payload.source_video_pipeline_item_id)
+    || textValue(input.payload.pipeline_item_id)
+    || (["pipeline_item", "service"].includes(String(input.item.source_type || "")) ? textValue(input.item.source_id) : null);
+  if (!pipelineItemId) {
+    return { ok: false, failures: ["missing_launch_pipeline_item_id"], remediation: "Recreate or repair the scheduled launch work item payload before dispatch." };
+  }
+
+  let pipelineItem: Record<string, unknown> | null = null;
+  if (input.useLocalMode) {
+    const localQuery = input.localClient?.query.bind(input.localClient) || query;
+    const { rows } = await localQuery<Record<string, unknown>>(
+      `select id,title,status,scheduled_for,published_at,current_url,metadata
+         from public.pipeline_items
+        where id=$1
+        limit 1`,
+      [pipelineItemId],
+    );
+    pipelineItem = rows[0] || null;
+  } else {
+    const { data, error } = await (input.db as ReturnType<typeof createServiceClient>)
+      .from("pipeline_items")
+      .select("id,title,status,scheduled_for,published_at,current_url,metadata")
+      .eq("id", pipelineItemId)
+      .maybeSingle();
+    if (error) {
+      return { ok: false, failures: ["launch_pipeline_item_read_failed"], remediation: error.message };
+    }
+    pipelineItem = data as Record<string, unknown> | null;
+  }
+
+  if (!pipelineItem) {
+    return { ok: false, failures: ["launch_pipeline_item_not_found"], remediation: "Recreate or repair the scheduled launch parent before dispatch." };
+  }
+
+  return evaluateYouTubeLaunchActionReadiness({
+    item: pipelineItem as LaunchReadinessItem,
+    workItem: { ...input.item, payload: input.payload } as LaunchReadinessWorkItem,
+  });
 }
 
 function buildLoopContext(loop: LoopContextRow) {
@@ -466,6 +577,43 @@ export async function POST(request: NextRequest) {
     }
   }
 
+  const preLockDeliveryKey = externalDeliveryKey(workPayload);
+  if (!useLocalMode && !isGenericSchedulerCall && needsScheduledLaunchReadiness(workPayload)) {
+    return NextResponse.json({ error: "scheduled_launch_notify_requires_local_atomic_guard" }, { status: 503 });
+  }
+  const launchReadiness = isGenericSchedulerCall || !useLocalMode
+    ? await checkScheduledLaunchReadiness({ useLocalMode, db, item, payload: workPayload })
+    : null;
+  if (launchReadiness && !launchReadiness.ok) {
+    const blocked = buildScheduledLaunchGateBlockedTransition(workPayload, {
+      now: new Date(),
+      failures: launchReadiness.failures,
+      remediation: launchReadiness.remediation || "Resolve the launch gate failures, rerun preflight, then manually requeue.",
+    });
+    if (useLocalMode) {
+      await withTransaction(async (client) => {
+        await client.query("select id from public.work_items where id=$1 for update", [item!.id]);
+        await client.query(
+          `update public.work_items
+              set status=$2,scheduled_for=null,completed_at=null,payload=$3::jsonb,updated_at=now()
+            where id=$1`,
+          [item!.id, blocked.status, JSON.stringify(blocked.payload)],
+        );
+      });
+    } else {
+      await (db as ReturnType<typeof createServiceClient>)
+        .from("work_items")
+        .update({ status: blocked.status, scheduled_for: null, completed_at: null, payload: blocked.payload, updated_at: new Date().toISOString() })
+        .eq("id", item.id);
+    }
+    return NextResponse.json({
+      error: "youtube_launch_gate_blocked",
+      failures: launchReadiness.failures,
+      remediation: launchReadiness.remediation,
+      deadLettered: true,
+    }, { status: 409 });
+  }
+
   const actionLabels: Record<string, string> = {
     created: "📋 New work item assigned to you",
     unblocked: "🔓 Work item unblocked and ready",
@@ -570,6 +718,91 @@ Fail it:
 ${failCommand}
 \`\`\``;
 
+  let externalClaim: Awaited<ReturnType<typeof claimExternalDelivery>> | null = null;
+  const deliveryKey = preLockDeliveryKey;
+  if (!isGenericSchedulerCall && useLocalMode) {
+    const deliveryAcquisition = await withTransaction(async (client) => {
+      const locked = await client.query<WorkItemRow>(
+        "select * from public.work_items where id=$1 for update",
+        [item!.id],
+      );
+      const current = locked.rows[0];
+      if (!current || current.status !== "ready") return { error: "external_delivery_work_item_not_ready" as const };
+      const initialUpdatedAt = new Date(item!.updated_at).getTime();
+      const lockedUpdatedAt = new Date(current.updated_at).getTime();
+      if (!Number.isFinite(initialUpdatedAt) || !Number.isFinite(lockedUpdatedAt) || initialUpdatedAt !== lockedUpdatedAt) {
+        return { error: "notify_work_item_changed_before_lock" as const };
+      }
+      const currentPayload = { ...(current.payload || {}) } as Record<string, unknown>;
+      const currentDeliveryKey = externalDeliveryKey(currentPayload);
+      if (currentDeliveryKey !== deliveryKey) {
+        return { error: "external_delivery_identity_changed" as const };
+      }
+      const currentLaunchReadiness = await checkScheduledLaunchReadiness({
+        useLocalMode: true,
+        db,
+        localClient: client,
+        item: current,
+        payload: currentPayload,
+      });
+      if (currentLaunchReadiness && !currentLaunchReadiness.ok) {
+        const blocked = buildScheduledLaunchGateBlockedTransition(currentPayload, {
+          now: new Date(),
+          failures: currentLaunchReadiness.failures,
+          remediation: currentLaunchReadiness.remediation || "Resolve the launch gate failures, rerun preflight, then manually requeue.",
+        });
+        await client.query(
+          `update public.work_items
+              set status=$2,scheduled_for=null,completed_at=null,payload=$3::jsonb,updated_at=now()
+            where id=$1`,
+          [current.id, blocked.status, JSON.stringify(blocked.payload)],
+        );
+        return { gateBlocked: currentLaunchReadiness, current };
+      }
+      if (!currentDeliveryKey) return { claim: null, current, payload: currentPayload };
+      const claim = await claimExternalDelivery(client, {
+        key: currentDeliveryKey,
+        workItemId: current.id,
+        scope: externalDeliveryScope(currentPayload),
+        now: new Date(),
+      });
+      if (claim.kind !== "acquired") return { claim, current };
+      currentPayload.external_delivery_claim = {
+        key: claim.key,
+        claim_token: claim.claimToken,
+        claim_attempt: claim.claimAttempt,
+        status: "pending",
+        claimed_at: new Date().toISOString(),
+      };
+      const updated = await client.query<WorkItemRow>(
+        `update public.work_items set payload=$2::jsonb,updated_at=now()
+          where id=$1 returning *`,
+        [current.id, JSON.stringify(currentPayload)],
+      );
+      return { claim, current: updated.rows[0], payload: currentPayload };
+    });
+    if ("error" in deliveryAcquisition) {
+      return NextResponse.json({ error: deliveryAcquisition.error }, { status: 409 });
+    }
+    if ("gateBlocked" in deliveryAcquisition && deliveryAcquisition.gateBlocked) {
+      const gateBlocked = deliveryAcquisition.gateBlocked;
+      return NextResponse.json({
+        error: "youtube_launch_gate_blocked",
+        failures: gateBlocked.failures,
+        remediation: gateBlocked.remediation,
+        deadLettered: true,
+      }, { status: 409 });
+    }
+    externalClaim = deliveryAcquisition.claim;
+    if (externalClaim && externalClaim.kind !== "acquired") {
+      const replayStatus = externalClaim.kind === "accepted_replay" ? 200 : externalClaim.kind === "scope_conflict" ? 409 : 202;
+      return NextResponse.json(externalDeliveryReplayBody(item, agent, externalClaim), { status: replayStatus });
+    }
+    workPayload = deliveryAcquisition.payload!;
+    item = { ...item, ...deliveryAcquisition.current, payload: workPayload };
+    item.payload = workPayload;
+  }
+
   let wake: WakeAgentResult;
   if (isGenericSchedulerCall) {
     if (!useLocalMode || !schedulerClassificationIdentity) {
@@ -580,7 +813,7 @@ ${failCommand}
     // the same logical attempt even when the first HTTP response is ambiguous.
     const acquisition = await withTransaction(async (client) => {
       const currentResult = await client.query<WorkItemRow>(
-        `select id,status,updated_at,source_type,source_id,owner_agent,target_agent_id,payload
+        `select id,status,scheduled_for,updated_at,source_type,source_id,owner_agent,target_agent_id,payload
            from public.work_items
           where id=$1
           for update`,
@@ -620,6 +853,49 @@ ${failCommand}
       if (agent !== current.owner_agent && agent !== current.target_agent_id) {
         return { error: "notify_agent_identity_mismatch" as const };
       }
+      const launchReadiness = await checkScheduledLaunchReadiness({
+        useLocalMode,
+        db,
+        localClient: client,
+        item: current,
+        payload: (current.payload || {}) as Record<string, unknown>,
+      });
+      if (launchReadiness && !launchReadiness.ok) {
+        const blocked = buildScheduledLaunchGateBlockedTransition(current.payload || {}, {
+          now: new Date(),
+          failures: launchReadiness.failures,
+          remediation: launchReadiness.remediation || "Resolve the launch gate failures, rerun preflight, then manually requeue.",
+        });
+        await client.query(
+          `update public.work_items
+              set status=$2,scheduled_for=null,completed_at=null,payload=$3::jsonb,updated_at=now()
+            where id=$1`,
+          [current.id, blocked.status, JSON.stringify(blocked.payload)],
+        );
+        return { gateBlocked: launchReadiness };
+      }
+
+      const payload: Record<string, unknown> = { ...(current.payload || {}) };
+      const currentDeliveryKey = externalDeliveryKey(payload);
+      let deliveryClaim: Awaited<ReturnType<typeof claimExternalDelivery>> | null = null;
+      if (currentDeliveryKey) {
+        deliveryClaim = await claimExternalDelivery(client, {
+          key: currentDeliveryKey,
+          workItemId: current.id,
+          scope: externalDeliveryScope(payload),
+          now: new Date(nowMs),
+        });
+        if (deliveryClaim.kind !== "acquired") {
+          return { externalReplay: deliveryClaim, current };
+        }
+        payload.external_delivery_claim = {
+          key: deliveryClaim.key,
+          claim_token: deliveryClaim.claimToken,
+          claim_attempt: deliveryClaim.claimAttempt,
+          status: "pending",
+          claimed_at: new Date(nowMs).toISOString(),
+        };
+      }
 
       const leasedAt = new Date(nowMs).toISOString();
       const lease: GenericNotifyLease = {
@@ -633,7 +909,6 @@ ${failCommand}
         session_key: null,
         error: null,
       };
-      const payload: Record<string, unknown> = { ...(current.payload || {}) };
       // fresh_review_v1 implementation completion requires a server-owned
       // dispatch identity. Issue it under the same row lock as the lease so
       // concurrent same-key requests observe and preserve one trusted UUID.
@@ -651,11 +926,19 @@ ${failCommand}
         [current.id, JSON.stringify(payload)],
       );
       if (!updated.rows[0]) return { error: "generic_notify_lease_write_failed" as const };
-      return { acquired: true as const, current: updated.rows[0], payload };
+      return { acquired: true as const, current: updated.rows[0], payload, deliveryClaim };
     });
 
     if ("error" in acquisition) {
       return NextResponse.json({ error: acquisition.error }, { status: 409 });
+    }
+    const gateBlocked = "gateBlocked" in acquisition ? acquisition.gateBlocked : null;
+    if (gateBlocked) {
+      return NextResponse.json({
+        error: "youtube_launch_gate_blocked",
+        failures: gateBlocked.failures,
+        remediation: gateBlocked.remediation,
+      }, { status: 409 });
     }
     if ("replay" in acquisition && acquisition.replay) {
       const replay = acquisition.replay as GenericNotifyLease;
@@ -663,17 +946,24 @@ ${failCommand}
       const status = replay.outcome === "failed" ? 503 : replay.outcome === "leased" ? 202 : 200;
       return NextResponse.json(body, { status });
     }
+    if ("externalReplay" in acquisition && acquisition.externalReplay) {
+      const replay = acquisition.externalReplay;
+      const status = replay.kind === "accepted_replay" ? 200 : replay.kind === "scope_conflict" ? 409 : 202;
+      return NextResponse.json(externalDeliveryReplayBody(item, agent, replay), { status });
+    }
     if (!("acquired" in acquisition) || !acquisition.acquired) {
       return NextResponse.json({ error: "generic_notify_lease_acquire_failed" }, { status: 503 });
     }
 
     workPayload = acquisition.payload;
     item.payload = workPayload;
+    externalClaim = acquisition.deliveryClaim;
+    message += externalDeliveryInstruction(workPayload);
     wake = await wakeAgent(routing.agentId, item.id, message, workPayload);
 
     const finalized = await withTransaction(async (client) => {
       const locked = await client.query<WorkItemRow>(
-        `select id,status,updated_at,source_type,source_id,owner_agent,target_agent_id,payload
+        `select id,status,scheduled_for,updated_at,source_type,source_id,owner_agent,target_agent_id,payload
            from public.work_items
           where id=$1
           for update`,
@@ -693,10 +983,12 @@ ${failCommand}
         session_key: wake.sessionKey || null,
         error: wake.ok ? null : (wake.error || "wake_failed").slice(0, 500),
       };
-      const payload: Record<string, unknown> = {
+      let payload: Record<string, unknown> = {
         ...(current.payload || {}),
         generic_notify_lease: finalizedLease,
       };
+      let nextStatus = current.status;
+      let nextScheduledFor = current.scheduled_for;
       if (!wake.ok) {
         const previousWakeFailures = Number(payload.wake_failure_count);
         payload.wake_failure_count = Number.isSafeInteger(previousWakeFailures) && previousWakeFailures >= 0
@@ -704,13 +996,38 @@ ${failCommand}
           : 1;
         payload.dispatch_failure_reason = finalizedLease.error;
         payload.dispatch_last_failed_at = outcomeAt;
+
+        const key = externalDeliveryKey(payload);
+        const claim = recordValue(payload.external_delivery_claim);
+        const claimToken = textValue(claim.claim_token);
+        if (key && claimToken) {
+          await markExternalDeliveryPreDeliveryFailure(client, {
+            key,
+            claimToken,
+            workItemId: current.id,
+            failedAt: outcomeAt,
+            error: finalizedLease.error || "runtime_unavailable",
+          });
+          payload.external_delivery_claim = { ...claim, status: "failed_pre_delivery", failed_at: outcomeAt };
+        }
+        if (payload.runtime_retry_contract === "scheduled_launch_v2_retry_v1") {
+          const retry = nextScheduledLaunchRetryTransition(payload, {
+            now: outcomeAt,
+            failureClass: "runtime_unavailable",
+            error: finalizedLease.error || "runtime_unavailable",
+          });
+          payload = retry.payload;
+          nextStatus = retry.status;
+          nextScheduledFor = retry.scheduledFor;
+        }
       }
       const updated = await client.query<WorkItemRow>(
         `update public.work_items
-            set payload=$2::jsonb,updated_at=now()
+            set payload=$2::jsonb,status=$3,scheduled_for=$4::timestamptz,
+                completed_at=case when $3='ready' then null else completed_at end,updated_at=now()
           where id=$1
-          returning id,status,updated_at,source_type,source_id,owner_agent,target_agent_id,payload`,
-        [current.id, JSON.stringify(payload)],
+          returning id,status,scheduled_for,updated_at,source_type,source_id,owner_agent,target_agent_id,payload`,
+        [current.id, JSON.stringify(payload), nextStatus, nextScheduledFor || null],
       );
       return updated.rows[0] || null;
     });
@@ -728,6 +1045,7 @@ ${failCommand}
     workPayload = finalized.payload || workPayload;
     item.payload = workPayload;
   } else {
+    message += externalDeliveryInstruction(workPayload);
     wake = await wakeAgent(routing.agentId, item.id, message, workPayload);
     if (!wake.ok) {
       let latestStatus: string | null = null;
@@ -750,6 +1068,54 @@ ${failCommand}
     }
   }
 
+  if (!wake.ok && !isGenericSchedulerCall
+      && (externalDeliveryKey(workPayload) || workPayload.runtime_retry_contract === "scheduled_launch_v2_retry_v1")) {
+    if (!useLocalMode) {
+      return NextResponse.json({ error: "scheduled_launch_retry_requires_local_atomic_guard" }, { status: 503 });
+    }
+    const failedAt = new Date().toISOString();
+    await withTransaction(async (client) => {
+      const locked = await client.query<WorkItemRow>("select * from public.work_items where id=$1 for update", [item.id]);
+      const current = locked.rows[0];
+      if (!current) return;
+      let payload = { ...(current.payload || {}) } as Record<string, unknown>;
+      const key = externalDeliveryKey(payload);
+      const claim = recordValue(payload.external_delivery_claim);
+      const claimToken = textValue(claim.claim_token);
+      if (key && claimToken) {
+        await markExternalDeliveryPreDeliveryFailure(client, {
+          key,
+          claimToken,
+          workItemId: current.id,
+          failedAt,
+          error: wake.error || "runtime_unavailable",
+        });
+        payload.external_delivery_claim = { ...claim, status: "failed_pre_delivery", failed_at: failedAt };
+      }
+      let status = current.status;
+      let scheduledFor = current.scheduled_for;
+      if (payload.runtime_retry_contract === "scheduled_launch_v2_retry_v1") {
+        const retry = nextScheduledLaunchRetryTransition(payload, {
+          now: failedAt,
+          failureClass: "runtime_unavailable",
+          error: wake.error || "runtime_unavailable",
+        });
+        payload = retry.payload;
+        status = retry.status;
+        scheduledFor = retry.scheduledFor;
+      }
+      await client.query(
+        `update public.work_items
+            set payload=$2::jsonb,status=$3,scheduled_for=$4::timestamptz,
+                completed_at=case when $3='ready' then null else completed_at end,updated_at=now()
+          where id=$1`,
+        [current.id, JSON.stringify(payload), status, scheduledFor || null],
+      );
+      workPayload = payload;
+      item.payload = payload;
+    });
+  }
+
   if (!wake.ok) {
     return NextResponse.json({
       ok: false,
@@ -767,7 +1133,7 @@ ${failCommand}
   }
 
   const webhookUrl = process.env.DISCORD_TASK_ROUTER_WEBHOOK;
-  const suppressTaskRouterWebhook = workPayload.suppress_task_router_webhook === true;
+  const suppressTaskRouterWebhook = workPayload.suppress_task_router_webhook === true || workPayload.notify_project_thread === false;
   if (webhookUrl && !suppressTaskRouterWebhook) {
     try {
       await fetch(webhookUrl, {
