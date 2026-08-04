@@ -1413,6 +1413,49 @@ CREATE TABLE IF NOT EXISTS public.ops_community_daily (
 );
 CREATE INDEX IF NOT EXISTS idx_ops_community_daily_date ON public.ops_community_daily(date DESC);
 
+CREATE TABLE IF NOT EXISTS public.ops_community_member_daily (
+  date date NOT NULL,
+  guild_id text NOT NULL,
+  new_human_members integer NOT NULL,
+  total_members_at_check integer,
+  human_members_at_check integer,
+  bot_members_at_check integer,
+  checked_at timestamptz NOT NULL,
+  coverage text NOT NULL,
+  source text NOT NULL DEFAULT 'discord_list_guild_members',
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (date, guild_id),
+  CONSTRAINT ops_community_member_daily_new_human_members_check
+    CHECK (new_human_members >= 0),
+  CONSTRAINT ops_community_member_daily_snapshot_counts_check
+    CHECK (
+      (
+        total_members_at_check IS NULL
+        AND human_members_at_check IS NULL
+        AND bot_members_at_check IS NULL
+      )
+      OR (
+        total_members_at_check IS NOT NULL
+        AND human_members_at_check IS NOT NULL
+        AND bot_members_at_check IS NOT NULL
+        AND total_members_at_check >= 0
+        AND human_members_at_check >= 0
+        AND bot_members_at_check >= 0
+        AND total_members_at_check = human_members_at_check + bot_members_at_check
+      )
+    ),
+  CONSTRAINT ops_community_member_daily_coverage_check
+    CHECK (coverage IN ('daily_member_list_snapshot', 'current_member_list_backfill')),
+  CONSTRAINT ops_community_member_daily_source_check
+    CHECK (source = 'discord_list_guild_members'),
+  CONSTRAINT ops_community_member_daily_metadata_object_check
+    CHECK (jsonb_typeof(metadata) = 'object')
+);
+CREATE INDEX IF NOT EXISTS idx_ops_community_member_daily_checked_at
+  ON public.ops_community_member_daily(checked_at DESC);
+
 CREATE TABLE IF NOT EXISTS public.ops_youtube_comments (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   run_id bigint REFERENCES public.pipeline_runs(id) ON DELETE SET NULL,
@@ -1521,7 +1564,7 @@ BEGIN
     'pipeline_runs','intel_runs','intel_sources','intel_items_raw','intel_items_enriched','intel_inbox_reviews','intel_trend_daily',
     'competitor_channels','competitor_video_snapshots','competitor_transcripts',
     'ops_owned_videos','ops_youtube_video_daily','ops_youtube_short_daily','ops_youtube_channel_daily','ops_community_daily',
-    'ops_youtube_comments','academy_daily_kpis','ops_daily_snapshots','ops_youtube_video_learning_snapshots'
+    'ops_community_member_daily','ops_youtube_comments','academy_daily_kpis','ops_daily_snapshots','ops_youtube_video_learning_snapshots'
   ] LOOP
     EXECUTE format('ALTER TABLE IF EXISTS public.%I DISABLE ROW LEVEL SECURITY', tbl);
   END LOOP;
