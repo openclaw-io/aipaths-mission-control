@@ -42,15 +42,111 @@ type PlannedOccurrence = {
   payload: Record<string, unknown>;
 };
 
-const STRATEGIST_REPORTING_TABLES = [
-  "ops_daily_snapshots",
-  "academy_daily_kpis",
-  "ops_youtube_video_daily",
-  "ops_youtube_channel_daily",
-  "ops_youtube_short_daily",
-  "ops_community_daily",
-  "ops_youtube_comments",
+export const STRATEGIST_LIVE_CLASS_REPORTING_CONTRACT_VERSION = "live_class_reporting_v1_2026_08_04";
+export const STRATEGIST_LIVE_CLASS_REPORTING_CONTRACT_DATE = "2026-08-04";
+export const STRATEGIST_LIVE_CLASS_REPORTING_CONTRACT_PATH =
+  "/Users/joaco/openclaw/director-strategist/analytics/live-class-reporting-contract-2026-08-04.md";
+
+export const STRATEGIST_LIVE_CLASS_REPORT_SECTIONS = [
+  "edition_live_registrations",
+  "top_3_acquisition_channels_by_signups",
+  "global_funnel_views_clicks_signups_ventas",
+  "community_new_members",
 ];
+
+export const STRATEGIST_LIVE_CLASS_SOURCE_TABLES = [
+  "academy.live_events",
+  "academy.events",
+  "academy.live_registrations",
+  "academy.orders",
+  "mission_control.ops_community_member_daily",
+];
+
+export const STRATEGIST_LIVE_CLASS_CANONICAL_FIELDS = {
+  edition: {
+    table: "academy.live_events",
+    fields: ["id", "slug", "title", "starts_at", "status"],
+    selection: "Use the live_events row for slug=tu-primer-agente-ia. If multiple editions are open, keep the chosen id/starts_at explicit.",
+  },
+  views: {
+    table: "academy.events",
+    event_type: "live_landing_view",
+    time_field: "timestamp",
+    fields: ["visitor_id", "session_id", "properties.event_id", "properties.event_slug", "page_url"],
+    metric: "Unique live-class landing sessions in the reporting window.",
+  },
+  cta_clicks: {
+    table: "academy.events",
+    event_type: "live_registration_started",
+    time_field: "timestamp",
+    fields: ["visitor_id", "session_id", "properties.event_id", "properties.event_slug", "page_url"],
+    metric: "Registration CTA/form-start clicks in the reporting window.",
+  },
+  live_registrations: {
+    table: "academy.live_registrations",
+    time_field: "registered_at",
+    fields: ["id", "event_id", "status", "registered_at", "source", "ref", "first_ref", "last_ref", "visitor_id", "session_id"],
+    metric: "Edition-specific registration rows created in the reporting window.",
+  },
+  acquisition_channels: {
+    primary: "academy.live_registrations.first_ref normalized with derive_attribution_source",
+    fallback: "academy.live_registrations.source, then ref/last_ref, labelled as fallback when first_ref is unavailable",
+    ranking: "Rank only channels with at least one live registration; order by signup count and show count/share.",
+  },
+  ventas: {
+    table: "academy.orders",
+    time_field: "completed_at",
+    fields: ["id", "status", "completed_at", "amount", "currency", "product_id", "current_ref", "first_ref", "last_ref", "visitor_id", "session_id"],
+    attribution: "Completed paid orders attributable to the live-class/cohort path by registration visitor/session match or live-class ref evidence. If attribution coverage is incomplete, report N/D.",
+  },
+  community_new_members: {
+    table: "mission_control.ops_community_member_daily",
+    time_field: "date",
+    fields: ["date", "new_human_members", "human_members_at_check", "total_members_at_check", "checked_at", "coverage"],
+    metric: "sum(new_human_members)",
+    window: "Sum closed Europe/London calendar dates inside the report window. For daily, require the previous complete local date row.",
+    freshness: "Return N/D when the expected closed-date row is absent. Current totals belong to checked_at, not date.",
+    backfill_note: "Rows with coverage=current_member_list_backfill are incomplete because members who departed before the first sync are unrecoverable.",
+  },
+};
+
+const STRATEGIST_LIVE_CLASS_MISSING_COVERAGE_POLICY = {
+  value: "N/D",
+  rule: "Use N/D, not 0, when a source/table/field/window was not successfully checked for full coverage. Report zero only after successful full-window coverage.",
+};
+
+const STRATEGIST_REPORTING_METADATA_PASSTHROUGH_KEYS = [
+  "mode",
+  "category",
+  "monthly_day",
+  "weekly_weekday",
+  "channel_reports",
+  "channel_agent_log",
+  "cleanup_backout",
+];
+
+function strategistReportingMetadata(metadata: Record<string, unknown> | null) {
+  const safeMetadata: Record<string, unknown> = {};
+  for (const key of STRATEGIST_REPORTING_METADATA_PASSTHROUGH_KEYS) {
+    if (metadata && Object.prototype.hasOwnProperty.call(metadata, key)) {
+      safeMetadata[key] = metadata[key];
+    }
+  }
+  return safeMetadata;
+}
+
+function strategistLiveClassInstruction(typeLabel: string, titleDate: string) {
+  return [
+    `Prepare the ${typeLabel.toLowerCase()} strategist report for ${titleDate}.`,
+    "Use the live-class reporting contract. The report must contain only: (1) edition-specific live class registrations, (2) top 3 acquisition channels that produced those registrations, ordered by signups with count/share, (3) global funnel Views -> Clicks -> Signups -> Ventas, and (4) new Community members.",
+    "Canonical fields: views from academy.events event_type=live_landing_view; CTA clicks from academy.events event_type=live_registration_started; signups from academy.live_registrations by event_id and registered_at; ventas from academy.orders completed orders attributable to the live-class/cohort path; Community joins from mission_control.ops_community_member_daily by date, summing new_human_members for closed Europe/London days.",
+    "Use first-touch acquisition when available: live_registrations.first_ref normalized with derive_attribution_source. If first_ref is unavailable, use source/ref/last_ref as a labelled fallback.",
+    "Never report a false zero. Use N/D when source coverage or tracking is missing; report 0 only when the relevant source was checked for the full reporting window.",
+    "Keep the report strictly to those four sections; no extra analysis, broad rankings, broad platform metrics, tasks, commentary, or fan-out.",
+    "Do not read Academy legacy daily_digest or legacy recurrence tables.",
+    "Keep com.aipaths.daily-scrape as the data ingestion source, then post the finished report through the normal strategist reporting path and close this work item.",
+  ].join("\n\n");
+}
 
 function parseDateKey(value: string) {
   const [year, month, day] = value.split("-").map(Number);
@@ -166,19 +262,19 @@ function strategistReportOccurrence(rule: RecurringWorkRule, day: Date, schedule
   const typeLabel = reportType === "monthly_review" ? "Monthly" : reportType === "weekly_review" ? "Weekly" : "Daily";
   const titleDate = reportType === "monthly_review" ? previousMonthWindow(day).month : reportDate;
   const title = `${typeLabel} review — ${titleDate}`;
-  const instruction = [
-    `Prepare the ${typeLabel.toLowerCase()} strategist report for ${titleDate}.`,
-    "Use the diagnostic-first reporting contract. Lead with Diagnostico IA funnel learning, not generic platform monitoring.",
-    "Read Mission Control canonical reporting tables first, especially ops_daily_snapshots.academy_json.diagnostic. Fall back to Academy diagnostic/event tables only when the canonical diagnostic block is missing.",
-    "Do not include routine trends, Intel Inbox, broad rankings, or mandatory director-task fan-out unless they materially change a funnel decision.",
-    "Do not read Academy legacy daily_digest or legacy recurrence tables.",
-    "Keep com.aipaths.daily-scrape as the data ingestion source, then post the finished report through the normal strategist reporting path and close this work item.",
-  ].join("\n\n");
+  const instruction = strategistLiveClassInstruction(typeLabel, titleDate);
   const payload: Record<string, unknown> = {
     category: rule.metadata?.category || "strategist_reporting",
+    contract_version: STRATEGIST_LIVE_CLASS_REPORTING_CONTRACT_VERSION,
+    contract_decision_date: STRATEGIST_LIVE_CLASS_REPORTING_CONTRACT_DATE,
+    contract_path: STRATEGIST_LIVE_CLASS_REPORTING_CONTRACT_PATH,
     report_type: reportType,
     report_date: reportDate,
-    source_tables: STRATEGIST_REPORTING_TABLES,
+    report_sections: STRATEGIST_LIVE_CLASS_REPORT_SECTIONS,
+    source_tables: STRATEGIST_LIVE_CLASS_SOURCE_TABLES,
+    canonical_fields: STRATEGIST_LIVE_CLASS_CANONICAL_FIELDS,
+    acquisition_attribution: STRATEGIST_LIVE_CLASS_CANONICAL_FIELDS.acquisition_channels,
+    missing_coverage_policy: STRATEGIST_LIVE_CLASS_MISSING_COVERAGE_POLICY,
     legacy_sources_deprecated: ["recurrence_rules", "recurrence_materializations", "daily_digest"],
   };
 
@@ -227,10 +323,33 @@ export function plannedOccurrenceDryRun(rule: RecurringWorkRule, now = new Date(
     localDate: dateKeyInTimeZone(new Date(occurrence.scheduledFor), rule.timezone || "Europe/London"),
     title: occurrence.title,
     scheduledFor: occurrence.scheduledFor,
+    contract_version: typeof occurrence.payload.contract_version === "string" ? occurrence.payload.contract_version : null,
+    contract_decision_date: typeof occurrence.payload.contract_decision_date === "string" ? occurrence.payload.contract_decision_date : null,
+    contract_path: typeof occurrence.payload.contract_path === "string" ? occurrence.payload.contract_path : null,
     reportType: typeof occurrence.payload.report_type === "string" ? occurrence.payload.report_type : null,
     instruction: occurrence.instruction,
     source_tables: Array.isArray(occurrence.payload.source_tables) ? occurrence.payload.source_tables : null,
+    report_sections: Array.isArray(occurrence.payload.report_sections) ? occurrence.payload.report_sections : null,
+    canonical_fields: occurrence.payload.canonical_fields && typeof occurrence.payload.canonical_fields === "object" ? occurrence.payload.canonical_fields : null,
+    missing_coverage_policy: occurrence.payload.missing_coverage_policy && typeof occurrence.payload.missing_coverage_policy === "object" ? occurrence.payload.missing_coverage_policy : null,
   }));
+}
+
+export function buildRecurringWorkPayload(rule: RecurringWorkRule, occurrence: PlannedOccurrence) {
+  const metadata = isCadenceRouterRule(rule) && rule.metadata?.category === "strategist_reporting"
+    ? strategistReportingMetadata(rule.metadata)
+    : { ...(rule.metadata || {}) };
+
+  return {
+    ...metadata,
+    ...occurrence.payload,
+    trigger: "recurring_work_rule",
+    recurring_rule_id: rule.id,
+    occurrence_key: occurrence.occurrenceKey,
+    cadence_unit: rule.cadence_unit,
+    cadence_interval: rule.cadence_interval,
+    timezone: rule.timezone,
+  };
 }
 
 export async function listEnabledRecurringWorkRulesLocal() {
@@ -289,16 +408,7 @@ export async function materializeRecurringWorkLocal(requestedBy = "recurring-wor
           };
         }
 
-        const payload = {
-          ...(rule.metadata || {}),
-          ...occurrence.payload,
-          trigger: "recurring_work_rule",
-          recurring_rule_id: rule.id,
-          occurrence_key: occurrence.occurrenceKey,
-          cadence_unit: rule.cadence_unit,
-          cadence_interval: rule.cadence_interval,
-          timezone: rule.timezone,
-        };
+        const payload = buildRecurringWorkPayload(rule, occurrence);
 
         const workItem = await client.query<{ id: string }>(`
           INSERT INTO public.work_items (
@@ -402,16 +512,7 @@ export async function materializeRecurringWork(db: SupabaseClient, requestedBy =
         continue;
       }
 
-      const payload = {
-        ...(rule.metadata || {}),
-        ...occurrence.payload,
-        trigger: "recurring_work_rule",
-        recurring_rule_id: rule.id,
-        occurrence_key: occurrence.occurrenceKey,
-        cadence_unit: rule.cadence_unit,
-        cadence_interval: rule.cadence_interval,
-        timezone: rule.timezone,
-      };
+      const payload = buildRecurringWorkPayload(rule, occurrence);
 
       const { data: workItem, error: workItemError } = await db
         .from("work_items")

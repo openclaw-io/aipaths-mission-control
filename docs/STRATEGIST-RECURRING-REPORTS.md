@@ -30,21 +30,29 @@ For each Europe/London local date, the router creates exactly one report task:
 
 Monthly supersedes weekly/daily. Weekly supersedes daily.
 
-## Canonical report sources
+## Canonical report contract
 
-Report tasks should read Mission Control canonical tables:
+Decision date: 2026-08-04. Daily, weekly, and monthly reports now use the same compact live-class contract with the appropriate reporting window.
 
-- `ops_daily_snapshots`
-- `academy_daily_kpis`
-- `ops_youtube_video_daily`
-- `ops_youtube_channel_daily`
-- `ops_youtube_short_daily`
-- `ops_community_daily`
-- `ops_youtube_comments`
+Allowed report sections only:
 
-The primary daily field is `ops_daily_snapshots.academy_json.diagnostic`.
-Routine trends, Intel Inbox, broad rankings, and mandatory director-task fan-out are no longer part of the daily reporting contract.
-Weekly/monthly reports may reference broader sources only when they materially change a diagnostic funnel, audience, offer, or revenue decision.
+1. Edition-specific live class registrations.
+2. Top 3 acquisition channels that produced those registrations, ordered by signups with count/share.
+3. Global funnel `Views -> Clicks -> Signups -> Ventas`.
+4. New Community members.
+
+Canonical fields:
+
+- Views: Academy `events`, `event_type='live_landing_view'`, unique live-class landing sessions in the window.
+- CTA clicks: Academy `events`, `event_type='live_registration_started'`.
+- Signups: Academy `live_registrations`, filtered by selected `event_id` and `registered_at`.
+- Acquisition channel: first-touch `live_registrations.first_ref` normalized through `derive_attribution_source`; if unavailable, use `source`, then `ref`/`last_ref`, and label the fallback.
+- Ventas: Academy `orders` completed purchases attributable to the live-class/cohort path by registration visitor/session match or live-class ref evidence.
+- Community joins: Mission Control `ops_community_member_daily`, summing `new_human_members` across closed `Europe/London` dates in the report window. Daily requires the previous complete local-date row; use `N/D` if absent. Current totals belong to `checked_at`, and backfill rows are incomplete because prior departures cannot be recovered.
+
+Report `N/D`, not `0`, when source coverage, tracking, or the full reporting window was not successfully checked. Report zero only after the relevant source was verified for the full window.
+
+Anything outside those four sections is out of scope: no extra analysis, broad rankings/metrics, tasks, commentary, or fan-out.
 
 Legacy Academy `daily_digest` is archival and must not be a new-report source.
 
