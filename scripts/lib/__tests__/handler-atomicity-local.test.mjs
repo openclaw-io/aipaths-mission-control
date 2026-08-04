@@ -79,9 +79,13 @@ const pipelineLocal = transpileModule(resolve(repoRoot, "src/lib/db/pipeline-loc
   "@/lib/db/postgres": postgres,
   "@/lib/work-items/pipeline-materializer": {},
 });
+const youtubeLaunchPackage = transpileModule(resolve(repoRoot, "src/lib/youtube-launch-package.ts"), {
+  "node:crypto": { randomUUID },
+});
 const emailLocal = transpileModule(resolve(repoRoot, "src/lib/email-campaigns/local.ts"), {
   "@/lib/db/mission-control": { normalizeRow: (row) => row, normalizeRows: (rows) => rows },
   "@/lib/db/postgres": postgres,
+  "@/lib/youtube-launch-package": youtubeLaunchPackage,
 });
 const youtubePipeline = transpileModule(resolve(repoRoot, "src/lib/youtube-pipeline.ts"));
 const scheduling = transpileModule(resolve(repoRoot, "src/lib/publication/scheduling.ts"));
@@ -89,8 +93,6 @@ const schedulingLocal = transpileModule(resolve(repoRoot, "src/lib/publication/s
   "@/lib/db/postgres": postgres,
   "@/lib/publication/scheduling": scheduling,
 });
-const youtubeLaunchPackage = transpileModule(resolve(repoRoot, "src/lib/youtube-launch-package.ts"));
-
 function loadRoute(relativePath, extra = {}) {
   return transpileModule(resolve(repoRoot, relativePath), {
     "node:crypto": { createHash, randomUUID },
@@ -172,15 +174,27 @@ test("Community publication resolvers keep explicit and existing schedules for c
 
 test("Community approval route schedules Scheduled Launch content-launch publish work at explicit target", async () => {
   const id = randomUUID();
+  const sourceVideoPipelineItemId = randomUUID();
   const target = "2099-08-04T13:30:00.000Z";
+  const launchGeneration = `youtube-launch-v1:CommPub0001:${target}:fixture`;
   await pool.query(
     `insert into pipeline_items (id,pipeline_type,title,status,priority,owner_agent,requested_by,source_type,source_id,metadata)
      values ($1,'community_post',$2,'ready_for_review','high','community','strategist','pipeline_item',$3,$4::jsonb)`,
     [id, "Scheduled Launch community approval", `video-${id}`, JSON.stringify({
       kind: "video_launch_announcement",
-      source: { type: "video", url: "https://youtu.be/testCommunityLaunch", video_id: "testCommunityLaunch" },
+      source: { type: "video", url: "https://youtu.be/CommPub0001", video_id: "CommPub0001" },
+      launch_package: {
+        kind: "scheduled_youtube_launch_package_v1",
+        source_video_pipeline_item_id: sourceVideoPipelineItemId,
+        launch_generation: launchGeneration,
+        video_id: "CommPub0001",
+        youtube_url: "https://www.youtube.com/watch?v=CommPub0001",
+        playlist_context_url: "https://www.youtube.com/watch?v=CommPub0001&list=PLabc123",
+        playlist_id: "PLabc123",
+        publish_at: target,
+      },
       schedule: { target_publish_at: target },
-      copy: { text: "Sale el video: https://youtu.be/testCommunityLaunch" },
+      copy: { text: "Sale el video: https://youtu.be/CommPub0001" },
     })],
   );
   try {
@@ -200,7 +214,15 @@ test("Community approval route schedules Scheduled Launch content-launch publish
     assert.equal(new Date(workRows[0].scheduled_for).toISOString(), target);
     assert.equal(workRows[0].payload.trigger, "community_review_approved_scheduled");
     assert.equal(workRows[0].payload.schedule_kind, "publication");
+    assert.equal(workRows[0].payload.launch_state_contract, "scheduled_launch_v2");
+    assert.equal(workRows[0].payload.launch_generation, launchGeneration);
+    assert.equal(workRows[0].payload.source_video_pipeline_item_id, sourceVideoPipelineItemId);
+    assert.equal(workRows[0].payload.requires_preflight_passed, true);
     assert.equal(workRows[0].payload.requires_live_check_passed, true);
+    assert.equal(workRows[0].payload.approval_status, "approved");
+    assert.equal(workRows[0].payload.notify_project_thread, false);
+    assert.equal(workRows[0].payload.suppress_task_router_webhook, true);
+    assert.equal(workRows[0].payload.runtime_retry_contract, "scheduled_launch_v2_retry_v1");
     assert.match(workRows[0].instruction, /scheduled Work Queue time/i);
   } finally {
     await pool.query("delete from work_items where source_id=$1", [id]);
@@ -266,15 +288,27 @@ test("Community approval route updates one deduped blocked publish work item to 
 
 test("Email approval route auto-schedules Scheduled Launch video announcements atomically and idempotently", async () => {
   const id = randomUUID();
+  const sourceVideoPipelineItemId = randomUUID();
   const firstTarget = "2099-04-10T15:30:00.000Z";
   const secondTarget = "2099-04-11T16:45:00.000Z";
+  const launchGeneration = `youtube-launch-v1:yz-Dig_3ziQ:${firstTarget}:fixture`;
   await pool.query(
     `insert into pipeline_items (id,pipeline_type,title,status,priority,owner_agent,requested_by,source_type,source_id,scheduled_for,metadata)
      values ($1,'email_campaign',$2,'ready_for_review','high','marketing','strategist','pipeline_item',$3,$4,$5::jsonb)`,
     [id, "Scheduled Launch email yz-Dig_3ziQ", `video-${id}`, secondTarget, JSON.stringify({
       kind: "video_announcement",
       video_id: "yz-Dig_3ziQ",
-      launch_package: { target_send_at: firstTarget },
+      launch_package: {
+        kind: "scheduled_youtube_launch_package_v1",
+        source_video_pipeline_item_id: sourceVideoPipelineItemId,
+        launch_generation: launchGeneration,
+        video_id: "yz-Dig_3ziQ",
+        youtube_url: "https://www.youtube.com/watch?v=yz-Dig_3ziQ",
+        playlist_context_url: "https://www.youtube.com/watch?v=yz-Dig_3ziQ&list=PLabc123",
+        playlist_id: "PLabc123",
+        publish_at: firstTarget,
+        target_send_at: firstTarget,
+      },
       draft: { subject: "Sale el video", preview_text: "Preview", body_markdown: "Body" },
       review: { previous_note: "keep-me" },
     })],
@@ -292,6 +326,7 @@ test("Email approval route auto-schedules Scheduled Launch video announcements a
     assert.equal(afterFirst.status, "scheduled");
     assert.equal(new Date(afterFirst.scheduled_for).toISOString(), firstTarget);
     assert.equal(afterFirst.metadata.review.status, "approved");
+    assert.equal(afterFirst.metadata.review.launch_generation, launchGeneration);
     assert.equal(afterFirst.metadata.review.previous_note, "keep-me");
     assert.equal(new Date(afterFirst.metadata.schedule.scheduled_for).toISOString(), firstTarget);
 
@@ -310,8 +345,16 @@ test("Email approval route auto-schedules Scheduled Launch video announcements a
     assert.equal(workRows[0].status, "ready");
     assert.equal(new Date(workRows[0].scheduled_for).toISOString(), secondTarget);
     assert.equal(workRows[0].payload.requires_live_check_passed, true);
+    assert.equal(workRows[0].payload.requires_preflight_passed, true);
     assert.equal(workRows[0].payload.requires_gonza_approval, true);
+    assert.equal(workRows[0].payload.launch_state_contract, "scheduled_launch_v2");
+    assert.equal(workRows[0].payload.launch_generation, launchGeneration);
+    assert.equal(workRows[0].payload.source_video_pipeline_item_id, sourceVideoPipelineItemId);
+    assert.equal(workRows[0].payload.approval_status, "approved");
     assert.equal(workRows[0].payload.source_video_id, "yz-Dig_3ziQ");
+    assert.equal(workRows[0].payload.notify_project_thread, false);
+    assert.equal(workRows[0].payload.suppress_task_router_webhook, true);
+    assert.equal(workRows[0].payload.runtime_retry_contract, "scheduled_launch_v2_retry_v1");
     assert.match(workRows[0].instruction, /privacyStatus=public\/live/);
 
     const afterRerun = (await pool.query("select status, scheduled_for, metadata from pipeline_items where id=$1", [id])).rows[0];

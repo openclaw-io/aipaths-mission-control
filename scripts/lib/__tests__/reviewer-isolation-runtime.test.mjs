@@ -535,6 +535,15 @@ test("generic notifier rejects fresh review before any spawn", async () => {
       "@/lib/db/postgres": { query: async () => ({ rows: [{ id: randomUUID(), loop_id: randomUUID(), title: "review",
         status: "ready", owner_agent: "systems", target_agent_id: null, payload: { runtime_contract: "fresh_review_v1", run_role: "review" } }] }) },
       "@/lib/loops/execution-instruction": { buildLoopWakeContext: () => "" },
+      "@/lib/youtube-launch-state": { evaluateYouTubeLaunchActionReadiness: () => { throw new Error("launch readiness should not run for fresh review"); } },
+      "@/lib/work-items/external-delivery": {
+        claimExternalDelivery: async () => { throw new Error("external delivery should not run for fresh review"); },
+        markExternalDeliveryPreDeliveryFailure: async () => { throw new Error("external delivery should not run for fresh review"); },
+      },
+      "@/lib/work-items/scheduled-launch-runtime": {
+        buildScheduledLaunchGateBlockedTransition: () => { throw new Error("launch gate transition should not run for fresh review"); },
+        nextScheduledLaunchRetryTransition: () => { throw new Error("launch retry should not run for fresh review"); },
+      },
       "@/lib/work-items/status-payload": { serializeWorkItemStatusPayload: (status) => JSON.stringify({ status }) },
     "@/lib/work-items/generic-notify-contract": {
       isVisualQaLikeWorkItem: (row) => row?.payload?.runtime_contract === "visual_qa_v1" || row?.payload?.run_role === "qa",

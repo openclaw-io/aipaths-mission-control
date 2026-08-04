@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import type { LinkedWorkItem, VideoPipelineItem } from "@/app/youtube/page";
 import { useRealtimeWorkItems } from "@/hooks/useRealtimeWorkItems";
 import { useRealtimeYouTube } from "@/hooks/useRealtimeYouTube";
+import { buildLaunchStatusViewModel, type LaunchStatusViewModel } from "@/lib/youtube-launch-state";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -73,6 +74,7 @@ type BoardItemModel = {
   item: VideoPipelineItem;
   details: ItemDetails;
   workItems: LinkedWorkItem[];
+  launchStatus: LaunchStatusViewModel | null;
 };
 
 const WORKFLOW_COLUMNS: WorkflowColumn[] = [
@@ -123,6 +125,13 @@ const STATUS_STYLES: Record<string, string> = {
   recorded: "border-amber-500/30 bg-amber-500/10 text-amber-300",
   editing: "border-orange-500/30 bg-orange-500/10 text-orange-300",
   scheduled: "border-blue-500/30 bg-blue-500/10 text-blue-300",
+  prepared: "border-slate-500/30 bg-slate-500/10 text-slate-300",
+  awaiting_approval: "border-amber-500/30 bg-amber-500/10 text-amber-300",
+  live_verified: "border-cyan-500/30 bg-cyan-500/10 text-cyan-300",
+  publishing: "border-violet-500/30 bg-violet-500/10 text-violet-300",
+  completed: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300",
+  blocked: "border-red-500/30 bg-red-500/10 text-red-300",
+  failed: "border-red-500/30 bg-red-500/10 text-red-300",
   published: "border-green-500/30 bg-green-500/10 text-green-300",
   parked: "border-gray-500/30 bg-gray-500/10 text-gray-300",
   rejected: "border-red-500/30 bg-red-500/10 text-red-300",
@@ -149,20 +158,24 @@ export function YouTubeDecisionBoard({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const videoWorkItems = useMemo(() => {
+  const launchWorkItems = useMemo(() => {
     return realtimeWorkItems.filter((workItem) => {
       const payload = toRecord(workItem.payload);
-      return payload.pipeline_type === "video";
+      return payload.pipeline_type === "video" || typeof payload.source_video_pipeline_item_id === "string";
     });
   }, [realtimeWorkItems]);
 
   const itemModels = useMemo<BoardItemModel[]>(() => {
-    return items.map((item) => ({
-      item,
-      details: getItemDetails(item),
-      workItems: getLinkedWorkItems(item, videoWorkItems),
-    }));
-  }, [items, videoWorkItems]);
+    return items.map((item) => {
+      const workItems = getLinkedWorkItems(item, launchWorkItems);
+      return {
+        item,
+        details: getItemDetails(item),
+        workItems,
+        launchStatus: isScheduledLaunchItem(item) ? buildLaunchStatusViewModel(item, workItems) : null,
+      };
+    });
+  }, [items, launchWorkItems]);
 
   const groupedItems = useMemo(() => {
     const groups = WORKFLOW_COLUMNS.reduce((acc, column) => {
@@ -185,7 +198,7 @@ export function YouTubeDecisionBoard({
   const activeViewConfig = WORKFLOW_VIEWS.find((view) => view.key === activeView) || WORKFLOW_VIEWS[0];
   const activeCount = items.filter((item) => !["parked", "rejected", "archived"].includes(item.status)).length;
   const publishedCount = items.filter((item) => item.status === "published").length;
-  const openWorkCount = videoWorkItems.filter((workItem) => OPEN_WORK_STATUSES.has(workItem.status)).length;
+  const openWorkCount = launchWorkItems.filter((workItem) => OPEN_WORK_STATUSES.has(workItem.status)).length;
 
   useEffect(() => {
     if (!selectedModel) return;
@@ -321,6 +334,7 @@ export function YouTubeDecisionBoard({
                 key={model.item.id}
                 item={model.item}
                 details={model.details}
+                launchStatus={model.launchStatus}
                 selected={model.item.id === selectedId}
                 openWorkCount={model.workItems.filter((workItem) => OPEN_WORK_STATUSES.has(workItem.status)).length}
                 onSelect={() => setSelectedId(model.item.id)}
@@ -335,6 +349,7 @@ export function YouTubeDecisionBoard({
           item={selectedModel.item}
           details={selectedModel.details}
           workItems={selectedModel.workItems}
+          launchStatus={selectedModel.launchStatus}
           form={stageForm}
           playlistOptions={playlistOptions}
           busy={busy}
@@ -383,6 +398,7 @@ function WorkflowLane({
               key={model.item.id}
               item={model.item}
               details={model.details}
+              launchStatus={model.launchStatus}
               selected={model.item.id === selectedId}
               openWorkCount={model.workItems.filter((workItem) => OPEN_WORK_STATUSES.has(workItem.status)).length}
               onSelect={() => onSelect(model.item.id)}
@@ -398,6 +414,7 @@ function WorkflowLane({
 function VideoCard({
   item,
   details,
+  launchStatus,
   selected,
   openWorkCount,
   onSelect,
@@ -405,6 +422,7 @@ function VideoCard({
 }: {
   item: VideoPipelineItem;
   details: ItemDetails;
+  launchStatus: LaunchStatusViewModel | null;
   selected: boolean;
   openWorkCount: number;
   onSelect: () => void;
@@ -459,6 +477,7 @@ function VideoCard({
             {details.selectedTitle && <InfoLine label="Selected" value={details.selectedTitle} />}
             {item.status === "published" && details.youtubeUrl && <InfoLine label="YouTube" value={details.youtubeUrl} />}
             {details.nextAction && <InfoLine label="Next" value={details.nextAction} />}
+            {launchStatus && <InfoLine label="Launch" value={launchStatus.label} />}
             {openWorkCount > 0 && <InfoLine label="Work" value={`${openWorkCount} open item${openWorkCount === 1 ? "" : "s"}`} />}
           </div>
         </>
@@ -471,6 +490,7 @@ function DetailDrawer({
   item,
   details,
   workItems,
+  launchStatus,
   form,
   playlistOptions,
   busy,
@@ -482,6 +502,7 @@ function DetailDrawer({
   item: VideoPipelineItem;
   details: ItemDetails;
   workItems: LinkedWorkItem[];
+  launchStatus: LaunchStatusViewModel | null;
   form: StageForm;
   playlistOptions: YouTubePlaylistOption[];
   busy: boolean;
@@ -607,6 +628,7 @@ function DetailDrawer({
 
           <div className="mt-6 space-y-4">
             <CurrentStagePanel item={item} details={details} />
+            {launchStatus && <LaunchStatusPanel launchStatus={launchStatus} />}
 
             {workItems.length > 0 && (
               <details className="rounded-xl border border-gray-800 bg-[#14141c] p-4">
@@ -862,8 +884,15 @@ function getShortDescription(metadata: JsonRecord, youtubeV0: JsonRecord) {
 function getLinkedWorkItems(item: VideoPipelineItem, workItems: LinkedWorkItem[]) {
   return workItems.filter((workItem) => {
     const payload = toRecord(workItem.payload);
-    return workItem.source_id === item.id || payload.pipeline_item_id === item.id;
+    return workItem.source_id === item.id
+      || payload.pipeline_item_id === item.id
+      || payload.source_video_pipeline_item_id === item.id;
   });
+}
+
+function isScheduledLaunchItem(item: VideoPipelineItem) {
+  const launchPackage = toRecord(toRecord(item.metadata).launch_package);
+  return launchPackage.kind === "scheduled_youtube_launch_package_v1";
 }
 
 function getSourceLabel(item: VideoPipelineItem, metadata: JsonRecord, youtubeV0: JsonRecord) {
@@ -905,6 +934,52 @@ function CurrentStagePanel({ item, details }: { item: VideoPipelineItem; details
       <div className="mt-4 grid gap-4 md:grid-cols-2">
         {section.blocks.map((block) => (
           <MiniBlock key={block.label} label={block.label} value={block.value} wide={block.wide} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function LaunchStatusPanel({ launchStatus }: { launchStatus: LaunchStatusViewModel }) {
+  return (
+    <section className="rounded-xl border border-gray-800 bg-[#14141c] p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="text-xs font-medium uppercase tracking-wide text-blue-300">Scheduled launch</p>
+          <h3 className="mt-1 text-lg font-semibold text-white">{launchStatus.label}</h3>
+          {launchStatus.remediation && <p className="mt-1 text-sm text-gray-500">{launchStatus.remediation}</p>}
+        </div>
+        <span className={`rounded-full border px-2 py-0.5 text-xs font-medium ${STATUS_STYLES[launchStatus.state] || "border-gray-700 bg-gray-700/10 text-gray-300"}`}>
+          {formatStatus(launchStatus.state)}
+        </span>
+      </div>
+
+      {launchStatus.evidence && <p className="mt-3 rounded-lg border border-gray-800 bg-black/20 px-3 py-2 text-sm text-gray-300">{launchStatus.evidence}</p>}
+
+      {launchStatus.blockers.length > 0 && (
+        <div className="mt-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2">
+          <p className="text-xs font-medium uppercase tracking-wide text-red-300">Blockers</p>
+          <ul className="mt-2 space-y-1 text-sm text-red-100/90">
+            {launchStatus.blockers.map((blocker) => <li key={blocker}>{blocker}</li>)}
+          </ul>
+        </div>
+      )}
+
+      <div className="mt-4 grid gap-2 md:grid-cols-2">
+        {launchStatus.artifacts.map((artifact) => (
+          <div key={`${artifact.relationType}-${artifact.workItemId || artifact.targetTime || ""}`} className="rounded-lg border border-gray-800 bg-black/20 p-3">
+            <div className="flex items-start justify-between gap-3">
+              <p className="text-sm font-medium text-white">{artifact.label}</p>
+              <span className="shrink-0 text-xs text-gray-500">{formatStatus(artifact.status)}</span>
+            </div>
+            <div className="mt-2 space-y-1 text-xs text-gray-500">
+              {artifact.ownerAgent && <p>{artifact.ownerAgent}</p>}
+              {artifact.targetTime && <p>{formatDate(artifact.targetTime)}</p>}
+              <p>approval: {formatStatus(artifact.approval)}</p>
+              {artifact.evidence && <p className="text-gray-400">{artifact.evidence}</p>}
+              {artifact.remediation && <p className="text-red-200/80">{artifact.remediation}</p>}
+            </div>
+          </div>
         ))}
       </div>
     </section>

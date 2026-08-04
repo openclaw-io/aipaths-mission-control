@@ -104,13 +104,20 @@ const reviewRoute = transpileModule(resolve(repoRoot, "src/app/api/loops/[id]/re
   "@/lib/loops/execution-instruction": executionInstruction,
 });
 const youtubePipeline = transpileModule(resolve(repoRoot, "src/lib/youtube-pipeline.ts"));
-const youtubeLaunchPackage = transpileModule(resolve(repoRoot, "src/lib/youtube-launch-package.ts"));
+const youtubeLaunchPackage = transpileModule(resolve(repoRoot, "src/lib/youtube-launch-package.ts"), {
+  "node:crypto": { randomUUID },
+});
 const completion = transpileModule(resolve(repoRoot, "src/lib/work-items/completion-orchestration.ts"), {
   "@/lib/youtube-pipeline": youtubePipeline,
   "@/lib/youtube-launch-package": {
     ...youtubeLaunchPackage,
     validateCommunityLaunchDraftOutput: () => ({ ok: true, errors: [] }),
   },
+  "@/lib/youtube-launch-state": {
+    validateYouTubeLaunchPreflight: () => ({ ok: true, status: "pass", checkedAt: null, blockers: [], gates: {}, evidence: {}, remediation: null }),
+  },
+  "@/lib/work-items/external-delivery": {},
+  "@/lib/work-items/scheduled-launch-runtime": {},
   "@/lib/work-items/git-artifact": gitArtifact,
 });
 const agentCompletion = transpileModule(resolve(repoRoot, "src/lib/work-items/agent-completion-local.ts"), {

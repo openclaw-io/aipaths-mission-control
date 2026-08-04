@@ -58,6 +58,7 @@ function transpileModule(sourcePath, requires) {
 const localFlows = transpileModule(helperSource, {
   "@/lib/db/postgres": { withTransaction: withTestTransaction },
   "@/lib/db/mission-control": { normalizeRow: (row) => row, normalizeRows: (rows) => rows },
+  "@/lib/youtube-launch-package": { buildScheduledLaunchPublicActionPayload: () => ({}) },
 });
 const createdPipelineIds = new Set();
 

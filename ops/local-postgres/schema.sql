@@ -213,6 +213,30 @@ CREATE INDEX IF NOT EXISTS idx_work_items_payload_pipeline_type ON public.work_i
 CREATE INDEX IF NOT EXISTS idx_work_items_payload_relation_type ON public.work_items((payload ->> 'relation_type'));
 CREATE INDEX IF NOT EXISTS idx_work_items_payload_dedupe_key ON public.work_items((payload ->> 'dedupe_key'));
 
+CREATE TABLE IF NOT EXISTS public.external_delivery_attempts (
+  idempotency_key text PRIMARY KEY,
+  work_item_id uuid NOT NULL REFERENCES public.work_items(id) ON DELETE RESTRICT,
+  scope jsonb NOT NULL,
+  status text NOT NULL,
+  claim_token uuid NOT NULL DEFAULT gen_random_uuid(),
+  claim_attempt integer NOT NULL DEFAULT 1,
+  claimed_at timestamptz NOT NULL,
+  provider_accepted_at timestamptz,
+  provider_delivery_id text,
+  result jsonb,
+  last_error text,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT external_delivery_attempts_key_check CHECK (idempotency_key ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{7,191}$'),
+  CONSTRAINT external_delivery_attempts_status_check CHECK (status IN ('pending','failed_pre_delivery','accepted','ambiguous')),
+  CONSTRAINT external_delivery_attempts_claim_attempt_check CHECK (claim_attempt > 0),
+  CONSTRAINT external_delivery_attempts_accepted_shape_check CHECK (
+    (status = 'accepted' AND provider_accepted_at IS NOT NULL AND nullif(btrim(provider_delivery_id), '') IS NOT NULL)
+    OR (status <> 'accepted' AND provider_accepted_at IS NULL AND provider_delivery_id IS NULL)
+  )
+);
+CREATE INDEX IF NOT EXISTS idx_external_delivery_attempts_work_item ON public.external_delivery_attempts(work_item_id);
+CREATE INDEX IF NOT EXISTS idx_external_delivery_attempts_status_updated ON public.external_delivery_attempts(status, updated_at);
+
 CREATE TABLE IF NOT EXISTS public.work_item_dependencies (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   work_item_id uuid NOT NULL REFERENCES public.work_items(id) ON DELETE CASCADE,
@@ -1557,7 +1581,7 @@ DECLARE
 BEGIN
   FOREACH tbl IN ARRAY ARRAY[
     'system_cursors','scheduler_config','execution_window_config','services',
-    'cron_health','cron_logs','work_items','work_item_dependencies','event_log',
+    'cron_health','cron_logs','work_items','external_delivery_attempts','work_item_dependencies','event_log',
     'recurring_work_rules','recurring_work_occurrences','pipeline_items','pipeline_events','pipeline_work_map',
     'loops','loop_events','loop_work_items','loop_plan_revisions','loop_stages','loop_tasks',
     'loop_task_dependencies','loop_task_runs','loop_task_reviews','loop_evidence','memories','usage_logs','activity_log',

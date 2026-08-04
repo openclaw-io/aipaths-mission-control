@@ -10,6 +10,12 @@ import ts from "typescript";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
+const scheduledLaunchRuntime = transpile(resolve(repoRoot, "src/lib/work-items/scheduled-launch-runtime.ts"));
+const externalDeliveryShouldNotRun = {
+  claimExternalDelivery: async () => { throw new Error("external delivery should not be claimed in generic notify regression tests"); },
+  markExternalDeliveryPreDeliveryFailure: async () => { throw new Error("external delivery failure should not run in generic notify regression tests"); },
+};
+
 function transpile(sourcePath, requires = {}, globals = {}) {
   const output = ts.transpileModule(readFileSync(sourcePath, "utf8"), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
@@ -117,7 +123,10 @@ test("generic scheduler notify does not wake a live-gate blocked row", async () 
     },
     "@/lib/loops/execution-instruction": { buildLoopWakeContext: () => "" },
     "@/lib/work-items/generic-notify-contract": contract,
+    "@/lib/work-items/external-delivery": externalDeliveryShouldNotRun,
+    "@/lib/work-items/scheduled-launch-runtime": scheduledLaunchRuntime,
     "@/lib/work-items/status-payload": statusPayload,
+    "@/lib/youtube-launch-state": { evaluateYouTubeLaunchActionReadiness: () => ({ ok: true, failures: [], remediation: null }) },
   }, {
     process: { env: { AGENT_API_KEY: "test-key" }, cwd: () => repoRoot },
     console: { ...console, error() {}, log() {} },
@@ -145,6 +154,7 @@ function createNotifyHarness({
   now = "2026-08-04T13:30:00.000Z",
   failSpawn = false,
   asyncSpawnError = null,
+  launchReadiness = { ok: true, failures: [], remediation: null },
 }) {
   const contract = transpile(resolve(repoRoot, "src/lib/work-items/generic-notify-contract.ts"), {
     "node:crypto": { createHash },
@@ -202,6 +212,14 @@ function createNotifyHarness({
               if (normalized.includes("from public.work_items") && normalized.includes("for update")) {
                 return { rows: [structuredClone(row)] };
               }
+              if (normalized.startsWith("update public.work_items") && normalized.includes("set status=$2") && normalized.includes("payload=$3::jsonb")) {
+                row.status = params[1];
+                row.scheduled_for = null;
+                row.completed_at = null;
+                row.payload = typeof params[2] === "string" ? JSON.parse(params[2]) : structuredClone(params[2]);
+                row.updated_at = now;
+                return { rows: [structuredClone(row)] };
+              }
               if (normalized.startsWith("update public.work_items") && normalized.includes("payload=$2::jsonb")) {
                 row.payload = typeof params[1] === "string" ? JSON.parse(params[1]) : structuredClone(params[1]);
                 row.updated_at = now;
@@ -217,7 +235,10 @@ function createNotifyHarness({
     },
     "@/lib/loops/execution-instruction": { buildLoopWakeContext: () => "" },
     "@/lib/work-items/generic-notify-contract": contract,
+    "@/lib/work-items/external-delivery": externalDeliveryShouldNotRun,
+    "@/lib/work-items/scheduled-launch-runtime": scheduledLaunchRuntime,
     "@/lib/work-items/status-payload": statusPayload,
+    "@/lib/youtube-launch-state": { evaluateYouTubeLaunchActionReadiness: () => launchReadiness },
   }, {
     process: {
       env: { AGENT_API_KEY: "test-key", GENERIC_NOTIFY_LEASE_MS: "60000" },
@@ -253,7 +274,12 @@ function createNotifyHarness({
       {
         "@/lib/youtube-pipeline": {},
         "@/lib/youtube-launch-package": {},
+        "@/lib/youtube-launch-state": {
+          validateYouTubeLaunchPreflight: () => ({ ok: true, status: "pass", checkedAt: null, blockers: [], gates: {}, evidence: {}, remediation: null }),
+        },
+        "@/lib/work-items/external-delivery": {},
         "@/lib/work-items/git-artifact": {},
+        "@/lib/work-items/scheduled-launch-runtime": {},
       },
     ).isTrustedImplementationDispatchSessionId,
   };
@@ -275,6 +301,34 @@ const atomicReadyRow = {
   updated_at: "2026-08-04T13:29:00.000Z",
   payload: { pipeline_type: "generic", preserved: { nested: true } },
 };
+
+test("generic scheduler notify does not wake scheduled launch public actions before launch gates pass", async () => {
+  const launchRow = {
+    ...structuredClone(atomicReadyRow),
+    title: "Publish scheduled launch website entry",
+    payload: {
+      launch_state_contract: "scheduled_launch_v2",
+      pipeline_type: "video",
+      action: "website_publish_video",
+      relation_type: "website_publish_video",
+      source_video_pipeline_item_id: "20000000-0000-4000-8000-000000000021",
+      pipeline_item_id: "20000000-0000-4000-8000-000000000021",
+      requires_preflight_passed: true,
+      requires_live_check_passed: true,
+      notify_project_thread: false,
+    },
+  };
+  const harness = createNotifyHarness({
+    initialRow: launchRow,
+    launchReadiness: { ok: false, failures: ["preflight_not_passed"], remediation: "Run T-30 preflight first." },
+  });
+  const response = await harness.post("generic-notify-launch-gate-0001");
+
+  assert.equal(response.status, 409);
+  assert.equal(response.payload.error, "youtube_launch_gate_blocked");
+  assert.deepEqual(response.payload.failures, ["preflight_not_passed"]);
+  assert.equal(harness.getSpawnCount(), 0);
+});
 
 test("concurrent same-key generic notify spawns once with one pending replay and one accepted outcome", async () => {
   const harness = createNotifyHarness({ initialRow: atomicReadyRow });

@@ -104,7 +104,7 @@ async function readLaunchRows(videoId) {
       [videoId],
     );
     const pipeline = await client.query(
-      `select pipeline_type, status, metadata
+      `select id, pipeline_type, status, metadata
          from public.pipeline_items
         where metadata -> 'launch_package' ->> 'video_id' = $1
         order by pipeline_type`,
@@ -174,8 +174,11 @@ test("local scheduled launch package prepares private-video drafts immediately a
   const rows = await readLaunchRows(videoId);
   const byRelation = workByRelation(rows.work);
   assert.deepEqual([...byRelation.keys()], [
+    "community_approval_reminder",
     "launch_community_draft",
+    "marketing_approval_reminder",
     "marketing_email_campaign",
+    "pinned_comment_approval_reminder",
     "video_launch_activate",
     "website_publish_video",
     "youtube_launch_preflight",
@@ -191,6 +194,9 @@ test("local scheduled launch package prepares private-video drafts immediately a
   assert.equal(byRelation.get("website_publish_video").payload.requires_live_check_passed, true);
   assert.equal(byRelation.get("launch_community_draft").payload.public_gate_applies_to, "publish_or_send_only");
   assert.equal(byRelation.get("marketing_email_campaign").payload.requires_gonza_approval, true);
+  assert.equal(byRelation.get("community_approval_reminder").payload.private_director_channel_id, "1473373793375490058");
+  assert.equal(byRelation.get("marketing_approval_reminder").payload.private_director_channel_id, "1473373756557623481");
+  assert.equal(byRelation.get("pinned_comment_approval_reminder").payload.private_director_channel_id, "1473373627750682664");
   assert.equal(rows.work.some((row) => ["publish_community_post", "send_email_campaign", "publish_youtube_pinned_comment"].includes(row.payload.action)), false);
   assert.deepEqual(rows.pipeline.map((row) => row.pipeline_type), ["community_post", "email_campaign", "video", "youtube_pinned_comment"]);
 });
@@ -243,7 +249,7 @@ test("governed launch persists the exact selected playlist provenance across par
       assert.equal(row.metadata.source.playlist_id, playlistId);
     }
   }
-  assert.equal(rows.work.length, 9);
+  assert.equal(rows.work.length, 12);
   for (const work of rows.work) {
     assert.equal(work.payload.playlist_id, playlistId, `${work.payload.relation_type} playlist_id`);
     assert.equal(work.payload.playlist_context_url, playlistContextUrl, `${work.payload.relation_type} context URL`);
@@ -408,7 +414,7 @@ test("local scheduled launch package reruns update open schedules without duplic
 
   let rows = await readLaunchRows(videoId);
   let byRelation = workByRelation(rows.work);
-  assert.equal(rows.work.length, 9);
+  assert.equal(rows.work.length, 12);
   assert.equal(byRelation.get("youtube_launch_preflight").scheduled_for, "2026-07-08T14:30:00.000Z");
   assert.equal(byRelation.get("video_launch_activate").scheduled_for, "2026-07-08T15:02:00.000Z");
   assert.equal(byRelation.get("website_publish_video").scheduled_for, "2026-07-08T15:15:00.000Z");
@@ -431,8 +437,8 @@ test("local scheduled launch package reruns update open schedules without duplic
   assert.match(currentGeneration, new RegExp(`^youtube-launch-v1:${videoId}:2026-07-09T16:00:00\\.000Z:`));
   const currentWork = rows.work.filter((row) => row.payload.launch_generation === currentGeneration);
   byRelation = workByRelation(currentWork);
-  assert.equal(rows.work.length, 10);
-  assert.equal(currentWork.length, 9);
+  assert.equal(rows.work.length, 13);
+  assert.equal(currentWork.length, 12);
   const preservedTerminal = rows.work.find((row) => row.id === websiteWorkId);
   assert.equal(preservedTerminal.status, "done");
   assert.equal(preservedTerminal.scheduled_for, "2026-07-08T15:15:00.000Z");
@@ -472,7 +478,7 @@ test("same-date reconciliation adopts legacy terminal work without duplicating i
     requestedBy: "test:dev",
   });
   const rows = await readLaunchRows(videoId);
-  assert.equal(rows.work.length, 9);
+  assert.equal(rows.work.length, 12);
   assert.equal(rows.work.find((row) => row.id === terminalId).status, "done");
   assert.match(reconciled.videoItem.metadata.launch_package.launch_generation, new RegExp(`^youtube-launch-v1:${videoId}:${publishAt.replaceAll(".", "\\.")}:`));
   assert.ok(reconciled.videoItem.metadata.launch_package.activation_work_item_id);
@@ -615,6 +621,28 @@ test("generation recovery is idempotent but A to B to A never reuses terminal ac
   assert.equal(replay.videoItem.metadata.launch_package.launch_generation, firstGeneration);
   assert.equal(replay.videoItem.metadata.launch_package.activation_work_item_id, firstActivationId);
 
+  const reusablePreflightId = first.workItems.find((entry) => entry.relationType === "youtube_launch_preflight").workItem.id;
+  await withClient(async (client) => {
+    await client.query(
+      `update public.pipeline_items
+          set status='approved',
+              metadata=jsonb_set(metadata,'{review}',$2::jsonb,true)
+        where id=$1`,
+      [first.communityItem.id, JSON.stringify({ status: "approved", approved_by: "gonza", launch_generation: firstGeneration })],
+    );
+    await client.query(
+      `update public.work_items
+          set payload=payload || $2::jsonb
+        where id=$1`,
+      [reusablePreflightId, JSON.stringify({
+        runtime_retry_state: { attempt: 3 },
+        dead_letter_reason: "old_generation_failure",
+        external_delivery_claim: { status: "ambiguous" },
+        dispatch_state: "blocked_launch_gate",
+      })],
+    );
+  });
+
   await withClient((client) => client.query("update public.work_items set status='done' where id=$1", [firstActivationId]));
   const scheduleBResult = await createScheduledYouTubeLaunchPackageLocal({
     videoId, publishAt: scheduleB, playlistId: "PLabc123", requestedBy: "test:generation",
@@ -623,6 +651,15 @@ test("generation recovery is idempotent but A to B to A never reuses terminal ac
   const activationB = scheduleBResult.videoItem.metadata.launch_package.activation_work_item_id;
   assert.notEqual(generationB, firstGeneration);
   assert.notEqual(activationB, firstActivationId);
+  const generationBRows = await readLaunchRows(videoId);
+  const communityB = generationBRows.pipeline.find((row) => row.id === first.communityItem.id);
+  assert.equal(communityB.status, "draft");
+  assert.deepEqual(communityB.metadata.review, {});
+  const preflightB = generationBRows.work.find((row) => row.id === reusablePreflightId);
+  assert.equal(preflightB.payload.runtime_retry_state, undefined);
+  assert.equal(preflightB.payload.dead_letter_reason, undefined);
+  assert.equal(preflightB.payload.external_delivery_claim, undefined);
+  assert.equal(preflightB.payload.dispatch_state, undefined);
 
   const backToA = await createScheduledYouTubeLaunchPackageLocal({
     videoId, publishAt: scheduleA, playlistId: "PLabc123", requestedBy: "test:generation",
