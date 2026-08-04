@@ -1587,6 +1587,9 @@ CREATE TABLE public.qa_executions (
   capability_consumed_at timestamptz,
   capability_revoked_at timestamptz,
   qa_session_id text NOT NULL UNIQUE CHECK (qa_session_id ~ '^[0-9]{8}_[0-9]{6}_[0-9a-f]{6}$'),
+  planner_session_id text,
+  pid integer CHECK (pid IS NULL OR pid>0),
+  runner_birth_token text,
   result jsonb,
   result_hash text CHECK (result_hash IS NULL OR result_hash ~ '^[0-9a-f]{64}$'),
   error text,
@@ -1600,6 +1603,18 @@ CREATE TABLE public.qa_executions (
   CONSTRAINT qa_executions_target_run_task_fkey FOREIGN KEY (target_run_id,task_id)
     REFERENCES public.loop_task_runs(id,task_id) ON DELETE RESTRICT,
   CONSTRAINT qa_executions_capability_state_check CHECK (capability_consumed_at IS NULL OR capability_revoked_at IS NULL),
+  CONSTRAINT qa_executions_runner_identity_check CHECK (
+    (pid IS NULL AND runner_birth_token IS NULL) OR (pid IS NOT NULL AND runner_birth_token ~
+      '^[A-Z][a-z]{2} [A-Z][a-z]{2} [0-9]{1,2} [0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4}$')
+  ),
+  CONSTRAINT qa_executions_planner_session_format_check CHECK (
+    planner_session_id IS NULL OR planner_session_id ~ '^[0-9]{8}_[0-9]{6}_[0-9a-f]{6}$'
+  ),
+  CONSTRAINT qa_executions_planner_session_unique UNIQUE(planner_session_id),
+  CONSTRAINT qa_executions_completion_planner_bound_check CHECK (
+    status='running' OR capability_revoked_at IS NOT NULL OR planner_session_id IS NOT NULL
+      OR (status='failed' AND result->>'verdict'='infrastructure_failure')
+  ),
   CONSTRAINT qa_executions_result_object_check CHECK (result IS NULL OR jsonb_typeof(result)='object'),
   CONSTRAINT qa_executions_terminal_check CHECK (
     (status='running' AND finished_at IS NULL AND result IS NULL AND result_hash IS NULL AND error IS NULL
@@ -1801,7 +1816,7 @@ BEGIN
       OR item->>'storage_ref' !~ '^[A-Za-z0-9][A-Za-z0-9._/-]*$'
       OR item->>'storage_ref' LIKE '%//%' OR item->>'storage_ref' ~ '(^|/)[.][.]?(/|$)'
       OR jsonb_typeof(item->'sha256') IS DISTINCT FROM 'string' OR item->>'sha256' !~ '^[0-9a-f]{64}$'
-      OR jsonb_typeof(item->'bytes') IS DISTINCT FROM 'number' OR item->>'bytes' !~ '^(0|[1-9][0-9]*)$'
+      OR jsonb_typeof(item->'bytes') IS DISTINCT FROM 'number' OR item->>'bytes' !~ '^[1-9][0-9]*$'
       OR (item->>'bytes')::numeric>104857600
       OR jsonb_typeof(item->'media_type') IS DISTINCT FROM 'string'
       OR item->>'media_type' NOT IN ('image/png','image/jpeg','image/webp','video/webm','video/mp4','application/json','application/zip','text/plain')
@@ -1823,6 +1838,19 @@ BEGIN
       AND jsonb_typeof(value->'error')='string' AND public.qa_text_is_valid(value->>'error',2048);
   END IF;
   expected_viewports := jsonb_array_length(policy->'viewports'); expected_flows := jsonb_array_length(policy->'flows');
+  IF jsonb_array_length(value->'evidence') IS DISTINCT FROM expected_viewports * greatest(expected_flows,1) * 2
+    OR (SELECT count(DISTINCT item->>'storage_ref') FROM jsonb_array_elements(value->'evidence') item)
+      IS DISTINCT FROM jsonb_array_length(value->'evidence')::bigint
+    OR (SELECT count(DISTINCT ROW(item->>'viewport',item->>'flow',item->>'kind')) FROM jsonb_array_elements(value->'evidence') item)
+      IS DISTINCT FROM jsonb_array_length(value->'evidence')::bigint
+    OR EXISTS (SELECT 1 FROM jsonb_array_elements(value->'evidence') item
+      WHERE item->>'kind' NOT IN ('screenshot','log')
+        OR jsonb_typeof(item->'viewport') IS DISTINCT FROM 'string'
+        OR (item->>'kind'='screenshot' AND item->>'media_type' IS DISTINCT FROM 'image/png')
+        OR (item->>'kind'='log' AND item->>'media_type' IS DISTINCT FROM 'application/json')
+        OR (expected_flows=0 AND item->'flow' IS DISTINCT FROM 'null'::jsonb)
+        OR (expected_flows>0 AND jsonb_typeof(item->'flow') IS DISTINCT FROM 'string')) THEN RETURN false;
+  END IF;
   IF jsonb_array_length(value->'viewport_checks') IS DISTINCT FROM expected_viewports
     OR jsonb_array_length(value->'flow_checks') IS DISTINCT FROM expected_flows
     OR (SELECT count(DISTINCT item->>'viewport') FROM jsonb_array_elements(value->'viewport_checks') item) IS DISTINCT FROM expected_viewports::bigint
@@ -1854,6 +1882,16 @@ BEGIN
 EXCEPTION WHEN others THEN RETURN false;
 END $body$;
 REVOKE ALL ON FUNCTION public.qa_result_is_valid(jsonb,text,jsonb) FROM PUBLIC;
+
+CREATE FUNCTION public.lock_visual_qa_execution(execution_id uuid) RETURNS boolean
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $body$
+BEGIN
+  PERFORM 1 FROM public.qa_executions WHERE id=execution_id FOR UPDATE;
+  RETURN FOUND;
+END $body$;
+ALTER FUNCTION public.lock_visual_qa_execution(uuid) OWNER TO aipaths_mc_qa_owner;
+REVOKE ALL ON FUNCTION public.lock_visual_qa_execution(uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.lock_visual_qa_execution(uuid) TO aipaths_mc_app;
 
 -- Replace Phase 4's two-role trigger with explicit implementation/review/qa branches.
 DROP TRIGGER loop_task_runs_quality_integrity ON public.loop_task_runs;
@@ -2058,6 +2096,7 @@ ALTER FUNCTION public.guard_visual_qa_work_item() OWNER TO aipaths_mc_qa_owner;
 GRANT SELECT ON public.work_items,public.loop_task_runs,public.loop_task_reviews,public.loop_tasks,
   public.loop_stages,public.loop_plan_revisions,public.loops TO aipaths_mc_qa_owner;
 GRANT UPDATE ON public.work_items,public.loop_task_runs,public.loop_tasks,public.loops TO aipaths_mc_qa_owner;
+GRANT SELECT,INSERT ON public.loop_evidence TO aipaths_mc_qa_owner;
 
 CREATE FUNCTION public.transition_visual_qa_work_item(work_id uuid, p_execution_id uuid, transition_name text,
   transition_at timestamptz, raw_capability text)
@@ -2140,7 +2179,7 @@ BEGIN
   claim_time:=(envelope->>'claimed_at')::timestamptz; expires_time:=(envelope->>'capability_expires_at')::timestamptz;
   IF envelope->>'claimed_at' IS DISTINCT FROM to_char(claim_time AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
     OR envelope->>'capability_expires_at' IS DISTINCT FROM to_char(expires_time AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-    OR expires_time IS DISTINCT FROM claim_time+interval '30 minutes'
+    OR expires_time IS DISTINCT FROM claim_time+interval '90 minutes'
     OR claim_time NOT BETWEEN clock_timestamp()-interval '5 minutes' AND clock_timestamp()+interval '1 minute' THEN
     RAISE EXCEPTION 'invalid visual QA claim timestamp binding' USING ERRCODE='22023';
   END IF;
@@ -2233,6 +2272,67 @@ ALTER FUNCTION public.heartbeat_visual_qa_execution(uuid,text) OWNER TO aipaths_
 REVOKE ALL ON FUNCTION public.heartbeat_visual_qa_execution(uuid,text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.heartbeat_visual_qa_execution(uuid,text) TO aipaths_mc_app;
 
+CREATE FUNCTION public.attach_visual_qa_execution_pid(p_execution_id uuid,p_pid integer,p_runner_birth_token text,raw_capability text) RETURNS text
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $body$
+DECLARE execution public.qa_executions%ROWTYPE; DECLARE beat timestamptz;
+BEGIN
+  SELECT * INTO execution FROM public.qa_executions WHERE id=p_execution_id FOR UPDATE;
+  IF execution.id IS NULL OR p_pid IS NULL OR p_pid<=0 OR p_runner_birth_token IS NULL
+    OR p_runner_birth_token !~ '^[A-Z][a-z]{2} [A-Z][a-z]{2} [0-9]{1,2} [0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4}$'
+    OR raw_capability IS NULL OR raw_capability !~ '^[A-Za-z0-9_-]{43}$'
+    OR public.digest(convert_to(raw_capability,'UTF8'),'sha256') IS DISTINCT FROM execution.capability_hash THEN
+    RAISE EXCEPTION 'invalid visual QA pid capability/binding' USING ERRCODE='28000';
+  END IF;
+  IF execution.status='running' THEN
+    IF execution.capability_consumed_at IS NOT NULL OR execution.capability_revoked_at IS NOT NULL
+      OR execution.capability_expires_at<=clock_timestamp() THEN
+      RAISE EXCEPTION 'invalid or expired visual QA pid capability/binding' USING ERRCODE='28000';
+    END IF;
+    beat:=clock_timestamp();
+    UPDATE public.qa_executions SET pid=p_pid,runner_birth_token=p_runner_birth_token,heartbeat_at=beat,updated_at=beat
+      WHERE id=p_execution_id AND status='running' AND pid IS NULL AND runner_birth_token IS NULL;
+    IF NOT FOUND THEN RAISE EXCEPTION 'visual QA runner identity already attached' USING ERRCODE='23514'; END IF;
+    RETURN 'running';
+  END IF;
+  IF execution.status IN ('succeeded','failed','blocked') THEN RETURN execution.status; END IF;
+  RAISE EXCEPTION 'invalid visual QA pid state' USING ERRCODE='23514';
+END $body$;
+ALTER FUNCTION public.attach_visual_qa_execution_pid(uuid,integer,text,text) OWNER TO aipaths_mc_qa_owner;
+REVOKE ALL ON FUNCTION public.attach_visual_qa_execution_pid(uuid,integer,text,text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.attach_visual_qa_execution_pid(uuid,integer,text,text) TO aipaths_mc_app;
+
+CREATE FUNCTION public.bind_visual_qa_planner_session(p_execution_id uuid,p_planner_session_id text,raw_capability text) RETURNS boolean
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $body$
+DECLARE execution public.qa_executions%ROWTYPE; DECLARE beat timestamptz; DECLARE run_data record;
+BEGIN
+  SELECT * INTO execution FROM public.qa_executions WHERE id=p_execution_id FOR UPDATE;
+  SELECT r.status run_status,r.task_id,r.work_item_id,r.execution_attempt_id,r.target_run_id,r.target_sha,
+    wi.status work_status,wi.payload INTO run_data FROM public.loop_task_runs r JOIN public.work_items wi ON wi.id=r.work_item_id
+    WHERE r.id=execution.qa_run_id;
+  IF execution.id IS NULL OR p_planner_session_id IS NULL OR p_planner_session_id !~ '^[0-9]{8}_[0-9]{6}_[0-9a-f]{6}$'
+    OR raw_capability IS NULL OR raw_capability !~ '^[A-Za-z0-9_-]{43}$'
+    OR public.digest(convert_to(raw_capability,'UTF8'),'sha256') IS DISTINCT FROM execution.capability_hash
+    OR execution.status IS DISTINCT FROM 'running' OR execution.capability_consumed_at IS NOT NULL
+    OR execution.capability_revoked_at IS NOT NULL OR execution.capability_expires_at<=clock_timestamp()
+    OR run_data.run_status IS DISTINCT FROM 'running' OR run_data.work_status IS DISTINCT FROM 'in_progress'
+    OR run_data.task_id IS DISTINCT FROM execution.task_id OR run_data.work_item_id IS DISTINCT FROM execution.work_item_id
+    OR run_data.execution_attempt_id IS DISTINCT FROM execution.execution_attempt_id
+    OR run_data.target_run_id IS DISTINCT FROM execution.target_run_id OR run_data.target_sha IS DISTINCT FROM execution.target_sha
+    OR run_data.payload->>'policy_hash' IS DISTINCT FROM execution.policy_hash THEN
+    RAISE EXCEPTION 'invalid visual QA planner session capability/binding' USING ERRCODE='28000';
+  END IF;
+  IF execution.planner_session_id IS NOT NULL THEN
+    RAISE EXCEPTION 'visual QA planner session already bound and immutable' USING ERRCODE='23514';
+  END IF;
+  beat:=clock_timestamp();
+  UPDATE public.qa_executions SET planner_session_id=p_planner_session_id,heartbeat_at=beat,updated_at=beat
+    WHERE id=p_execution_id AND status='running' AND planner_session_id IS NULL;
+  RETURN FOUND;
+END $body$;
+ALTER FUNCTION public.bind_visual_qa_planner_session(uuid,text,text) OWNER TO aipaths_mc_qa_owner;
+REVOKE ALL ON FUNCTION public.bind_visual_qa_planner_session(uuid,text,text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.bind_visual_qa_planner_session(uuid,text,text) TO aipaths_mc_app;
+
 CREATE FUNCTION public.complete_visual_qa_execution(p_execution_id uuid,p_attempt_id uuid,p_target_sha text,p_policy_hash text,
   p_session_id text,raw_capability text,p_result jsonb,p_result_hash text,p_finished_at timestamptz) RETURNS boolean
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $body$
@@ -2244,7 +2344,8 @@ BEGIN
   terminal_status:=CASE WHEN p_result->>'verdict'='infrastructure_failure' THEN 'failed' ELSE 'succeeded' END;
   result_error:=CASE WHEN p_result->'error'='null'::jsonb THEN NULL ELSE p_result->>'error' END;
   IF execution.id IS NULL OR execution.status IS DISTINCT FROM 'running' OR execution.capability_consumed_at IS NOT NULL
-    OR execution.capability_revoked_at IS NOT NULL OR p_finished_at IS NULL
+    OR execution.capability_revoked_at IS NOT NULL
+    OR (execution.planner_session_id IS NULL AND terminal_status<>'failed') OR p_finished_at IS NULL
     OR execution.capability_expires_at<=clock_timestamp() OR p_finished_at>execution.capability_expires_at
     OR p_finished_at<execution.claimed_at OR p_finished_at>clock_timestamp()+interval '1 minute'
     OR raw_capability IS NULL OR raw_capability !~ '^[A-Za-z0-9_-]{43}$'
@@ -2258,7 +2359,7 @@ BEGIN
     OR p_result_hash IS DISTINCT FROM public.qa_jsonb_sha256(p_result)
     OR run_data.run_status IS DISTINCT FROM terminal_status OR run_data.server_session_id IS DISTINCT FROM execution.qa_session_id
     OR run_data.work_status IS DISTINCT FROM 'in_progress' THEN
-    RAISE EXCEPTION 'visual QA completion capability/immutable binding mismatch' USING ERRCODE='28000';
+    RAISE EXCEPTION 'visual QA completion capability/immutable planner binding mismatch' USING ERRCODE='28000';
   END IF;
   IF NOT public.transition_visual_qa_work_item(execution.work_item_id,p_execution_id,
       CASE WHEN terminal_status='failed' THEN 'reconcile' ELSE 'complete' END,p_finished_at,raw_capability) THEN
@@ -2272,6 +2373,127 @@ END $body$;
 ALTER FUNCTION public.complete_visual_qa_execution(uuid,uuid,text,text,text,text,jsonb,text,timestamptz) OWNER TO aipaths_mc_qa_owner;
 REVOKE ALL ON FUNCTION public.complete_visual_qa_execution(uuid,uuid,text,text,text,text,jsonb,text,timestamptz) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.complete_visual_qa_execution(uuid,uuid,text,text,text,text,jsonb,text,timestamptz) TO aipaths_mc_app;
+
+CREATE UNIQUE INDEX idx_loop_evidence_visual_qa_uri ON public.loop_evidence(uri)
+  WHERE uri LIKE 'visual-qa://%';
+
+CREATE FUNCTION public.guard_visual_qa_evidence() RETURNS trigger
+LANGUAGE plpgsql SET search_path=pg_catalog,public AS $body$
+DECLARE old_visual boolean:=false; DECLARE new_visual boolean:=false;
+BEGIN
+  IF TG_OP<>'INSERT' THEN
+    old_visual:=coalesce(OLD.kind LIKE 'visual_qa_%',false) OR coalesce(OLD.uri LIKE 'visual-qa://%',false);
+  END IF;
+  IF TG_OP<>'DELETE' THEN
+    new_visual:=coalesce(NEW.kind LIKE 'visual_qa_%',false) OR coalesce(NEW.uri LIKE 'visual-qa://%',false);
+  END IF;
+  IF NOT old_visual AND NOT new_visual THEN
+    IF TG_OP='DELETE' THEN RETURN OLD; END IF;
+    RETURN NEW;
+  END IF;
+  IF TG_OP<>'INSERT' THEN
+    RAISE EXCEPTION 'Visual QA evidence is terminal and immutable' USING ERRCODE='23514';
+  END IF;
+  IF current_user IS DISTINCT FROM 'aipaths_mc_qa_owner' THEN
+    RAISE EXCEPTION 'Visual QA evidence requires SECURITY DEFINER authority' USING ERRCODE='42501';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM public.qa_executions execution
+    CROSS JOIN LATERAL jsonb_array_elements(execution.result->'evidence') authoritative(descriptor)
+    WHERE execution.id::text IS NOT DISTINCT FROM NEW.metadata->>'qa_execution_id'
+      AND execution.task_id IS NOT DISTINCT FROM NEW.task_id
+      AND execution.task_id::text IS NOT DISTINCT FROM NEW.metadata->>'task_id'
+      AND execution.qa_run_id IS NOT DISTINCT FROM NEW.task_run_id
+      AND execution.qa_run_id::text IS NOT DISTINCT FROM NEW.metadata->>'qa_run_id'
+      AND execution.work_item_id::text IS NOT DISTINCT FROM NEW.metadata->>'work_item_id'
+      AND execution.execution_attempt_id::text IS NOT DISTINCT FROM NEW.metadata->>'execution_attempt_id'
+      AND execution.policy_hash IS NOT DISTINCT FROM NEW.metadata->>'policy_hash'
+      AND execution.result_hash IS NOT DISTINCT FROM NEW.metadata->>'result_hash'
+      AND execution.result->>'tested_sha' IS NOT DISTINCT FROM NEW.metadata->>'tested_sha'
+      AND execution.planner_session_id IS NOT DISTINCT FROM NEW.metadata->>'planner_session_id'
+      AND execution.status IN ('succeeded','failed')
+      AND execution.capability_consumed_at IS NOT NULL AND execution.capability_revoked_at IS NULL
+      AND execution.finished_at IS NOT NULL AND NEW.created_at IS NOT DISTINCT FROM execution.finished_at
+      AND execution.result IS NOT NULL AND execution.result_hash IS NOT NULL
+      AND execution.result_hash=public.qa_jsonb_sha256(execution.result)
+      AND NEW.content IS NULL AND NEW.metadata->'schema_version'='1'::jsonb
+      AND NEW.metadata->'descriptor'=authoritative.descriptor
+      AND NEW.kind='visual_qa_'||(authoritative.descriptor->>'kind')
+      AND NEW.uri='visual-qa://'||(authoritative.descriptor->>'storage_ref')
+  ) THEN
+    RAISE EXCEPTION 'Visual QA evidence authority/result binding mismatch' USING ERRCODE='23514';
+  END IF;
+  RETURN NEW;
+END $body$;
+ALTER FUNCTION public.guard_visual_qa_evidence() OWNER TO aipaths_mc_qa_owner;
+REVOKE ALL ON FUNCTION public.guard_visual_qa_evidence() FROM PUBLIC,aipaths_mc_app;
+CREATE TRIGGER visual_qa_evidence_guard BEFORE INSERT OR UPDATE OR DELETE ON public.loop_evidence
+  FOR EACH ROW EXECUTE FUNCTION public.guard_visual_qa_evidence();
+
+CREATE FUNCTION public.persist_visual_qa_evidence(p_execution_id uuid,p_result_hash text) RETURNS integer
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $body$
+DECLARE execution public.qa_executions%ROWTYPE; DECLARE expected integer; DECLARE persisted integer; DECLARE valid integer;
+BEGIN
+  SELECT * INTO execution FROM public.qa_executions WHERE id=p_execution_id FOR UPDATE;
+  IF execution.id IS NULL OR execution.status NOT IN ('succeeded','failed')
+    OR execution.capability_consumed_at IS NULL OR execution.capability_revoked_at IS NOT NULL
+    OR execution.finished_at IS NULL OR execution.result IS NULL OR execution.result_hash IS NULL
+    OR p_result_hash IS DISTINCT FROM execution.result_hash
+    OR execution.result_hash IS DISTINCT FROM public.qa_jsonb_sha256(execution.result) THEN
+    RAISE EXCEPTION 'Visual QA evidence terminal result authority mismatch' USING ERRCODE='23514';
+  END IF;
+  expected:=jsonb_array_length(execution.result->'evidence');
+  SELECT count(*)::integer INTO persisted FROM public.loop_evidence evidence
+    WHERE evidence.kind LIKE 'visual_qa_%' AND evidence.metadata->>'qa_execution_id'=execution.id::text;
+  IF persisted>0 THEN
+    SELECT count(*)::integer INTO valid FROM public.loop_evidence evidence
+    CROSS JOIN LATERAL jsonb_array_elements(execution.result->'evidence') authoritative(descriptor)
+    WHERE evidence.metadata->>'qa_execution_id'=execution.id::text
+      AND evidence.task_id=execution.task_id AND evidence.task_run_id=execution.qa_run_id
+      AND evidence.metadata->>'task_id'=execution.task_id::text
+      AND evidence.metadata->>'qa_run_id'=execution.qa_run_id::text
+      AND evidence.metadata->>'work_item_id'=execution.work_item_id::text
+      AND evidence.metadata->>'execution_attempt_id'=execution.execution_attempt_id::text
+      AND evidence.metadata->>'policy_hash'=execution.policy_hash
+      AND evidence.metadata->>'result_hash'=execution.result_hash
+      AND evidence.metadata->>'tested_sha'=execution.result->>'tested_sha'
+      AND evidence.metadata->>'planner_session_id' IS NOT DISTINCT FROM execution.planner_session_id
+      AND evidence.content IS NULL AND evidence.created_at=execution.finished_at
+      AND evidence.metadata->'schema_version'='1'::jsonb
+      AND evidence.metadata->'descriptor'=authoritative.descriptor
+      AND evidence.kind='visual_qa_'||(authoritative.descriptor->>'kind')
+      AND evidence.uri='visual-qa://'||(authoritative.descriptor->>'storage_ref');
+    IF persisted<>expected OR valid<>expected THEN
+      RAISE EXCEPTION 'Existing Visual QA evidence authority/result binding mismatch' USING ERRCODE='23514';
+    END IF;
+    RETURN persisted;
+  END IF;
+  INSERT INTO public.loop_evidence(task_id,task_run_id,kind,uri,content,metadata,created_at)
+  SELECT execution.task_id,execution.qa_run_id,'visual_qa_'||(authoritative.descriptor->>'kind'),
+    'visual-qa://'||(authoritative.descriptor->>'storage_ref'),NULL,
+    jsonb_build_object(
+      'schema_version',1,
+      'qa_execution_id',execution.id,
+      'planner_session_id',execution.planner_session_id,
+      'task_id',execution.task_id,
+      'qa_run_id',execution.qa_run_id,
+      'work_item_id',execution.work_item_id,
+      'execution_attempt_id',execution.execution_attempt_id,
+      'policy_hash',execution.policy_hash,
+      'result_hash',execution.result_hash,
+      'tested_sha',execution.result->>'tested_sha',
+      'descriptor',authoritative.descriptor
+    ),execution.finished_at
+  FROM jsonb_array_elements(execution.result->'evidence') authoritative(descriptor);
+  GET DIAGNOSTICS persisted=ROW_COUNT;
+  IF persisted<>expected THEN
+    RAISE EXCEPTION 'Visual QA evidence persistence cardinality mismatch' USING ERRCODE='23514';
+  END IF;
+  RETURN persisted;
+END $body$;
+ALTER FUNCTION public.persist_visual_qa_evidence(uuid,text) OWNER TO aipaths_mc_qa_owner;
+REVOKE ALL ON FUNCTION public.persist_visual_qa_evidence(uuid,text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.persist_visual_qa_evidence(uuid,text) TO aipaths_mc_app;
 
 CREATE FUNCTION public.reconcile_visual_qa_execution(p_execution_id uuid,p_reason text,p_finished_at timestamptz) RETURNS boolean
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $body$

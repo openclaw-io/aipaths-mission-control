@@ -656,21 +656,7 @@ test("materialization creates an attempt identity and notify serializes it in ev
   assert.match(materializer, /execution_attempt_id:\s*randomUUID\(\)/);
   assert.match(materializer, /execution_generation:\s*1/);
 
-  const notifier = transpileModule(resolve(repoRoot, "src/app/api/work-items/notify/route.ts"), {
-    "node:child_process": { spawn: () => { throw new Error("unexpected spawn"); } },
-    "node:crypto": { randomUUID: () => "00000000-0000-4000-8000-000000000001" },
-    "next/server": { NextResponse: { json: (payload, init = {}) => ({ payload, status: init.status || 200 }) } },
-    "@supabase/supabase-js": { createClient: () => { throw new Error("unexpected client"); } },
-    "@/lib/agent-routing": { AGENT_ROUTING: {}, isRoutedAgent: () => false },
-    "@/lib/auth/local": { isLocalAuthDisabled: () => true },
-    "@/lib/db/postgres": { query: async () => ({ rows: [] }) },
-    "@/lib/loops/execution-instruction": { buildLoopWakeContext: () => "" },
-    "@/lib/work-items/generic-notify-contract": {
-      isVisualQaLikeWorkItem: (row) => row?.payload?.runtime_contract === "visual_qa_v1" || row?.payload?.run_role === "qa",
-      parseGenericNotifyClassificationIdentity: () => null,
-      genericNotifyIdentityMatches: () => true,
-    },
-  });
+  const notifier = transpileModule(resolve(repoRoot, "src/lib/work-items/status-payload.ts"));
   const executionAttemptId = "attempt-notify-1";
   for (const status of ["in_progress", "done", "failed"]) {
     const serialized = notifier.serializeWorkItemStatusPayload(status, { execution_attempt_id: executionAttemptId });

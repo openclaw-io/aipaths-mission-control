@@ -20,10 +20,16 @@ const RESULT = {
   tested_sha: SHA,
   viewport_checks: [{ viewport: "desktop", status: "pass", details: null }],
   flow_checks: [{ flow: "Open the Loop detail", status: "pass", details: null }],
-  evidence: [{
-    kind: "screenshot", storage_ref: "qa/exec/desktop.png", sha256: "b".repeat(64), bytes: 1234,
-    media_type: "image/png", viewport: "desktop", flow: null,
-  }],
+  evidence: [
+    {
+      kind: "screenshot", storage_ref: "qa/exec/desktop.png", sha256: "b".repeat(64), bytes: 1234,
+      media_type: "image/png", viewport: "desktop", flow: "Open the Loop detail",
+    },
+    {
+      kind: "log", storage_ref: "qa/exec/desktop.json", sha256: "c".repeat(64), bytes: 456,
+      media_type: "application/json", viewport: "desktop", flow: "Open the Loop detail",
+    },
+  ],
   findings: [],
   error: null,
 };
@@ -50,6 +56,7 @@ test("Phase 5B migration and local operational artifacts declare the QA authorit
   const migration = resolve(repoRoot, "supabase/migrations/035_project_loops_v2_visual_qa.sql");
   const artifact = resolve(repoRoot, "ops/migrations/20260730_project_loops_v2_phase5b");
   const sources = [readFileSync(migration, "utf8"), readFileSync(resolve(repoRoot, "ops/local-postgres/schema.sql"), "utf8")];
+  const runnerMigration = readFileSync(resolve(repoRoot, "supabase/migrations/036_visual_qa_runner_v1.sql"), "utf8");
   for (const name of ["preflight.sql", "forward.sql", "verify.sql", "rollback.sql", "README.md"]) {
     assert.ok(readFileSync(resolve(artifact, name), "utf8").length > 0, name);
   }
@@ -63,8 +70,14 @@ test("Phase 5B migration and local operational artifacts declare the QA authorit
     assert.match(source, /QA run .*integrity mismatch/);
     assert.match(source, /Terminal QA execution is immutable/);
   }
+  for (const source of [readFileSync(resolve(repoRoot, "ops/local-postgres/schema.sql"), "utf8"), runnerMigration]) {
+    assert.match(source, /planner_session_id/);
+    assert.match(source, /bind_visual_qa_planner_session/);
+  }
   assert.match(readFileSync(resolve(artifact, "verify.sql"), "utf8"), /TRANSACTION READ ONLY/i);
+  assert.match(readFileSync(resolve(artifact, "verify.sql"), "utf8"), /bind_visual_qa_planner_session/);
   assert.match(readFileSync(resolve(artifact, "rollback.sql"), "utf8"), /RAISE EXCEPTION/i);
+  assert.match(readFileSync(resolve(artifact, "rollback.sql"), "utf8"), /bind_visual_qa_planner_session/);
   for (const source of [
     readFileSync(resolve(artifact, "preflight.sql"), "utf8"),
     readFileSync(resolve(artifact, "forward.sql"), "utf8"),
@@ -79,7 +92,8 @@ test("Phase 5B migration and local operational artifacts declare the QA authorit
   const runtimeDb = readFileSync(resolve(repoRoot,"src/lib/db/postgres.ts"),"utf8");
   assert.match(runtimeDb,/postgres:\/\/aipaths_mc_app@127\.0\.0\.1:5432\/aipaths_mission_control_local/);
   assert.doesNotMatch(runtimeDb,/postgres:\/\/joaco@/);
-  for (const runtimePath of ["src/lib/reviewer/dispatch.ts", "scripts/reviewer-runner.mjs", "scripts/register-review-repository.mjs"]) {
+  for (const runtimePath of ["src/lib/reviewer/dispatch.ts", "scripts/reviewer-runner.mjs",
+    "src/lib/qa/dispatch.ts", "scripts/visual-qa-runner.mjs", "scripts/register-review-repository.mjs"]) {
     const runtime = readFileSync(resolve(repoRoot, runtimePath), "utf8");
     assert.match(runtime, /postgres:\/\/aipaths_mc_app@127\.0\.0\.1:5432\/aipaths_mission_control_local/, runtimePath);
     assert.doesNotMatch(runtime, /postgres:\/\/joaco@/, runtimePath);
@@ -91,7 +105,7 @@ test("Phase 5B migration and local operational artifacts declare the QA authorit
     assert.doesNotMatch(service, /QA_AUTHORITY_HMAC_KEY/, "checked-in service definitions must not contain the HMAC secret");
   }
   const runbook = readFileSync(resolve(artifact, "README.md"), "utf8");
-  assert.match(runbook, /install_qa_authority_hmac_key[\s\S]*QA_AUTHORITY_HMAC_KEY[\s\S]*verify\.sql[\s\S]*scheduler[\s\S]*current_user/i);
+  assert.match(runbook, /036_visual_qa_runner_v1[\s\S]*bind_visual_qa_planner_session[\s\S]*install_qa_authority_hmac_key[\s\S]*QA_AUTHORITY_HMAC_KEY[\s\S]*verify\.sql[\s\S]*scheduler[\s\S]*current_user/i);
 });
 
 test("structured QA parser is exact, bounded, canonical, policy-bound and action-free", () => {
@@ -111,6 +125,7 @@ test("structured QA parser is exact, bounded, canonical, policy-bound and action
     { ...RESULT, viewport_checks: [] },
     { ...RESULT, flow_checks: [{ ...RESULT.flow_checks[0], flow: "other" }] },
     { ...RESULT, evidence: [{ ...RESULT.evidence[0], bytes: "raw bytes are forbidden" }] },
+    { ...RESULT, evidence: RESULT.evidence.map((entry, index) => index ? entry : { ...entry, bytes: 0 }) },
     { ...RESULT, evidence: [{ ...RESULT.evidence[0], storage_ref: "https://example.com/network" }] },
     { ...RESULT, evidence: [{ ...RESULT.evidence[0], storage_ref: "qa/./desktop.png" }] },
     { ...RESULT, evidence: [{ ...RESULT.evidence[0], media_type: "application/x-executable" }] },
@@ -154,8 +169,10 @@ test("QA UTF-8 validation rejects embedded NUL and lone surrogates before persis
 test("dedicated QA routes and every generic mutation path fail closed", () => {
   for (const path of [
     "src/app/api/qa/claim/route.ts",
+    "src/app/api/qa/dispatch/route.ts",
     "src/app/api/qa/executions/[id]/complete/route.ts",
     "src/app/api/qa/executions/[id]/heartbeat/route.ts",
+    "src/app/api/qa/evidence/[...ref]/route.ts",
     "src/app/api/qa/reconcile/route.ts",
   ]) assert.ok(readFileSync(resolve(repoRoot, path), "utf8").length > 0, path);
 

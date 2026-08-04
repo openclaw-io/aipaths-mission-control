@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -15,6 +17,9 @@ const SHA = "a".repeat(40);
 const BASE_SHA = "b".repeat(40);
 const PLAN_HASH = "c".repeat(64);
 const TEST_HMAC_KEY = "7f".repeat(32);
+const QA_ARTIFACT_ROOT = await mkdtemp(resolve(tmpdir(), "mc-visual-qa-completion-"));
+const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+const LOG_BYTES = Buffer.from(JSON.stringify({ entries: [{ level: "info", message: "loaded" }] }));
 const POLICY = { required: true, target_url: "http://127.0.0.1:3001/loops",
   viewports: [{ name: "desktop", width: 1440, height: 900 }], flows: ["Open Loop detail"] };
 const MULTI_POLICY = { required: true, target_url: "http://127.0.0.1:3001/loops",
@@ -31,7 +36,8 @@ function transpile(path, requires = {}, globals = {}) {
   vm.runInNewContext(output, { module: cjs, exports: cjs.exports,
     require(specifier) { if (specifier in requires) return requires[specifier]; throw new Error(`Unexpected import ${specifier} from ${path}`); },
     Buffer, Date, JSON, Object, Array, Set, Map, String, Number, RegExp, URL, Error, Promise, console,
-    process: { env: { AGENT_API_KEY: "qa-test-key", QA_AUTHORITY_HMAC_KEY: TEST_HMAC_KEY } }, ...globals,
+    process: { env: { AGENT_API_KEY: "qa-test-key", QA_AUTHORITY_HMAC_KEY: TEST_HMAC_KEY,
+      HERMES_VISUAL_QA_ARTIFACT_ROOT: QA_ARTIFACT_ROOT } }, ...globals,
   }, { filename: path });
   return cjs.exports;
 }
@@ -44,8 +50,17 @@ const qaPolicy = transpile(resolve(repoRoot, "src/lib/loops/qa-policy.ts"));
 const qaResult = transpile(resolve(repoRoot, "src/lib/qa/result.ts"), {
   "node:crypto": { createHash }, "@/lib/loops/qa-policy": qaPolicy,
 });
+const qaEvidence = transpile(resolve(repoRoot, "src/lib/qa/evidence.ts"), {
+  "node:crypto": await import("node:crypto"), "node:fs": await import("node:fs"),
+  "node:fs/promises": await import("node:fs/promises"), "node:path": await import("node:path"),
+  "@/lib/qa/result": qaResult,
+});
 const qaAuthority = transpile(resolve(repoRoot, "src/lib/qa/authority.ts"), {
   "node:crypto": { createHmac }, "@/lib/qa/result": qaResult,
+});
+const qaClaim = transpile(resolve(repoRoot, "src/lib/qa/claim.ts"), {
+  "node:crypto": { createHash, randomUUID, randomBytes: (await import("node:crypto")).randomBytes },
+  "@/lib/loops/qa-policy": qaPolicy, "@/lib/qa/authority": qaAuthority, "@/lib/qa/result": qaResult,
 });
 const qaExecution = transpile(resolve(repoRoot, "src/lib/qa/execution.ts"), { "node:crypto": { randomUUID } });
 const reviewCompletion = transpile(resolve(repoRoot, "src/lib/reviewer/review-completion.ts"), {
@@ -59,13 +74,13 @@ async function appTx(run) {
 }
 const db = { query: (sql, params) => appTx((client) => client.query(sql, params)), withTransaction: appTx };
 const claimRoute = transpile(resolve(repoRoot, "src/app/api/qa/claim/route.ts"), {
-  "node:crypto": { createHash, randomUUID, randomBytes: (await import("node:crypto")).randomBytes },
   "next/server": nextServer, "@/lib/db/postgres": db, "@/lib/loops/qa-policy": qaPolicy,
-  "@/lib/qa/authority": qaAuthority, "@/lib/qa/result": qaResult,
+  "@/lib/qa/authority": qaAuthority, "@/lib/qa/result": qaResult, "@/lib/qa/claim": qaClaim,
 });
 const completeRoute = transpile(resolve(repoRoot, "src/app/api/qa/executions/[id]/complete/route.ts"), {
   "node:crypto": { createHash, timingSafeEqual }, "next/server": nextServer, "@/lib/db/postgres": db,
-  "@/lib/qa/execution": qaExecution, "@/lib/qa/result": qaResult, "@/lib/loops/qa-policy": qaPolicy,
+  "@/lib/qa/execution": qaExecution, "@/lib/qa/evidence": qaEvidence,
+  "@/lib/qa/result": qaResult, "@/lib/loops/qa-policy": qaPolicy,
 });
 const heartbeatRoute = transpile(resolve(repoRoot, "src/app/api/qa/executions/[id]/heartbeat/route.ts"), {
   "node:crypto": { createHash, timingSafeEqual }, "next/server": nextServer, "@/lib/db/postgres": db,
@@ -73,6 +88,11 @@ const heartbeatRoute = transpile(resolve(repoRoot, "src/app/api/qa/executions/[i
 });
 const reconcileRoute = transpile(resolve(repoRoot, "src/app/api/qa/reconcile/route.ts"), {
   "next/server": nextServer, "@/lib/db/postgres": db, "@/lib/qa/execution": qaExecution,
+  "@/lib/qa/dispatch": {
+    qaRunnerProcessGroupAlive: () => false,
+    terminateQaRunnerProcessGroup: async () => true,
+    verifyQaRunnerProcessIdentity: async () => true,
+  },
 });
 const reviewRoute = transpile(resolve(repoRoot, "src/app/api/loops/[id]/review/route.ts"), {
   "node:crypto": { randomUUID }, "next/server": nextServer,
@@ -90,7 +110,7 @@ const agentCompletion = transpile(resolve(repoRoot, "src/lib/work-items/agent-co
 
 await pool.query("select public.install_qa_authority_hmac_key($1)", [TEST_HMAC_KEY]);
 
-after(async () => pool.end());
+after(async () => { await pool.end(); await rm(QA_ARTIFACT_ROOT, { recursive: true, force: true }); });
 
 async function fixture({ policy = POLICY, cycle = 1 } = {}) {
   return tx(async (client) => {
@@ -159,13 +179,53 @@ async function claim(work) {
   return claimRoute.POST(agentRequest({ work_item_id: work.id, execution_attempt_id: work.execution_attempt_id,
     target_sha: work.target_sha, policy_hash: work.payload.policy_hash }));
 }
+function visualEvidence() {
+  return [{
+    kind: "screenshot",
+    storage_ref: `qa/${randomUUID()}/aa/${"e".repeat(64)}.desktop.open-loop-detail.png`,
+    sha256: createHash("sha256").update(PNG_BYTES).digest("hex"),
+    bytes: PNG_BYTES.length,
+    media_type: "image/png",
+    viewport: "desktop",
+    flow: "Open Loop detail",
+  }, {
+    kind: "log",
+    storage_ref: `qa/${randomUUID()}/bb/${"f".repeat(64)}.browser-log.json`,
+    sha256: createHash("sha256").update(LOG_BYTES).digest("hex"),
+    bytes: LOG_BYTES.length,
+    media_type: "application/json",
+    viewport: "desktop",
+    flow: "Open Loop detail",
+  }];
+}
 function result(verdict) {
   if (verdict === "infrastructure_failure") return { verdict, tested_sha: SHA, viewport_checks: [], flow_checks: [], evidence: [], findings: [], error: "browser_runner_unavailable" };
   const changes = verdict === "changes";
   return { verdict, tested_sha: SHA,
     viewport_checks: [{ viewport: "desktop", status: changes ? "fail" : "pass", details: changes ? "Header overlaps" : null }],
-    flow_checks: [{ flow: "Open Loop detail", status: "pass", details: null }], evidence: [],
+    flow_checks: [{ flow: "Open Loop detail", status: "pass", details: null }], evidence: visualEvidence(),
     findings: changes ? [{ title: "Header overlap", evidence: "Desktop check failed", recommendation: "Fix header" }] : [], error: null };
+}
+function resultWithEvidence(verdict = "pass") {
+  return result(verdict);
+}
+function artifactResult(executionId, screenshotBytes = PNG_BYTES, logBytes = LOG_BYTES) {
+  const evidence = [
+    { kind: "screenshot", storage_ref: `qa/${executionId}/desktop.png`,
+      sha256: createHash("sha256").update(screenshotBytes).digest("hex"), bytes: screenshotBytes.length,
+      media_type: "image/png", viewport: "desktop", flow: "Open Loop detail" },
+    { kind: "log", storage_ref: `qa/${executionId}/browser-log.json`,
+      sha256: createHash("sha256").update(logBytes).digest("hex"), bytes: logBytes.length,
+      media_type: "application/json", viewport: "desktop", flow: "Open Loop detail" },
+  ];
+  return { ...result("pass"), evidence };
+}
+async function writeArtifactResult(candidate) {
+  for (const item of candidate.evidence) {
+    const target = resolve(QA_ARTIFACT_ROOT, item.storage_ref);
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, item.kind === "screenshot" ? PNG_BYTES : LOG_BYTES);
+  }
 }
 function canonicalBytes(value) { return Buffer.byteLength(qaResult.canonicalJson(value),"utf8"); }
 function replaceCharacters(strings, needle, replacement, count) {
@@ -240,15 +300,37 @@ async function assertResultParity(label,candidate,policy,expected) {
   assert.equal(tsValid,expected,`${label}: unexpected result validity`);
 }
 async function complete(claimed, verdict, session = claimed.payload.qa_session_id, overrides = {}) {
-  const qa = result(verdict); const resultHash = qaResult.hashQaResult(qa);
+  if (!overrides.skip_planner_bind) await ensurePlannerBound(claimed, overrides.planner_session_id);
+  const { skip_evidence_write: skipEvidenceWrite, ...requestOverrides } = overrides;
+  const qa = requestOverrides.result || result(verdict);
+  if (!skipEvidenceWrite && verdict !== "infrastructure_failure") await writeArtifactResult(qa);
+  const resultHash = qaResult.hashQaResult(qa);
   return completeRoute.POST({ headers: { get: () => `QaCapability ${claimed.payload.capability}` }, json: async () => ({
     session_id: session, execution_attempt_id: claimed.payload.execution_attempt_id, target_sha: claimed.payload.target_sha,
-    policy_hash: claimed.payload.policy_hash, result_hash: resultHash, result: qa, ...overrides,
+    policy_hash: claimed.payload.policy_hash, result_hash: resultHash, result: qa, ...requestOverrides,
   }) }, { params: Promise.resolve({ id: claimed.payload.execution_id }) });
 }
 async function heartbeat(claimed, capability = claimed.payload.capability) {
   return heartbeatRoute.POST({ headers: { get: () => `QaCapability ${capability}` } },
     { params: Promise.resolve({ id: claimed.payload.execution_id }) });
+}
+function plannerSessionFor(claimed) {
+  return `20260803_120000_${claimed.payload.execution_id.replaceAll("-", "").slice(0, 6)}`;
+}
+const plannerBindings = new Set();
+async function bindPlannerSession(claimed, plannerSessionId = plannerSessionFor(claimed), capability = claimed.payload.capability) {
+  return appTx((client) => client.query("select bind_visual_qa_planner_session($1,$2,$3) bound",
+    [claimed.payload.execution_id, plannerSessionId, capability]));
+}
+async function ensurePlannerBound(claimed, plannerSessionId = plannerSessionFor(claimed)) {
+  if (plannerBindings.has(claimed.payload.execution_id)) return;
+  plannerBindings.add(claimed.payload.execution_id);
+  try {
+    await bindPlannerSession(claimed, plannerSessionId);
+  } catch (error) {
+    plannerBindings.delete(claimed.payload.execution_id);
+    throw error;
+  }
 }
 
 async function expectAppDenied(sql, params = [], pattern = /permission denied|not allowed/i) {
@@ -272,7 +354,7 @@ async function signedEnvelope(work, capability) {
     plan_hash:row.plan_hash,loop_id:row.loop_id,repository_id:row.repository_id,base_sha:row.base_sha,
     implementer_session_id:row.implementer_session_id,reviewer_session_id:row.reviewer_session_id,
     capability_hash:createHash("sha256").update(capability).digest("hex"),
-    capability_expires_at:new Date(claimedAt.getTime()+30*60_000).toISOString(),
+    capability_expires_at:new Date(claimedAt.getTime()+90*60_000).toISOString(),
     qa_session_id:`${claimedAt.toISOString().slice(0,10).replaceAll("-","")}_${claimedAt.toISOString().slice(11,19).replaceAll(":","")}_${randomUUID().replaceAll("-","").slice(0,6)}`,
     claimed_at:claimedAt.toISOString(),
   };
@@ -281,7 +363,7 @@ async function signedEnvelope(work, capability) {
 
 async function authorityState(executionId) {
   return (await pool.query(`select e.status execution_status,e.capability_consumed_at,e.result_hash,
-    r.status run_status,wi.status work_status,t.status task_status,
+    e.planner_session_id,r.status run_status,wi.status work_status,t.status task_status,
     (select count(*)::int from loop_events where loop_id=p.loop_id) event_count
     from qa_executions e join loop_task_runs r on r.id=e.qa_run_id join work_items wi on wi.id=e.work_item_id
     join loop_tasks t on t.id=e.task_id join loop_stages s on s.id=t.stage_id
@@ -351,6 +433,7 @@ test("concurrent claim has one winner, exact bindings, and no raw token in Postg
   assert.equal(JSON.stringify(execution).includes(winner.payload.capability), false);
   assert.match(winner.payload.qa_session_id, /^\d{8}_\d{6}_[0-9a-f]{6}$/);
   assert.equal(execution.qa_session_id, winner.payload.qa_session_id, "claim must persist its server-generated session identity");
+  assert.equal(execution.planner_session_id, null, "planner audit session is bound only after state.db verification");
 });
 
 test("passwordless LOGIN is the non-superuser application role", async () => {
@@ -375,6 +458,8 @@ test("tracked Mission Control runtime wrappers never fall back to the operator d
     "src/lib/db/postgres.ts",
     "scripts/reviewer-runner.mjs",
     "src/lib/reviewer/dispatch.ts",
+    "scripts/visual-qa-runner.mjs",
+    "src/lib/qa/dispatch.ts",
     "scripts/register-review-repository.mjs",
   ];
   for (const source of runtimeSources) {
@@ -410,6 +495,7 @@ test("app role cannot read/rotate secrets or directly mutate, truncate, mint, or
     ["update qa_executions set capability_hash=digest('forged','sha256') where id=$1",[id]],
     ["update qa_executions set capability_expires_at=now()+interval '1 day' where id=$1",[id]],
     ["update qa_executions set qa_session_id='20260730_235959_abcdef' where id=$1",[id]],
+    ["update qa_executions set planner_session_id='20260730_235959_abcdef' where id=$1",[id]],
     ["update qa_executions set target_sha=$2 where id=$1",[id,"e".repeat(40)]],
     ["update qa_executions set policy_hash=$2 where id=$1",[id,"e".repeat(64)]],
     ["update qa_executions set execution_attempt_id=$2 where id=$1",[id,randomUUID()]],
@@ -417,6 +503,25 @@ test("app role cannot read/rotate secrets or directly mutate, truncate, mint, or
     ["truncate table qa_executions",[]],
   ]) await expectAppDenied(statement[0],statement[1]);
   assert.equal((await complete(claimed,"pass")).status,200,"legitimate app-role completion must remain usable");
+});
+
+test("planner session bind is app-callable, raw-capability authenticated, one-time, and immutable", async () => {
+  const f = await fixture(); await approve(f); const claimed = await claim(await qaWork(f));
+  const functionState = (await pool.query(`select p.prosecdef,pg_get_userbyid(p.proowner) owner,
+      has_function_privilege('aipaths_mc_app','public.bind_visual_qa_planner_session(uuid,text,text)','EXECUTE') app_execute
+    from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+    where n.nspname='public' and p.proname='bind_visual_qa_planner_session'`)).rows[0];
+  assert.deepEqual({ ...functionState }, { prosecdef: true, owner: "aipaths_mc_qa_owner", app_execute: true });
+  await assert.rejects(bindPlannerSession(claimed, "planner-session", claimed.payload.capability), /planner|session|capability|binding/i);
+  await assert.rejects(bindPlannerSession(claimed, plannerSessionFor(claimed), "x".repeat(43)), /planner|capability|binding/i);
+  assert.equal((await bindPlannerSession(claimed)).rows[0].bound, true);
+  plannerBindings.add(claimed.payload.execution_id);
+  assert.equal((await pool.query("select planner_session_id from qa_executions where id=$1",
+    [claimed.payload.execution_id])).rows[0].planner_session_id, plannerSessionFor(claimed));
+  await assert.rejects(bindPlannerSession(claimed), /planner|already|bound|immutable|replay/i);
+  await assert.rejects(bindPlannerSession(claimed, "20260803_120001_b0b0b0"), /planner|already|bound|immutable|replay/i);
+  await expectAppDenied("update qa_executions set planner_session_id=$2 where id=$1",
+    [claimed.payload.execution_id, "20260803_120002_c0c0c0"]);
 });
 
 test("app authority rejects forged HMAC and wrong raw capability, then accepts the legitimate signed route claim", async () => {
@@ -436,6 +541,7 @@ test("app authority rejects forged HMAC and wrong raw capability, then accepts t
 test("expired raw capability cannot backdate infrastructure failure through direct app SQL", async () => {
   const f = await fixture(); await approve(f); const claimed = await claim(await qaWork(f));
   assert.equal(claimed.status,201,JSON.stringify(claimed.payload));
+  await ensurePlannerBound(claimed);
   const executionId = claimed.payload.execution_id;
   const claimedAt = new Date(Date.now()-2*60*60_000);
   const expiresAt = new Date(Date.now()-60*60_000);
@@ -463,17 +569,147 @@ test("pass completion is single-consumer, session-isolated, exact-hash bound, co
   const f = await fixture(); await approve(f); const work = await qaWork(f); const claimed = await claim(work); assert.equal(claimed.status, 201);
   const completions = await Promise.all([complete(claimed, "pass"), complete(claimed, "pass")]);
   assert.deepEqual(completions.map((r) => r.status).sort(), [200, 409], JSON.stringify(completions.map((r) => r.payload)));
-  const row = (await pool.query(`select e.status,e.result_hash,e.capability_consumed_at,e.qa_session_id,r.status run_status,r.output,r.server_session_id,
+  const row = (await pool.query(`select e.status,e.result_hash,e.capability_consumed_at,e.qa_session_id,e.planner_session_id,
+    r.status run_status,r.output,r.server_session_id,
     wi.status work_status,t.status task_status,l.status loop_status from qa_executions e join loop_task_runs r on r.id=e.qa_run_id
     join work_items wi on wi.id=e.work_item_id join loop_tasks t on t.id=e.task_id join loop_stages s on s.id=t.stage_id
     join loop_plan_revisions p on p.id=s.plan_revision_id join loops l on l.id=p.loop_id where e.id=$1`, [claimed.payload.execution_id])).rows[0];
   assert.equal(row.status, "succeeded"); assert.equal(row.run_status, "succeeded"); assert.equal(row.work_status, "done");
   assert.equal(row.task_status, "completed"); assert.equal(row.loop_status, "in_review"); assert.ok(row.capability_consumed_at);
   assert.notEqual(row.qa_session_id, f.implementerSession); assert.notEqual(row.qa_session_id, f.reviewerSession);
+  assert.equal(row.planner_session_id, plannerSessionFor(claimed), "completion row must retain the verified Hermes planner audit binding");
   assert.deepEqual(Object.keys(row.output).sort(), ["qa_execution_id", "result_hash", "tested_sha", "verdict"]);
   assert.equal(row.output.result_hash, row.result_hash); assert.equal(JSON.stringify(row.output).includes("storage_ref"), false);
   await assert.rejects(pool.query("update qa_executions set error='mutate' where id=$1", [claimed.payload.execution_id]), /immutable/i);
   await assert.rejects(pool.query("update loop_task_runs set output='{}' where id=$1", [work.qa_run_id]), /immutable/i);
+});
+
+test("capability completion verifies authoritative evidence bytes before any database mutation", async () => {
+  const cases = ["missing", "tampered", "wrong media", "zero bytes", "symlink"];
+  for (const label of cases) {
+    const f = await fixture(); await approve(f); const work = await qaWork(f); const claimed = await claim(work);
+    await ensurePlannerBound(claimed);
+    let qa = artifactResult(claimed.payload.execution_id);
+    const screenshotPath = resolve(QA_ARTIFACT_ROOT, qa.evidence[0].storage_ref);
+    const logPath = resolve(QA_ARTIFACT_ROOT, qa.evidence[1].storage_ref);
+    await mkdir(dirname(screenshotPath), { recursive: true });
+    await writeFile(logPath, LOG_BYTES);
+    if (label === "tampered") await writeFile(screenshotPath, Buffer.concat([PNG_BYTES, Buffer.from([9])]));
+    if (label === "wrong media") await writeFile(screenshotPath, LOG_BYTES);
+    if (label === "zero bytes") {
+      await writeFile(screenshotPath, Buffer.alloc(0));
+      qa = { ...qa, evidence: qa.evidence.map((entry, index) => index ? entry : {
+        ...entry, bytes: 0, sha256: createHash("sha256").update(Buffer.alloc(0)).digest("hex"),
+      }) };
+    }
+    if (label === "symlink") {
+      const target = resolve(QA_ARTIFACT_ROOT, `${claimed.payload.execution_id}.symlink-target.png`);
+      await writeFile(target, PNG_BYTES);
+      await symlink(target, screenshotPath);
+    }
+    const before = await authorityState(claimed.payload.execution_id);
+    const response = await complete(claimed, "pass", claimed.payload.qa_session_id, {
+      result: qa, result_hash: qaResult.hashQaResult(qa), skip_evidence_write: true,
+    });
+    assert.equal(response.status, label === "zero bytes" ? 400 : 409, `${label}: ${JSON.stringify(response.payload)}`);
+    assert.deepEqual({ ...response.payload },
+      { error: label === "zero bytes" ? "invalid_qa_result" : "qa_evidence_verification_failed" }, label);
+    assert.deepEqual({ ...(await authorityState(claimed.payload.execution_id)) }, { ...before }, label);
+  }
+});
+
+test("capability completion terminalizes when every descriptor matches real authoritative bytes", async () => {
+  const f = await fixture(); await approve(f); const claimed = await claim(await qaWork(f));
+  const qa = artifactResult(claimed.payload.execution_id);
+  await writeArtifactResult(qa);
+  const response = await complete(claimed, "pass", claimed.payload.qa_session_id, {
+    result: qa, result_hash: qaResult.hashQaResult(qa),
+  });
+  assert.equal(response.status, 200, JSON.stringify(response.payload));
+  const state = await authorityState(claimed.payload.execution_id);
+  assert.equal(state.execution_status, "succeeded");
+  assert.ok(state.capability_consumed_at);
+  assert.equal(state.result_hash, qaResult.hashQaResult(qa));
+});
+
+test("QA completion persists canonical visual evidence descriptors without blobs and with run ownership", async () => {
+  const f = await fixture(); await approve(f); const work = await qaWork(f); const claimed = await claim(work); assert.equal(claimed.status, 201);
+  const qa = resultWithEvidence("pass");
+  const response = await complete(claimed, "pass", claimed.payload.qa_session_id, {
+    result: qa,
+    result_hash: qaResult.hashQaResult(qa),
+  });
+  assert.equal(response.status, 200, JSON.stringify(response.payload));
+  const rows = (await pool.query(`select id,task_id,task_run_id,kind,uri,content,metadata
+    from loop_evidence where task_id=$1 order by created_at,id`, [f.taskId])).rows;
+  assert.equal(rows.length, qa.evidence.length);
+  for (const descriptor of qa.evidence) {
+    const row = rows.find((candidate) => candidate.uri === `visual-qa://${descriptor.storage_ref}`);
+    assert.ok(row, `missing evidence row for ${descriptor.storage_ref}`);
+    assert.equal(row.task_id, f.taskId);
+    assert.equal(row.task_run_id, work.qa_run_id);
+    assert.equal(row.kind, `visual_qa_${descriptor.kind}`);
+    assert.equal(row.uri, `visual-qa://${descriptor.storage_ref}`);
+    assert.equal(row.content, null);
+    assert.deepEqual(row.metadata, {
+      schema_version: 1,
+      qa_execution_id: claimed.payload.execution_id,
+      planner_session_id: plannerSessionFor(claimed),
+      task_id: f.taskId,
+      qa_run_id: work.qa_run_id,
+      work_item_id: work.id,
+      execution_attempt_id: claimed.payload.execution_attempt_id,
+      policy_hash: claimed.payload.policy_hash,
+      result_hash: qaResult.hashQaResult(qa),
+      tested_sha: SHA,
+      descriptor,
+    });
+  }
+
+  const authority = (await pool.query(`select p.proname,p.prosecdef,pg_get_userbyid(p.proowner) owner,
+      has_function_privilege('aipaths_mc_app',p.oid,'EXECUTE') app_execute
+    from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+    where n.nspname='public' and p.proname in ('persist_visual_qa_evidence','guard_visual_qa_evidence')
+    order by p.proname`)).rows;
+  assert.deepEqual(authority.map((row) => ({ ...row })), [
+    { proname: "guard_visual_qa_evidence", prosecdef: false, owner: "aipaths_mc_qa_owner", app_execute: false },
+    { proname: "persist_visual_qa_evidence", prosecdef: true, owner: "aipaths_mc_qa_owner", app_execute: true },
+  ]);
+  assert.equal((await pool.query(`select count(*)::int n from pg_trigger
+    where tgrelid='public.loop_evidence'::regclass and tgname='visual_qa_evidence_guard' and not tgisinternal`)).rows[0].n, 1);
+
+  await assert.rejects(appTx((client) => client.query(`insert into loop_evidence(task_id,task_run_id,kind,uri,metadata)
+    values ($1,$2,'visual_qa_screenshot','visual-qa://qa/forged.png','{}')`, [f.taskId, work.qa_run_id])),
+  /visual QA evidence|authority|protected|immutable/i);
+  await assert.rejects(appTx((client) => client.query("update loop_evidence set metadata='{}' where id=$1", [rows[0].id])),
+    /visual QA evidence|authority|protected|immutable/i);
+  await assert.rejects(appTx((client) => client.query("delete from loop_evidence where id=$1", [rows[0].id])),
+    /visual QA evidence|authority|protected|immutable/i);
+
+  const legacyId = (await appTx((client) => client.query(`insert into loop_evidence(task_id,task_run_id,kind,content,metadata)
+    values ($1,$2,'review_note','legacy evidence','{}') returning id`, [f.taskId, work.qa_run_id]))).rows[0].id;
+  assert.equal((await appTx((client) => client.query("update loop_evidence set content='updated legacy evidence' where id=$1 returning content",
+    [legacyId]))).rows[0].content, "updated legacy evidence");
+  assert.equal((await appTx((client) => client.query("delete from loop_evidence where id=$1", [legacyId]))).rowCount, 1);
+});
+
+test("completion fails closed until a verified planner session is bound", async () => {
+  const f = await fixture(); await approve(f); const work = await qaWork(f); const claimed = await claim(work);
+  const before = await authorityState(claimed.payload.execution_id);
+  const rejected = await complete(claimed, "pass", claimed.payload.qa_session_id, { skip_planner_bind: true });
+  assert.equal(rejected.status, 409, JSON.stringify(rejected.payload));
+  assert.deepEqual({ ...(await authorityState(claimed.payload.execution_id)) }, { ...before });
+  const qa = resultWithEvidence("pass");
+  const accepted = await complete(claimed, "pass", claimed.payload.qa_session_id, {
+    result: qa,
+    result_hash: qaResult.hashQaResult(qa),
+  });
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.payload));
+  const audit = (await pool.query(`select e.planner_session_id,ev.metadata from qa_executions e
+    left join loop_evidence ev on ev.task_run_id=e.qa_run_id and ev.uri like 'visual-qa://%'
+    where e.id=$1 order by ev.created_at nulls last limit 1`, [claimed.payload.execution_id])).rows[0];
+  assert.equal(audit.planner_session_id, plannerSessionFor(claimed));
+  assert.equal(audit.metadata.planner_session_id, plannerSessionFor(claimed));
 });
 
 test("completion rejects every request binding/session/result authority mismatch without any mutation", async () => {
@@ -487,6 +723,7 @@ test("completion rejects every request binding/session/result authority mismatch
   ];
   for (const [label, overrides, session, expected] of cases) {
     const f = await fixture(); await approve(f); const claimed = await claim(await qaWork(f));
+    await ensurePlannerBound(claimed);
     const before = await authorityState(claimed.payload.execution_id);
     const response = await complete(claimed, "pass", session, overrides);
     assert.equal(response.status, expected, `${label}: ${JSON.stringify(response.payload)}`);
@@ -494,6 +731,7 @@ test("completion rejects every request binding/session/result authority mismatch
   }
   for (const reused of ["implementer", "reviewer"]) {
     const f = await fixture(); await approve(f); const claimed = await claim(await qaWork(f));
+    await ensurePlannerBound(claimed);
     const before = await authorityState(claimed.payload.execution_id);
     const session = reused === "implementer" ? f.implementerSession : f.reviewerSession;
     const response = await complete(claimed, "pass", session);
@@ -528,7 +766,7 @@ test("direct SQL rejects incoherent QA work identity and a coherent forged work-
     const executionId = randomUUID();
     await client.query(`insert into qa_executions(id,qa_run_id,task_id,work_item_id,execution_attempt_id,target_run_id,target_sha,
       policy_hash,status,capability_hash,capability_expires_at,qa_session_id)
-      values($1,$2,$3,$4,$5,$6,$7,$8,'running',$9,now()+interval '30 minutes','20260730_123000_f0f0f0')`,
+      values($1,$2,$3,$4,$5,$6,$7,$8,'running',$9,now()+interval '90 minutes','20260730_123000_f0f0f0')`,
     [executionId,work.qa_run_id,f.taskId,work.id,work.execution_attempt_id,f.implRun,SHA,work.payload.policy_hash,capabilityHash]);
     await client.query("update loop_task_runs set status='running',started_at=now() where id=$1", [work.qa_run_id]);
     await client.query("select set_config('app.visual_qa_transition','claim',true)");
@@ -541,6 +779,7 @@ test("direct SQL rejects incoherent QA work identity and a coherent forged work-
 test("ordinary SQL cannot forge claim/complete authority without the raw capability after a real claim", async () => {
   const f = await fixture(); await approve(f); const work = await qaWork(f); const claimed = await claim(work);
   assert.equal(claimed.status, 201);
+  await ensurePlannerBound(claimed);
   const before = await authorityState(claimed.payload.execution_id);
   await assert.rejects(tx(async (client) => {
     await client.query(`update loop_task_runs set status='succeeded',server_session_id=$2,finished_at=now(),
@@ -566,6 +805,7 @@ test("ordinary SQL cannot forge claim/complete authority without the raw capabil
 
 test("database result validator rejects partial, malformed, NULL and verdict-incoherent terminal results", async () => {
   const f = await fixture(); await approve(f); const claimed = await claim(await qaWork(f));
+  await ensurePlannerBound(claimed);
   const malformed = [
     { verdict: "pass", tested_sha: SHA },
     { ...result("pass"), verdict: null },
@@ -600,6 +840,20 @@ test("database result validator requires unique exact check coverage and mirrors
       { flow: "Open Loop detail", status: "pass", details: null },
       { flow: "Close Loop detail", status: "pass", details: null },
     ],
+    evidence: ["desktop", "mobile"].flatMap((viewport) =>
+      ["Open Loop detail", "Close Loop detail"].flatMap((flow, flowIndex) =>
+        ["screenshot", "log"].map((kind, kindIndex) => {
+          const marker = ((viewport === "desktop" ? 0 : 4) + flowIndex * 2 + kindIndex + 1).toString(16);
+          return {
+            kind,
+            storage_ref: `qa/${randomUUID()}/${marker.repeat(64)}.${kind === "screenshot" ? "png" : "json"}`,
+            sha256: marker.repeat(64),
+            bytes: 1,
+            media_type: kind === "screenshot" ? "image/png" : "application/json",
+            viewport,
+            flow,
+          };
+        }))),
   };
   assert.equal((await pool.query("select qa_result_is_valid($1,$2,$3) valid", [completeChecks,SHA,MULTI_POLICY])).rows[0].valid, true);
   const invalid = [
@@ -611,6 +865,7 @@ test("database result validator requires unique exact check coverage and mirrors
     { ...completeChecks, evidence: [{ kind:"screenshot",storage_ref:"qa/./desktop.png",sha256:"e".repeat(64),bytes:1,media_type:"image/png",viewport:"desktop",flow:null }] },
     { ...completeChecks, evidence: [{ kind:"screenshot",storage_ref:"qa/desktop.png",sha256:"e".repeat(64),bytes:1,media_type:"application/x-executable",viewport:"desktop",flow:null }] },
     { ...completeChecks, evidence: [{ kind:"screenshot",storage_ref:"qa/desktop.png",sha256:"e".repeat(64),bytes:1.5,media_type:"image/png",viewport:"desktop",flow:null }] },
+    { ...completeChecks, evidence: completeChecks.evidence.map((entry,index) => index ? entry : { ...entry, bytes:0 }) },
     { ...completeChecks, evidence: [{ kind:"screenshot",storage_ref:"qa/desktop.png",sha256:"e".repeat(64),bytes:1,media_type:"image/png",viewport:"tablet",flow:null }] },
     { ...completeChecks, evidence: [{ kind:"screenshot",storage_ref:"qa/desktop.png",sha256:"e".repeat(64),bytes:1,media_type:"image/png",viewport:"desktop",flow:"Unknown flow" }] },
     { ...completeChecks, evidence: [{ kind:"screenshot",storage_ref:"qa/desktop.png",sha256:"e".repeat(64),bytes:1,media_type:"image/png",viewport:"desktop",flow:null,extra:true }] },
@@ -657,10 +912,16 @@ test("SQL/TS persisted-policy parity covers UTF-8 bytes, URL grammar, NULL/exact
   ]) await assertPolicyParity(label,policy,false);
 });
 
-test("SQL/TS result parity covers UTF-8 bytes, NULL/exact keys, and exact 256KiB canonical boundary", async () => {
-  await assertResultParity("baseline exact result",result("pass"),POLICY,true);
-  const astralValid={...result("pass"),viewport_checks:[{viewport:"desktop",status:"pass",details:"🚀".repeat(512)}]};
-  const astralInvalid={...result("pass"),viewport_checks:[{viewport:"desktop",status:"pass",details:"🚀".repeat(513)}]};
+test("SQL/TS result parity covers exact visual evidence coverage, UTF-8 bytes, NULL/exact keys, and exact 256KiB canonical boundary", async () => {
+  const covered = resultWithEvidence("pass");
+  await assertResultParity("baseline exact result",covered,POLICY,true);
+  await assertResultParity("non-infrastructure result without evidence",{ ...covered, evidence: [] },POLICY,false);
+  await assertResultParity("partial visual evidence",{ ...covered, evidence: covered.evidence.slice(0, 1) },POLICY,false);
+  await assertResultParity("duplicated visual evidence",{ ...covered, evidence: [covered.evidence[0], covered.evidence[0], covered.evidence[1]] },POLICY,false);
+  await assertResultParity("wrong visual evidence combination",{ ...covered, evidence: covered.evidence.map((entry) => ({ ...entry, flow: null })) },POLICY,false);
+  await assertResultParity("zero-byte visual evidence",{ ...covered, evidence: covered.evidence.map((entry,index) => index ? entry : { ...entry, bytes:0 }) },POLICY,false);
+  const astralValid={...covered,viewport_checks:[{viewport:"desktop",status:"pass",details:"🚀".repeat(512)}]};
+  const astralInvalid={...covered,viewport_checks:[{viewport:"desktop",status:"pass",details:"🚀".repeat(513)}]};
   await assertResultParity("2048-byte astral details",astralValid,POLICY,true);
   await assertResultParity("2052-byte astral details",astralInvalid,POLICY,false);
   await assertResultParity("canonical result exactly 262144 bytes",resultAtCanonicalBytes(256*1024),POLICY,true);
@@ -758,9 +1019,10 @@ test("changes creates cycle+1; cycle 3 changes blocks without cycle 4", async ()
 
 test("infrastructure failure consumes authority into failed run/execution and blocks without product findings or cycle increment", async () => {
   const f = await fixture(); await approve(f); const claimed = await claim(await qaWork(f));
-  const completed = await complete(claimed, "infrastructure_failure");
+  const completed = await complete(claimed, "infrastructure_failure", claimed.payload.qa_session_id,
+    { skip_planner_bind: true });
   assert.equal(completed.status, 200, JSON.stringify(completed.payload));
-  const state = (await pool.query(`select e.status,e.error,e.result,e.result_hash,e.capability_consumed_at,e.capability_revoked_at,
+  const state = (await pool.query(`select e.status,e.error,e.result,e.result_hash,e.capability_consumed_at,e.capability_revoked_at,e.planner_session_id,
     r.status run_status,r.error run_error,wi.status work_status,t.status task_status,l.status loop_status,
     (select max(quality_cycle) from loop_task_runs where task_id=e.task_id)::int max_cycle
     from qa_executions e join loop_task_runs r on r.id=e.qa_run_id join work_items wi on wi.id=e.work_item_id
@@ -768,12 +1030,13 @@ test("infrastructure failure consumes authority into failed run/execution and bl
     join loops l on l.id=p.loop_id where e.id=$1`, [claimed.payload.execution_id])).rows[0];
   assert.deepEqual([state.status,state.run_status,state.work_status,state.task_status,state.loop_status,state.max_cycle], ["failed","failed","failed","blocked","blocked",1]);
   assert.ok(state.capability_consumed_at); assert.equal(state.capability_revoked_at, null); assert.equal(state.error, "browser_runner_unavailable");
+  assert.equal(state.planner_session_id, null, "pre-planner infrastructure failures must not invent a Hermes session");
   assert.equal(state.result.verdict, "infrastructure_failure"); assert.deepEqual(state.result.findings, []); assert.match(state.result_hash, /^[0-9a-f]{64}$/);
 });
 
 test("stale reconcile revokes capability and coherently blocks", async () => {
   const f = await fixture(); await approve(f); const claimed = await claim(await qaWork(f));
-  await pool.query("update qa_executions set heartbeat_at=now()-interval '20 minutes' where id=$1", [claimed.payload.execution_id]);
+  await pool.query("update qa_executions set heartbeat_at=now()-interval '20 minutes',pid=424242,runner_birth_token='Tue Aug 4 12:34:56 2026' where id=$1", [claimed.payload.execution_id]);
   const reconciled = await reconcileRoute.POST(agentRequest({})); assert.equal(reconciled.status, 200); assert.equal(reconciled.payload.reconciled, 1);
   const row = (await pool.query("select status,capability_revoked_at,capability_consumed_at from qa_executions where id=$1", [claimed.payload.execution_id])).rows[0];
   assert.equal(row.status, "failed"); assert.ok(row.capability_revoked_at); assert.equal(row.capability_consumed_at, null);
@@ -782,7 +1045,7 @@ test("stale reconcile revokes capability and coherently blocks", async () => {
 test("capability heartbeat is authenticated and wins the stale-reconcile race under the execution lock", async () => {
   const f = await fixture(); await approve(f); const claimed = await claim(await qaWork(f));
   assert.equal((await heartbeat(claimed)).status, 200, "live capability heartbeat");
-  await pool.query("update qa_executions set heartbeat_at=now()-interval '20 minutes' where id=$1", [claimed.payload.execution_id]);
+  await pool.query("update qa_executions set heartbeat_at=now()-interval '20 minutes',pid=424242,runner_birth_token='Tue Aug 4 12:34:56 2026' where id=$1", [claimed.payload.execution_id]);
   assert.equal((await heartbeat(claimed, "x".repeat(43))).status, 401);
   const [beat, reconciled] = await Promise.all([heartbeat(claimed), reconcileRoute.POST(agentRequest({}))]);
   assert.equal(reconciled.status, 200);

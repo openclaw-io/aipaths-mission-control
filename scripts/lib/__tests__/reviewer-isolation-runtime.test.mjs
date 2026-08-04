@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { test } from "node:test";
@@ -427,6 +427,75 @@ test("bounded child heartbeats periodically and stops the timer after completion
   assert.equal(heartbeats, stoppedAt);
 });
 
+test("bounded detached children expose group lifecycle for runner-wide signal cleanup", async () => {
+  const events = [];
+  const { runBounded } = await import("../reviewer-runtime.mjs");
+  await runBounded(process.execPath, ["-e", "process.stdout.write('ok')"], {
+    detachedProcessGroup: true,
+    timeoutMs: 2_000,
+    onSpawn: (pid) => events.push(["spawn", pid]),
+    onSettled: (pid) => events.push(["settled", pid]),
+  });
+  assert.equal(events.length, 2);
+  assert.equal(events[0][0], "spawn");
+  assert.ok(Number.isInteger(events[0][1]) && events[0][1] > 1);
+  assert.deepEqual(events[1], ["settled", events[0][1]]);
+});
+
+test("bounded detached command kills background descendants after the leader exits", async () => {
+  const { runBounded } = await import("../reviewer-runtime.mjs");
+  const result = await runBounded("/bin/sh", ["-c", "sleep 30 >/dev/null 2>&1 & echo $!"], {
+    detachedProcessGroup: true,
+    timeoutMs: 5_000,
+  });
+  const pid = Number(result.stdout.trim());
+  assert.ok(Number.isInteger(pid) && pid > 1);
+  assert.throws(() => process.kill(pid, 0), (error) => error?.code === "ESRCH");
+});
+
+test("bounded non-detached command kills the direct child on timeout", async () => {
+  const { runBounded } = await import("../reviewer-runtime.mjs");
+  const root = await mkdtemp(resolve(tmpdir(), "reviewer-timeout-child-"));
+  const pidFile = resolve(root, "pid");
+  let pid;
+  try {
+    await assert.rejects(runBounded(process.execPath, ["-e",
+      `require('fs').writeFileSync(${JSON.stringify(pidFile)},String(process.pid));setInterval(()=>{},1000)`], {
+      timeoutMs: 100,
+    }), /reviewer_child_timeout/);
+    pid = Number(readFileSync(pidFile, "utf8"));
+    assert.throws(() => process.kill(pid, 0), (error) => error?.code === "ESRCH");
+  } finally {
+    if (Number.isInteger(pid)) { try { process.kill(pid, "SIGKILL"); } catch {} }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("bounded command abort kills the child before rejecting", async () => {
+  const { runBounded } = await import("../reviewer-runtime.mjs");
+  const root = await mkdtemp(resolve(tmpdir(), "reviewer-abort-child-"));
+  const pidFile = resolve(root, "pid");
+  const controller = new AbortController();
+  let pid;
+  try {
+    const running = runBounded(process.execPath, ["-e",
+      `require('fs').writeFileSync(${JSON.stringify(pidFile)},String(process.pid));setInterval(()=>{},1000)`], {
+      timeoutMs: 5_000,
+      signal: controller.signal,
+    });
+    for (let attempt = 0; attempt < 100 && !existsSync(pidFile); attempt += 1) {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 5));
+    }
+    pid = Number(readFileSync(pidFile, "utf8"));
+    controller.abort();
+    await assert.rejects(running, /reviewer_child_aborted/);
+    assert.throws(() => process.kill(pid, 0), (error) => error?.code === "ESRCH");
+  } finally {
+    if (Number.isInteger(pid)) { try { process.kill(pid, "SIGKILL"); } catch {} }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("dispatch hashes a random capability and launches only after DB state is durable", async () => {
   const packageSha = "b".repeat(64);
   const executionAttemptId = randomUUID();
@@ -539,6 +608,14 @@ test("generic notifier rejects fresh review before any spawn", async () => {
       isVisualQaLikeWorkItem: (row) => row?.payload?.runtime_contract === "visual_qa_v1" || row?.payload?.run_role === "qa",
       parseGenericNotifyClassificationIdentity: () => null,
       genericNotifyIdentityMatches: () => true,
+    },
+    "@/lib/work-items/status-payload": {
+      serializeWorkItemStatusPayload: (status, workPayload) => JSON.stringify({
+        status,
+        ...(typeof workPayload?.execution_attempt_id === "string"
+          ? { execution_attempt_id: workPayload.execution_attempt_id }
+          : {}),
+      }),
     },
     }, { fetch: async () => { throw new Error("network forbidden"); } });
     const response = await route.POST({ headers: { get: () => "Bearer test-key" }, json: async () => ({ work_item_id: randomUUID(), agent: "systems" }) });

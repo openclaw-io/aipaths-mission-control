@@ -101,6 +101,29 @@ function parseChecks(raw: unknown, kind: "viewport" | "flow", expected: string[]
   });
 }
 
+function assertExactVisualEvidenceCoverage(evidence: QaEvidenceDescriptor[], policy: QaPolicy) {
+  const expectedFlows: Array<string | null> = policy.flows.length ? policy.flows : [null];
+  const expected = new Set<string>();
+  for (const viewport of policy.viewports) {
+    for (const flow of expectedFlows) {
+      for (const kind of ["screenshot", "log"]) expected.add(`${viewport.name}\u0000${flow ?? ""}\u0000${kind}`);
+    }
+  }
+  if (evidence.length !== expected.size) throw new Error("qa_evidence_coverage_incomplete");
+  const seen = new Set<string>();
+  const storageRefs = new Set<string>();
+  for (const descriptor of evidence) {
+    const key = `${descriptor.viewport ?? ""}\u0000${descriptor.flow ?? ""}\u0000${descriptor.kind}`;
+    const mediaMatchesKind = descriptor.kind === "screenshot"
+      ? descriptor.media_type === "image/png"
+      : descriptor.kind === "log" && descriptor.media_type === "application/json";
+    if (!descriptor.viewport || !expected.has(key) || seen.has(key) || storageRefs.has(descriptor.storage_ref)
+      || !mediaMatchesKind) throw new Error("qa_evidence_coverage_invalid");
+    seen.add(key);
+    storageRefs.add(descriptor.storage_ref);
+  }
+}
+
 export function parseQaResult(input: string, frozenPolicy: QaPolicy, expectedSha?: string): QaResult {
   if (typeof input !== "string" || utf8ByteLength(input) > LIMITS.transportJsonBytes) throw new Error("qa_result_transport_too_large");
   const policy = parsePersistedQaPolicy(frozenPolicy);
@@ -135,7 +158,7 @@ export function parseQaResult(input: string, frozenPolicy: QaPolicy, expectedSha
     const flow = item.flow === null ? null : text(item.flow, 500);
     if (!storageRef || !safeStorageRef(storageRef) || !mediaType || !MEDIA_TYPES.has(mediaType)
       || typeof item.sha256 !== "string" || !SHA256.test(item.sha256)
-      || !Number.isSafeInteger(item.bytes) || Number(item.bytes) < 0
+      || !Number.isSafeInteger(item.bytes) || Number(item.bytes) < 1
       || Number(item.bytes) > LIMITS.evidenceBytes || !["screenshot", "video", "trace", "log"].includes(String(item.kind))
       || (viewport !== null && !policy.viewports.some((candidate) => candidate.name === viewport))
       || (flow !== null && !policy.flows.includes(flow))) throw new Error("qa_evidence_invalid");
@@ -158,6 +181,7 @@ export function parseQaResult(input: string, frozenPolicy: QaPolicy, expectedSha
     throw new Error("qa_changes_findings_required");
   }
   if (infrastructure && (findings.length !== 0 || evidence.length !== 0 || !error)) throw new Error("qa_infrastructure_result_incoherent");
+  if (!infrastructure) assertExactVisualEvidenceCoverage(evidence, policy);
   const parsed = { verdict: value.verdict as QaResult["verdict"], tested_sha: testedSha,
     viewport_checks: viewportChecks as QaResult["viewport_checks"], flow_checks: flowChecks as QaResult["flow_checks"],
     evidence, findings, error };

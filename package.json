@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev -H 127.0.0.1 -p 3001",
-    "build": "next build",
+    "build": "next build --webpack",
     "start": "next start -H 127.0.0.1 -p 3001",
     "lint": "eslint",
     "backfill:strategist": "node scripts/backfill-strategist-analytics.mjs",
@@ -26,6 +26,7 @@
     "@supabase/ssr": "^0.9.0",
     "@supabase/supabase-js": "^2.100.0",
     "@types/pg": "^8.20.0",
+    "agent-browser": "0.33.2",
     "ipaddr.js": "^2.4.0",
     "lucide-react": "^1.0.1",
     "next": "^16.2.4",
