@@ -7,6 +7,7 @@ export type QaExecutionContext = {
   target_run_id: string; target_sha: string; policy_hash: string; status: string;
   capability_hash: Buffer; capability_expires_at: string | Date; capability_consumed_at: string | Date | null;
   capability_revoked_at: string | Date | null; qa_session_id: string | null; heartbeat_at: string | Date;
+  pid: number | null; runner_birth_token: string | null; planner_session_id: string | null;
   quality_cycle: number; qa_run_status: string; work_status: string; task_status: string; task_title: string;
   stage_id: string; plan_revision_id: string; plan_hash: string; loop_id: string; loop_status: string;
   priority: string | null; owner_agent: string | null; repository_id: string; base_sha: string;
@@ -16,6 +17,9 @@ export type QaExecutionContext = {
 };
 
 export async function lockQaExecution(client: CompletionQueryClient, executionId: string) {
+  const authorityLock = await client.query<{ locked: boolean }>(
+    "select lock_visual_qa_execution($1) locked", [executionId]);
+  if (authorityLock.rows[0]?.locked !== true) return null;
   const result = await client.query<QaExecutionContext>(
     `select e.*,qr.status qa_run_status,qr.quality_cycle,qr.repository_id,qr.base_sha,
        wi.status work_status,wi.payload work_payload,t.status task_status,t.title task_title,t.metadata task_metadata,
@@ -42,6 +46,21 @@ async function block(client: CompletionQueryClient, execution: QaExecutionContex
     values ($1,$2,'in_progress','blocked','visual-qa',$3::jsonb,$4)`, [execution.loop_id, event, JSON.stringify(payload), now]);
 }
 
+async function persistQaEvidenceDescriptors(
+  client: CompletionQueryClient,
+  execution: QaExecutionContext,
+  result: QaResult,
+  resultHash: string,
+) {
+  const persisted = await client.query<{ persisted: number }>(
+    "select persist_visual_qa_evidence($1,$2) persisted",
+    [execution.id, resultHash],
+  );
+  if (persisted.rows[0]?.persisted !== result.evidence.length) {
+    throw new Error("qa_evidence_persistence_mismatch");
+  }
+}
+
 export async function applyQaResult(client: CompletionQueryClient, execution: QaExecutionContext, result: QaResult,
   resultHash: string, qaSessionId: string, rawCapability: string) {
   if (execution.status !== "running" || execution.qa_run_status !== "running" || execution.work_status !== "in_progress"
@@ -49,6 +68,9 @@ export async function applyQaResult(client: CompletionQueryClient, execution: Qa
   if (!qaSessionId || qaSessionId !== execution.qa_session_id
     || qaSessionId === execution.implementer_session_id || qaSessionId === execution.reviewer_session_id) {
     throw new Error("qa_session_mismatch");
+  }
+  if (!execution.planner_session_id && result.verdict !== "infrastructure_failure") {
+    throw new Error("qa_planner_session_unbound");
   }
   if (result.tested_sha !== execution.target_sha) throw new Error("qa_tested_sha_mismatch");
   const now = new Date().toISOString();
@@ -69,6 +91,7 @@ export async function applyQaResult(client: CompletionQueryClient, execution: Qa
       JSON.stringify(result),resultHash,now],
   );
   if (!completed.rows[0]?.completed) throw new Error("qa_completion_concurrent_conflict");
+  await persistQaEvidenceDescriptors(client, execution, result, resultHash);
 
   if (infrastructure) {
     await block(client, execution, now, "loop.qa_infrastructure_failure", {

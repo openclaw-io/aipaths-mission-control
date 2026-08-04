@@ -1,7 +1,7 @@
 BEGIN;
 SET LOCAL lock_timeout='5s';
 SET LOCAL statement_timeout='5min';
-LOCK TABLE public.work_items,public.loop_events,public.loop_task_runs,public.loop_task_reviews,public.loop_tasks,
+LOCK TABLE public.work_items,public.loop_events,public.loop_task_runs,public.loop_task_reviews,public.loop_tasks,public.loop_evidence,
   public.qa_executions,public.qa_authority_secrets,public.qa_work_item_transition_authorities IN ACCESS EXCLUSIVE MODE;
 DO $guard$
 BEGIN
@@ -21,6 +21,14 @@ END $guard$;
 -- Remove externally callable authority entry points before their private helpers/tables.
 DROP FUNCTION public.claim_visual_qa_execution(jsonb,text,text);
 DROP FUNCTION public.heartbeat_visual_qa_execution(uuid,text);
+DROP FUNCTION IF EXISTS public.attach_visual_qa_execution_pid(uuid,integer,text,text);
+DROP FUNCTION IF EXISTS public.attach_visual_qa_execution_pid(uuid,integer,text);
+DROP FUNCTION IF EXISTS public.lock_visual_qa_execution(uuid);
+DROP FUNCTION IF EXISTS public.bind_visual_qa_planner_session(uuid,text,text);
+DROP FUNCTION IF EXISTS public.persist_visual_qa_evidence(uuid,text);
+DROP TRIGGER IF EXISTS visual_qa_evidence_guard ON public.loop_evidence;
+DROP FUNCTION IF EXISTS public.guard_visual_qa_evidence();
+DROP INDEX IF EXISTS public.idx_loop_evidence_visual_qa_uri;
 DROP FUNCTION public.complete_visual_qa_execution(uuid,uuid,text,text,text,text,jsonb,text,timestamptz);
 DROP FUNCTION public.reconcile_visual_qa_execution(uuid,text,timestamptz);
 DROP TRIGGER IF EXISTS visual_qa_work_items_guard ON public.work_items;
@@ -121,6 +129,7 @@ BEGIN
 END $default_privileges$;
 REVOKE SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public FROM aipaths_mc_app;
 REVOKE USAGE,SELECT,UPDATE ON ALL SEQUENCES IN SCHEMA public FROM aipaths_mc_app;
+REVOKE SELECT,INSERT ON public.loop_evidence FROM aipaths_mc_qa_owner;
 -- Retain safe schema resolution for the fixed roles and never restore the
 -- insecure historical PUBLIC/app ability to create search-path objects.
 REVOKE CREATE ON SCHEMA public FROM PUBLIC, aipaths_mc_app;

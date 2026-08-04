@@ -5,6 +5,7 @@ import { lockQaExecution } from "@/lib/qa/execution";
 
 export const dynamic = "force-dynamic";
 const CAPABILITY = /^[A-Za-z0-9_-]{43}$/;
+const PUBLIC_HEARTBEAT_ERRORS = new Set(["23514", "28000"]);
 function response(body: object, status = 200) {
   return NextResponse.json(body, { status, headers: { "Cache-Control": "no-store" } });
 }
@@ -40,13 +41,10 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     if ("error" in outcome) return response({ error: outcome.error }, outcome.status);
     return response({ ok: true, execution_id: id, heartbeat_at: outcome.heartbeat_at });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "qa_heartbeat_failed";
     const code = typeof error === "object" && error !== null && "code" in error
       ? String((error as { code?: unknown }).code || "")
       : "";
-    const status = code === "23514" || code === "28000" || /conflict|capability|binding|expired/.test(message)
-      ? 409
-      : 500;
-    return response({ error: message }, status);
+    if (PUBLIC_HEARTBEAT_ERRORS.has(code)) return response({ error: "qa_heartbeat_state_conflict" }, 409);
+    return response({ error: "qa_heartbeat_failed" }, 500);
   }
 }

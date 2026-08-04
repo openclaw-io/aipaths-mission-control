@@ -2,6 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { NextResponse, type NextRequest } from "next/server";
 import { withTransaction } from "@/lib/db/postgres";
 import { lockQaExecution, applyQaResult } from "@/lib/qa/execution";
+import { verifyQaEvidence } from "@/lib/qa/evidence";
 import { parseQaResult, hashQaPolicy, hashQaResult } from "@/lib/qa/result";
 import { containsInvalidUtf8String, parsePersistedQaPolicy } from "@/lib/loops/qa-policy";
 
@@ -10,6 +11,14 @@ const SESSION = /^\d{8}_\d{6}_[0-9a-f]{6}$/;
 const CAPABILITY = /^[A-Za-z0-9_-]{43}$/;
 const HASH = /^[0-9a-f]{64}$/;
 const SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+const PUBLIC_COMPLETION_ERRORS = new Set([
+  "qa_execution_state_conflict",
+  "qa_session_mismatch",
+  "qa_planner_session_unbound",
+  "qa_tested_sha_mismatch",
+  "qa_run_concurrent_conflict",
+  "qa_completion_concurrent_conflict",
+]);
 function response(body: object, status = 200) { return NextResponse.json(body, { status, headers: { "Cache-Control": "no-store" } }); }
 function token(request: NextRequest) {
   const match = (request.headers.get("authorization") || "").match(/^QaCapability ([A-Za-z0-9_-]{43})$/);
@@ -60,16 +69,20 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       }
       let result;
       try { result = parseQaResult(JSON.stringify(body?.result), frozenPolicy, targetSha); }
-      catch (error) { return { error: error instanceof Error ? error.message : "invalid_qa_result", status: 400 as const }; }
+      catch { return { error: "invalid_qa_result", status: 400 as const }; }
       const computedResultHash = hashQaResult(result);
       if (computedResultHash !== suppliedResultHash) return { error: "qa_result_hash_mismatch", status: 409 as const };
+      try { await verifyQaEvidence(result, computedResultHash); }
+      catch { return { error: "qa_evidence_verification_failed", status: 409 as const }; }
       const applied = await applyQaResult(client, execution, result, computedResultHash, sessionId, capability);
       return { applied };
     });
     if ("error" in outcome) return response({ error: outcome.error }, outcome.status);
     return response({ ok: true, execution_id: id, ...outcome.applied });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "qa_completion_failed";
-    return response({ error: message }, /conflict|mismatch|concurrent/.test(message) ? 409 : 500);
+    if (error instanceof Error && PUBLIC_COMPLETION_ERRORS.has(error.message)) {
+      return response({ error: error.message }, 409);
+    }
+    return response({ error: "qa_completion_failed" }, 500);
   }
 }

@@ -270,7 +270,7 @@ BEGIN
       OR item->>'storage_ref' !~ '^[A-Za-z0-9][A-Za-z0-9._/-]*$'
       OR item->>'storage_ref' LIKE '%//%' OR item->>'storage_ref' ~ '(^|/)[.][.]?(/|$)'
       OR jsonb_typeof(item->'sha256') IS DISTINCT FROM 'string' OR item->>'sha256' !~ '^[0-9a-f]{64}$'
-      OR jsonb_typeof(item->'bytes') IS DISTINCT FROM 'number' OR item->>'bytes' !~ '^(0|[1-9][0-9]*)$'
+      OR jsonb_typeof(item->'bytes') IS DISTINCT FROM 'number' OR item->>'bytes' !~ '^[1-9][0-9]*$'
       OR (item->>'bytes')::numeric>104857600
       OR jsonb_typeof(item->'media_type') IS DISTINCT FROM 'string'
       OR item->>'media_type' NOT IN ('image/png','image/jpeg','image/webp','video/webm','video/mp4','application/json','application/zip','text/plain')
@@ -292,6 +292,19 @@ BEGIN
       AND jsonb_typeof(value->'error')='string' AND public.qa_text_is_valid(value->>'error',2048);
   END IF;
   expected_viewports := jsonb_array_length(policy->'viewports'); expected_flows := jsonb_array_length(policy->'flows');
+  IF jsonb_array_length(value->'evidence') IS DISTINCT FROM expected_viewports * greatest(expected_flows,1) * 2
+    OR (SELECT count(DISTINCT item->>'storage_ref') FROM jsonb_array_elements(value->'evidence') item)
+      IS DISTINCT FROM jsonb_array_length(value->'evidence')::bigint
+    OR (SELECT count(DISTINCT ROW(item->>'viewport',item->>'flow',item->>'kind')) FROM jsonb_array_elements(value->'evidence') item)
+      IS DISTINCT FROM jsonb_array_length(value->'evidence')::bigint
+    OR EXISTS (SELECT 1 FROM jsonb_array_elements(value->'evidence') item
+      WHERE item->>'kind' NOT IN ('screenshot','log')
+        OR jsonb_typeof(item->'viewport') IS DISTINCT FROM 'string'
+        OR (item->>'kind'='screenshot' AND item->>'media_type' IS DISTINCT FROM 'image/png')
+        OR (item->>'kind'='log' AND item->>'media_type' IS DISTINCT FROM 'application/json')
+        OR (expected_flows=0 AND item->'flow' IS DISTINCT FROM 'null'::jsonb)
+        OR (expected_flows>0 AND jsonb_typeof(item->'flow') IS DISTINCT FROM 'string')) THEN RETURN false;
+  END IF;
   IF jsonb_array_length(value->'viewport_checks') IS DISTINCT FROM expected_viewports
     OR jsonb_array_length(value->'flow_checks') IS DISTINCT FROM expected_flows
     OR (SELECT count(DISTINCT item->>'viewport') FROM jsonb_array_elements(value->'viewport_checks') item) IS DISTINCT FROM expected_viewports::bigint
@@ -323,6 +336,16 @@ BEGIN
 EXCEPTION WHEN others THEN RETURN false;
 END $body$;
 REVOKE ALL ON FUNCTION public.qa_result_is_valid(jsonb,text,jsonb) FROM PUBLIC;
+
+CREATE FUNCTION public.lock_visual_qa_execution(execution_id uuid) RETURNS boolean
+LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public AS $body$
+BEGIN
+  PERFORM 1 FROM public.qa_executions WHERE id=execution_id FOR UPDATE;
+  RETURN FOUND;
+END $body$;
+ALTER FUNCTION public.lock_visual_qa_execution(uuid) OWNER TO aipaths_mc_qa_owner;
+REVOKE ALL ON FUNCTION public.lock_visual_qa_execution(uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.lock_visual_qa_execution(uuid) TO aipaths_mc_app;
 
 -- Replace Phase 4's two-role trigger with explicit implementation/review/qa branches.
 DROP TRIGGER loop_task_runs_quality_integrity ON public.loop_task_runs;
@@ -609,7 +632,7 @@ BEGIN
   claim_time:=(envelope->>'claimed_at')::timestamptz; expires_time:=(envelope->>'capability_expires_at')::timestamptz;
   IF envelope->>'claimed_at' IS DISTINCT FROM to_char(claim_time AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
     OR envelope->>'capability_expires_at' IS DISTINCT FROM to_char(expires_time AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-    OR expires_time IS DISTINCT FROM claim_time+interval '30 minutes'
+    OR expires_time IS DISTINCT FROM claim_time+interval '90 minutes'
     OR claim_time NOT BETWEEN clock_timestamp()-interval '5 minutes' AND clock_timestamp()+interval '1 minute' THEN
     RAISE EXCEPTION 'invalid visual QA claim timestamp binding' USING ERRCODE='22023';
   END IF;

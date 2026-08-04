@@ -11,6 +11,7 @@ import {
   isVisualQaLikeWorkItem,
   parseGenericNotifyClassificationIdentity,
 } from "@/lib/work-items/generic-notify-contract";
+import { serializeWorkItemStatusPayload } from "@/lib/work-items/status-payload";
 
 export const dynamic = "force-dynamic";
 
@@ -106,19 +107,6 @@ function buildWorkItemSessionKey(agentId: string, workItemId: string, payload?: 
 
 function shellSingleQuote(value: string) {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
-}
-
-export function serializeWorkItemStatusPayload(
-  status: "in_progress" | "done" | "failed",
-  workPayload?: Record<string, unknown> | null,
-) {
-  const executionAttemptId = typeof workPayload?.execution_attempt_id === "string"
-    ? workPayload.execution_attempt_id
-    : null;
-  return JSON.stringify({
-    status,
-    ...(executionAttemptId ? { execution_attempt_id: executionAttemptId } : {}),
-  });
 }
 
 function buildWorkItemStatusCommand(

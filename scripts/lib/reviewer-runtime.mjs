@@ -35,38 +35,97 @@ export function cleanChildEnv(extra = {}) {
   return env;
 }
 
+function detachedGroupAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 1) return false;
+  try { process.kill(-pid, 0); return true; }
+  catch (error) {
+    if (error?.code === "ESRCH") return false;
+    if (error?.code === "EPERM") return true;
+    throw error;
+  }
+}
+
+async function terminateDetachedGroup(pid) {
+  if (!detachedGroupAlive(pid)) return;
+  try { process.kill(-pid, "SIGTERM"); }
+  catch (error) { if (error?.code !== "ESRCH") throw error; }
+  const termDeadline = Date.now() + 500;
+  while (Date.now() < termDeadline && detachedGroupAlive(pid)) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+  }
+  if (!detachedGroupAlive(pid)) return;
+  try { process.kill(-pid, "SIGKILL"); }
+  catch (error) { if (error?.code !== "ESRCH") throw error; }
+  const killDeadline = Date.now() + 500;
+  while (Date.now() < killDeadline && detachedGroupAlive(pid)) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+  }
+  if (detachedGroupAlive(pid)) throw new Error("reviewer_child_process_group_cleanup_failed");
+}
+
+async function terminateDirectChild(pid) {
+  if (!Number.isInteger(pid) || pid <= 1) return;
+  try { process.kill(pid, "SIGKILL"); }
+  catch (error) { if (error?.code === "ESRCH") return; else throw error; }
+  const deadline = Date.now() + 500;
+  while (Date.now() < deadline) {
+    try { process.kill(pid, 0); }
+    catch (error) {
+      if (error?.code === "ESRCH") return;
+      if (error?.code !== "EPERM") throw error;
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+  }
+  throw new Error("reviewer_child_cleanup_failed");
+}
+
 export function runBounded(file, args, {
   cwd, env = cleanChildEnv(), maxBytes = 256 * 1024, timeoutMs = 15 * 60_000,
-  heartbeat, heartbeatIntervalMs = 60_000,
+  heartbeat, heartbeatIntervalMs = 60_000, detachedProcessGroup = false,
+  onSpawn, onSettled, signal,
 } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(file, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(file, args, { cwd, env, detached: detachedProcessGroup, stdio: ["ignore", "pipe", "pipe"] });
     const chunks = { stdout: [], stderr: [] }; const sizes = { stdout: 0, stderr: 0 }; let settled = false; let heartbeatRunning = false;
-    let timer; let heartbeatTimer;
-    const finish = (error, result) => {
+    let timer; let heartbeatTimer; let abortHandler;
+    const finish = async (error, result) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       clearInterval(heartbeatTimer);
+      if (abortHandler) signal?.removeEventListener("abort", abortHandler);
+      if (detachedProcessGroup) {
+        try { await terminateDetachedGroup(child.pid); }
+        catch (cleanupError) { reject(cleanupError); return; }
+      } else if (error) {
+        try { await terminateDirectChild(child.pid); }
+        catch (cleanupError) { reject(cleanupError); return; }
+      }
+      try { if (typeof onSettled === "function") onSettled(child.pid); }
+      catch (settledError) { reject(settledError); return; }
       if (error) reject(error); else resolve(result);
     };
+    try { if (typeof onSpawn === "function") onSpawn(child.pid); }
+    catch (spawnError) { void finish(spawnError); return; }
+    abortHandler = () => { void finish(new Error("reviewer_child_aborted")); };
+    if (signal?.aborted) { void finish(new Error("reviewer_child_aborted")); return; }
+    signal?.addEventListener("abort", abortHandler, { once: true });
     for (const name of ["stdout", "stderr"]) child[name].on("data", (chunk) => {
       const buffer = Buffer.from(chunk); sizes[name] += buffer.length;
-      if (sizes[name] > maxBytes) { child.kill("SIGKILL"); finish(new Error(`reviewer_${name}_oversize`)); return; }
+      if (sizes[name] > maxBytes) { void finish(new Error(`reviewer_${name}_oversize`)); return; }
       chunks[name].push(buffer);
     });
-    child.once("error", (error) => finish(error));
+    child.once("error", (error) => { void finish(error); });
     child.once("close", (code, signal) => code === 0
-      ? finish(null, { stdout: Buffer.concat(chunks.stdout).toString("utf8"), stderr: Buffer.concat(chunks.stderr).toString("utf8") })
-      : finish(new Error(`reviewer_child_failed:${file}:${code ?? signal ?? "unknown"}`)));
-    timer = setTimeout(() => { child.kill("SIGKILL"); finish(new Error(`reviewer_child_timeout:${file}`)); }, timeoutMs);
+      ? void finish(null, { stdout: Buffer.concat(chunks.stdout).toString("utf8"), stderr: Buffer.concat(chunks.stderr).toString("utf8") })
+      : void finish(new Error(`reviewer_child_failed:${file}:${code ?? signal ?? "unknown"}`)));
+    timer = setTimeout(() => { void finish(new Error(`reviewer_child_timeout:${file}`)); }, timeoutMs);
     if (typeof heartbeat === "function") {
       heartbeatTimer = setInterval(() => {
         if (settled || heartbeatRunning) return;
         heartbeatRunning = true;
         Promise.resolve().then(heartbeat).catch((error) => {
-          child.kill("SIGKILL");
-          finish(new Error(`reviewer_heartbeat_failed:${error instanceof Error ? error.message : "unknown"}`));
+          void finish(new Error(`reviewer_heartbeat_failed:${error instanceof Error ? error.message : "unknown"}`));
         }).finally(() => { heartbeatRunning = false; });
       }, heartbeatIntervalMs);
     }
