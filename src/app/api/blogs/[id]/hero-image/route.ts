@@ -1,4 +1,9 @@
+import { homedir } from "node:os";
+import path from "node:path";
+
 import { NextResponse, type NextRequest } from "next/server";
+
+import { directorRoot } from "@/lib/agents-paths";
 import { createServiceClient } from "@/lib/supabase/admin";
 import { isLocalAuthDisabled } from "@/lib/auth/local";
 import { getPipelineItemLocal } from "@/lib/db/pipeline-local";
@@ -8,10 +13,18 @@ export const dynamic = "force-dynamic";
 
 type JsonRecord = Record<string, unknown>;
 
-const ALLOWED_IMAGE_ROOTS = [
-  "/Users/joaco/.openclaw/media",
-  "/Users/joaco/openclaw/director-content/work/localizations",
-];
+// Los dos roots sirven portadas vivas: medido el 2026-08-08, 7 blogs referencian
+// ~/.openclaw/media y 23 apuntan a director-content. @content se retira como AGENTE,
+// pero su carpeta de trabajo sigue siendo el origen de esas 23 imágenes.
+function allowedImageRoots(): string[] {
+  // ~/.openclaw cuelga del $HOME del usuario, no del workspace: homedir() es lo correcto.
+  const roots = [path.join(homedir(), ".openclaw", "media")];
+  // director-content sí se muda en GON-71; si no se puede resolver, el root se omite y
+  // esas imágenes dejan de pasar el allowlist — visible, no silencioso.
+  const content = directorRoot("content");
+  if (content) roots.push(path.join(content, "work", "localizations"));
+  return roots;
+}
 
 function getNestedRecord(value: unknown, key: string) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -48,7 +61,7 @@ export async function GET(_request: NextRequest, { params }: { params: Promise<{
   if (!imagePath) return NextResponse.json({ error: "Hero image path not found" }, { status: 404 });
 
   try {
-    const image = await readLocalImageFile(imagePath, ALLOWED_IMAGE_ROOTS);
+    const image = await readLocalImageFile(imagePath, allowedImageRoots());
     return new NextResponse(image.data, {
       headers: {
         "Content-Type": image.contentType,
