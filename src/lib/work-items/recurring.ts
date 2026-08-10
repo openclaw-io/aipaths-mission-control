@@ -44,8 +44,12 @@ type PlannedOccurrence = {
 
 export const STRATEGIST_LIVE_CLASS_REPORTING_CONTRACT_VERSION = "live_class_reporting_v1_2026_08_04";
 export const STRATEGIST_LIVE_CLASS_REPORTING_CONTRACT_DATE = "2026-08-04";
+// Relativa a propósito. Este valor se PERSISTE en el payload de cada work item generado
+// (ver contract_path más abajo), y una ruta absoluta ahí es justo lo que ensució la base:
+// GON-88 encontró 159 work_items con rutas de máquina adentro. Relativa al directorio de
+// agentes es correcta en las dos máquinas y sobrevive a la migración de GON-71.
 export const STRATEGIST_LIVE_CLASS_REPORTING_CONTRACT_PATH =
-  "/Users/joaco/openclaw/director-strategist/analytics/live-class-reporting-contract-2026-08-04.md";
+  "director-strategist/analytics/live-class-reporting-contract-2026-08-04.md";
 
 export const STRATEGIST_LIVE_CLASS_REPORT_SECTIONS = [
   "edition_live_registrations",

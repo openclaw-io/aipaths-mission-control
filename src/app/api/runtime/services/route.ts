@@ -1,14 +1,34 @@
 import { execFile } from "node:child_process";
+import { homedir } from "node:os";
+import path from "node:path";
 import { promisify } from "node:util";
 import { NextResponse } from "next/server";
+
+import { directorRoot } from "@/lib/agents-paths";
 
 const execFileAsync = promisify(execFile);
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-const DEFAULT_COLLECTOR_PATH = "/Users/joaco/openclaw/director-systems/scripts/collect-runtime-status.mjs";
 const CACHE_TTL_MS = 15_000;
+
+// El collector vive en director-systems, que se muda en GON-71. Mission Control vive en
+// repos/, que no. La ruta se declara o se deriva; si no se puede, se falla con la receta
+// puesta en vez de ejecutar una ruta muerta y devolver un error que no se parece a la causa.
+function resolveCollectorPath(): string {
+  const declared = process.env.AIPATHS_RUNTIME_COLLECTOR_PATH?.trim();
+  if (declared) return declared;
+  const systems = directorRoot("systems");
+  if (!systems) {
+    throw new Error(
+      "No se pudo resolver collect-runtime-status.mjs. Declará AIPATHS_AGENTS_DIR " +
+        "(o AIPATHS_RUNTIME_COLLECTOR_PATH) en ~/.config/aipaths/mission-control.env " +
+        "y reiniciá com.aipaths.mission-control.",
+    );
+  }
+  return path.join(systems, "scripts", "collect-runtime-status.mjs");
+}
 
 type CacheEntry = {
   createdAt: number;
@@ -18,14 +38,14 @@ type CacheEntry = {
 let cache: CacheEntry | null = null;
 
 async function collectRuntimeStatus() {
-  const collectorPath = process.env.AIPATHS_RUNTIME_COLLECTOR_PATH || DEFAULT_COLLECTOR_PATH;
+  const collectorPath = resolveCollectorPath();
   const { stdout } = await execFileAsync(process.execPath, [collectorPath], {
     timeout: 12_000,
     maxBuffer: 1024 * 1024 * 2,
     env: {
       ...process.env,
       PATH: process.env.PATH || "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-      HOME: process.env.HOME || "/Users/joaco",
+      HOME: process.env.HOME || homedir(),
     },
   });
   return JSON.parse(stdout);
