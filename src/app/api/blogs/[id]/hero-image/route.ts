@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { NextResponse, type NextRequest } from "next/server";
 
-import { directorRoot } from "@/lib/agents-paths";
+import { directorRoot, legacyDirectorRoot } from "@/lib/agents-paths";
 import { createServiceClient } from "@/lib/supabase/admin";
 import { isLocalAuthDisabled } from "@/lib/auth/local";
 import { getPipelineItemLocal } from "@/lib/db/pipeline-local";
@@ -18,12 +18,14 @@ type JsonRecord = Record<string, unknown>;
 // pero su carpeta de trabajo sigue siendo el origen de esas 23 imágenes.
 function allowedImageRoots(): string[] {
   // ~/.openclaw cuelga del $HOME del usuario, no del workspace: homedir() es lo correcto.
-  const roots = [path.join(homedir(), ".openclaw", "media")];
-  // director-content sí se muda en GON-71; si no se puede resolver, el root se omite y
-  // esas imágenes dejan de pasar el allowlist — visible, no silencioso.
-  const content = directorRoot("content");
-  if (content) roots.push(path.join(content, "work", "localizations"));
-  return roots;
+  const roots = new Set([path.join(homedir(), ".openclaw", "media")]);
+  // @content se retira como agente, pero su carpeta histórica conserva portadas vivas. Durante
+  // el corte aceptamos tanto el root declarado como el layout anterior si todavía existe; el
+  // lector aplica realpath + contención estricta y omite roots que no resuelven físicamente.
+  for (const content of [directorRoot("content"), legacyDirectorRoot("content")]) {
+    if (content) roots.add(path.join(content, "work", "localizations"));
+  }
+  return [...roots];
 }
 
 function getNestedRecord(value: unknown, key: string) {
