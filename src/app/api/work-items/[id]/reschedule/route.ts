@@ -14,6 +14,13 @@ function parseScheduledFor(value: unknown) {
   return date.toISOString();
 }
 
+function resetDispatchStateForReschedule(payload: Record<string, unknown>) {
+  const nextPayload = { ...payload };
+  delete nextPayload.publish_blog_dispatch;
+  delete nextPayload.generic_notify_lease;
+  return nextPayload;
+}
+
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -52,7 +59,7 @@ export async function POST(
       const now = new Date().toISOString();
       const payload = ((existing.payload || {}) as Record<string, unknown>) || {};
       const nextPayload = {
-        ...payload,
+        ...resetDispatchStateForReschedule(payload),
         manual_rescheduled_at: now,
         manual_rescheduled_reason: reason,
         previous_scheduled_for: existing.scheduled_for,
@@ -122,7 +129,7 @@ export async function POST(
   const now = new Date().toISOString();
   const payload = ((existing.payload || {}) as Record<string, unknown>) || {};
   const nextPayload = {
-    ...payload,
+    ...resetDispatchStateForReschedule(payload),
     manual_rescheduled_at: now,
     manual_rescheduled_reason: reason,
     previous_scheduled_for: existing.scheduled_for,
