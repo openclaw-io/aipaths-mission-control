@@ -33,6 +33,15 @@ function legacySiblingRoot(): string {
   return path.resolve(process.cwd(), "..", "..");
 }
 
+/**
+ * Repo de director en el layout anterior, sólo mientras siga existiendo físicamente.
+ * Algunos assets históricos pueden sobrevivir allí aunque el agente ya no esté activo.
+ */
+export function legacyDirectorRoot(name: string): string | null {
+  const legacy = path.join(legacySiblingRoot(), `director-${name}`);
+  return existsSync(legacy) ? legacy : null;
+}
+
 export function agentsDir(): string | null {
   const declared = process.env.AIPATHS_AGENTS_DIR?.trim();
   return declared ? path.resolve(declared) : null;
@@ -48,8 +57,7 @@ export function directorRoot(name: string): string | null {
 
   // Layout viejo. La comprobación de existencia es la que separa "derivar" de "adivinar":
   // post-migración esta ruta no existe y devolvemos null en vez de una ruta plausible y muerta.
-  const legacy = path.join(legacySiblingRoot(), `director-${name}`);
-  return existsSync(legacy) ? legacy : null;
+  return legacyDirectorRoot(name);
 }
 
 /** Como `directorRoot`, pero tira con la receta puesta. Para código que no puede seguir sin la ruta. */

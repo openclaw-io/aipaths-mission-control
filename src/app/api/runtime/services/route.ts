@@ -12,6 +12,33 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 const CACHE_TTL_MS = 15_000;
+const DEFAULT_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+const COLLECTOR_ENV_KEYS = [
+  "USER",
+  "LOGNAME",
+  "TMPDIR",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "AIPATHS_AGENTS_DIR",
+  "AIPATHS_SERVICES_ROOT",
+  "AIPATHS_WORKSPACE_ROOT",
+  "AIPATHS_DIRECTOR_ROOT",
+] as const;
+
+function collectorChildEnv(): NodeJS.ProcessEnv {
+  const env: Record<string, string> = {
+    HOME: process.env.HOME?.trim() || homedir(),
+    PATH: process.env.PATH?.trim() || DEFAULT_PATH,
+  };
+  for (const key of COLLECTOR_ENV_KEYS) {
+    const value = process.env[key]?.trim();
+    if (value) env[key] = value;
+  }
+  // Next amplía ProcessEnv haciendo NODE_ENV obligatorio para el proceso web. El collector no
+  // es Next y deliberadamente no lo hereda; execFile acepta este mapa como su entorno completo.
+  return env as NodeJS.ProcessEnv;
+}
 
 // El collector vive en director-systems, que se muda en GON-71. Mission Control vive en
 // repos/, que no. La ruta se declara o se deriva; si no se puede, se falla con la receta
@@ -42,11 +69,10 @@ async function collectRuntimeStatus() {
   const { stdout } = await execFileAsync(process.execPath, [collectorPath], {
     timeout: 12_000,
     maxBuffer: 1024 * 1024 * 2,
-    env: {
-      ...process.env,
-      PATH: process.env.PATH || "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-      HOME: process.env.HOME || homedir(),
-    },
+    // El collector sólo necesita identidad/rutas operativas. Heredar el entorno completo de
+    // Next filtra secretos al proceso hijo y también propaga hooks como NODE_OPTIONS, que pueden
+    // mantenerlo vivo hasta que este request vence por timeout aunque ya haya escrito el JSON.
+    env: collectorChildEnv(),
   });
   return JSON.parse(stdout);
 }
