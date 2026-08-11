@@ -1,6 +1,14 @@
 import type { PoolClient } from "pg";
 import { NextResponse, type NextRequest } from "next/server";
 import { getLocalMissionControlUser, isLocalAuthDisabled } from "@/lib/auth/local";
+import {
+  SPANISH_BLOG_FINAL_PACKAGE_ACTION,
+  SPANISH_BLOG_FINAL_PACKAGE_CONTRACT,
+  SPANISH_BLOG_FINAL_PACKAGE_RELATION,
+  assertSpanishBlogFinalPackageReady,
+  spanishBlogFinalPackageEnabled,
+  spanishBlogFinalPackageReady,
+} from "@/lib/blogs/final-package";
 import { createPipelineWorkItemLocal, getPipelineItemLocal, updatePipelineItemLocal, withLockedPipelineItemLocal } from "@/lib/db/pipeline-local";
 import { resolvePublicationSlotLocal } from "@/lib/publication/scheduling-local";
 import { createClient } from "@/lib/supabase/server";
@@ -30,6 +38,7 @@ type BlogTransitionItem = Record<string, unknown> & {
   title: string;
   priority?: string | null;
   scheduled_for?: string | null;
+  content_body?: string | null;
   metadata?: Record<string, unknown> | null;
 };
 
@@ -60,22 +69,25 @@ const ALLOWED: Record<string, string[]> = {
   live: ["archived"],
 };
 
-function createWorkItemTitle(action: string, title: string) {
+function createWorkItemTitle(action: string, title: string, spanishOnlyFinalPackage = false) {
   switch (action) {
     case "promote":
       return `Develop blog draft: ${title}`;
     case "request_changes":
       return `Revise blog draft: ${title}`;
     case "approve":
+      if (spanishOnlyFinalPackage) return `Prepare final Spanish blog package: ${title}`;
       return `Localize blog to EN: ${title}`;
     case "request_final_changes":
-      return `Finalize blog package: ${title}`;
+      return spanishOnlyFinalPackage
+        ? `Revise final Spanish blog package: ${title}`
+        : `Finalize blog package: ${title}`;
     default:
       return `Work on blog: ${title}`;
   }
 }
 
-function createWorkItemInstruction(action: string, item: { title: string }, reviewNotes?: string) {
+function createWorkItemInstruction(action: string, item: { title: string }, reviewNotes?: string, spanishOnlyFinalPackage = false) {
   switch (action) {
     case "promote":
       return [
@@ -99,6 +111,18 @@ function createWorkItemInstruction(action: string, item: { title: string }, revi
         reviewNotes || "(missing)",
       ].join("\n");
     case "approve":
+      if (spanishOnlyFinalPackage) {
+        return [
+          `Pipeline blog item: ${item.title}`,
+          "",
+          "Task:",
+          "- Prepare the approved Spanish Markdown and Spanish publication metadata.",
+          "- Generate or select a hero image under an approved Mission Control local-media root.",
+          "- Complete with output.final_package = { spanish_markdown, metadata_es: { locale: \"es\", title, ... }, hero_image: { media_path | local_path | path, ... } }.",
+          "- Do not create, infer, or modify English localization fields.",
+          "- Mission Control validates and persists the complete package before moving to final_check.",
+        ].join("\n");
+      }
       return [
         `Pipeline blog item: ${item.title}`,
         "",
@@ -110,6 +134,20 @@ function createWorkItemInstruction(action: string, item: { title: string }, revi
         "- When localization and thumbnail are complete, complete this work item; Mission Control will move the pipeline item to final_check",
       ].join("\n");
     case "request_final_changes":
+      if (spanishOnlyFinalPackage) {
+        return [
+          `Pipeline blog item: ${item.title}`,
+          "",
+          "Task:",
+          "- Revise the Spanish final package based on the final-check feedback.",
+          "- Complete with output.final_package = { spanish_markdown, metadata_es: { locale: \"es\", title, ... }, hero_image: { media_path | local_path | path, ... } }.",
+          "- Do not create, infer, or modify English localization fields.",
+          "- Mission Control validates and persists the package before returning to final_check.",
+          "",
+          "Final-check notes:",
+          reviewNotes || "(missing)",
+        ].join("\n");
+      }
       return [
         `Pipeline blog item: ${item.title}`,
         "",
@@ -422,9 +460,13 @@ export async function POST(
   const actorIdentity = String(user.email || user.id || "local@mission-control");
 
   const { action, reviewNotes, current_url } = await request.json();
+  const spanishOnlyFinalPackage = spanishBlogFinalPackageEnabled();
   const targetStatus = ACTION_TARGET[action];
   if (!targetStatus || !(BLOG_STATUSES as readonly string[]).includes(targetStatus)) {
     return NextResponse.json({ error: "Invalid action" }, { status: 400 });
+  }
+  if (spanishOnlyFinalPackage && !useLocalMode && ["approve", "request_final_changes", "approve_final"].includes(action)) {
+    return NextResponse.json({ error: "spanish_final_package_requires_local_postgres" }, { status: 503 });
   }
 
   const item = useLocalMode
@@ -451,6 +493,9 @@ export async function POST(
 
   if (["request_changes", "request_final_changes"].includes(action) && (!reviewNotes || !String(reviewNotes).trim())) {
     return NextResponse.json({ error: "reviewNotes is required" }, { status: 400 });
+  }
+  if (spanishOnlyFinalPackage && action === "approve_final" && !spanishBlogFinalPackageReady(item)) {
+    return NextResponse.json({ error: "spanish_final_package_not_ready" }, { status: 409 });
   }
 
   const buildMetadata = (transitionItem: BlogTransitionItem) => ({
@@ -498,6 +543,9 @@ export async function POST(
         if (!(ALLOWED[lockedItem.status] || []).includes(targetStatus)) {
           throw new Error(`Action ${action} not allowed from ${lockedItem.status}`);
         }
+        if (spanishOnlyFinalPackage && action === "approve_final") {
+          await assertSpanishBlogFinalPackageReady(lockedItem);
+        }
 
         const localMetadata = buildMetadata(lockedItem);
         const localSchedule = action === "approve_final"
@@ -538,15 +586,18 @@ export async function POST(
         const updatedItem = await updatePipelineItemLocal(id, localUpdatePayload, client);
         let notify: { id: string; agent: string; title: string } | null = null;
         if (["promote", "request_changes", "approve", "request_final_changes"].includes(action)) {
-          const relationType = action === "promote" ? "investigate" : "followup";
-          const actionName = action === "approve" || action === "request_final_changes"
-            ? "localize_blog_to_en"
+          const isFinalPackageAction = spanishOnlyFinalPackage && (action === "approve" || action === "request_final_changes");
+          const relationType = action === "promote" ? "investigate" : isFinalPackageAction ? SPANISH_BLOG_FINAL_PACKAGE_RELATION : "followup";
+          const actionName = isFinalPackageAction
+            ? SPANISH_BLOG_FINAL_PACKAGE_ACTION
+            : action === "approve" || action === "request_final_changes"
+              ? "localize_blog_to_en"
             : action === "promote" ? "develop_blog_draft" : "revise_blog_draft";
           const { workItem } = await createPipelineWorkItemLocal({
             pipelineItemId: lockedItem.id,
             pipelineType: "blog",
-            title: createWorkItemTitle(action, lockedItem.title),
-            instruction: createWorkItemInstruction(action, lockedItem, reviewNotes),
+            title: createWorkItemTitle(action, lockedItem.title, isFinalPackageAction),
+            instruction: createWorkItemInstruction(action, lockedItem, reviewNotes, isFinalPackageAction),
             priority: lockedItem.priority || "medium",
             ownerAgent: "content",
             requestedBy: actorIdentity,
@@ -554,6 +605,7 @@ export async function POST(
             action: actionName,
             trigger: "manual_transition",
             reviewNotes: action === "request_changes" || action === "request_final_changes" ? String(reviewNotes).trim() : undefined,
+            payloadExtra: isFinalPackageAction ? { contract: SPANISH_BLOG_FINAL_PACKAGE_CONTRACT } : undefined,
           }, client);
           if (workItem?.id) notify = { id: workItem.id, agent: "content", title: lockedItem.title };
         }
@@ -632,14 +684,15 @@ export async function POST(
 
   if (["promote", "request_changes", "approve", "request_final_changes"].includes(action)) {
     const owner_agent = "content";
-    const relationType = action === "promote" ? "investigate" : "followup";
-    const actionName = action === "approve" || action === "request_final_changes" ? "localize_blog_to_en" : action === "promote" ? "develop_blog_draft" : "revise_blog_draft";
+    const isFinalPackageAction = spanishOnlyFinalPackage && (action === "approve" || action === "request_final_changes");
+    const relationType = action === "promote" ? "investigate" : isFinalPackageAction ? SPANISH_BLOG_FINAL_PACKAGE_RELATION : "followup";
+    const actionName = isFinalPackageAction ? SPANISH_BLOG_FINAL_PACKAGE_ACTION : action === "approve" || action === "request_final_changes" ? "localize_blog_to_en" : action === "promote" ? "develop_blog_draft" : "revise_blog_draft";
 
     const workInput = {
       pipelineItemId: item.id,
       pipelineType: "blog",
-      title: createWorkItemTitle(action, item.title),
-      instruction: createWorkItemInstruction(action, item, reviewNotes),
+      title: createWorkItemTitle(action, item.title, isFinalPackageAction),
+      instruction: createWorkItemInstruction(action, item, reviewNotes, isFinalPackageAction),
       priority: item.priority || "medium",
       ownerAgent: owner_agent,
       requestedBy: actorIdentity,
@@ -647,6 +700,7 @@ export async function POST(
       action: actionName,
       trigger: "manual_transition",
       reviewNotes: action === "request_changes" || action === "request_final_changes" ? String(reviewNotes).trim() : undefined,
+      payloadExtra: isFinalPackageAction ? { contract: SPANISH_BLOG_FINAL_PACKAGE_CONTRACT } : undefined,
     };
     const { workItem } = await createPipelineWorkItem(db!, workInput);
 

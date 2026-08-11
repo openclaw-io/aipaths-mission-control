@@ -73,6 +73,7 @@ const {
 
 const cases = [
   { pipelineType: "blog", relationType: "investigate", action: "develop_blog_draft", target: "researching" },
+  { pipelineType: "blog", relationType: "blog_final_package", action: "prepare_blog_final_package", target: "localizing" },
   { pipelineType: "community_post", relationType: "publish", action: "publish_community_post", target: "scheduled" },
   { pipelineType: "guide", relationType: "followup", action: "localize_guide_to_en", target: "localizing" },
   { pipelineType: "video", relationType: "concept", action: "youtube_gate_concept", target: "researching" },

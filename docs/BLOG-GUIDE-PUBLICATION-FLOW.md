@@ -1,6 +1,6 @@
 # Blog and Guide Publication Flow
 
-Mission Control uses pipeline items plus Work Queue publish tasks to keep content review, localization, scheduling, and publication auditable.
+Mission Control uses pipeline items plus Work Queue tasks to keep content review, final-package preparation, scheduling, and publication auditable.
 
 ## Blogs
 
@@ -12,12 +12,15 @@ ready_for_review -> localizing -> final_check -> scheduled -> live
 
 Key rules:
 
-- `approve` from `ready_for_review` creates/uses a Content work item with `action = localize_blog_to_en`.
-- When Content completes localization, blogs move to `final_check`, not directly to `scheduled`.
+- With `SPANISH_ONLY_BLOG_FINAL_PACKAGE_ENABLED=true`, `approve` and final-check rework create a work item with `action = prepare_blog_final_package` and `relation_type = blog_final_package`.
+- The package must complete with structured Spanish Markdown, `metadata_es.locale = es`, a Spanish title, and a local hero path resolvable through the existing GON-91 allowlist.
+- Mission Control persists the Spanish Markdown in `content_body`, records the verified package contract in metadata, and only then moves the blog to `final_check`.
+- The disabled gate preserves the legacy `localize_blog_to_en` creation path for rollback. Existing legacy work remains replayable; it never creates new EN work while the gate is enabled.
 - `final_check` is the human approval gate for:
-  - approved Spanish draft
-  - English localization
-  - hero/thumbnail candidate
+  - approved Spanish Markdown and metadata
+  - verified hero/thumbnail candidate
+  - optional pre-existing EN localization, shown only as legacy context
+- `approve_final` revalidates the gated package and hero before scheduling.
 - `approve_final` must create or update a Dev publish work item:
   - `action = publish_blog`
   - `relation_type = publish`
@@ -94,7 +97,7 @@ aipaths-academy-content/public/images/blogs/[blog-folder]/hero.png
 
 Blog frontmatter should use the GitHub raw URL for that image as `coverImage`.
 
-Mission Control may store temporary local/OpenClaw media paths in `metadata.hero_image` for review, but publish work should copy the approved asset to the content repo standard path.
+Mission Control stores the verified local review path in `metadata.hero_image`; publish work should copy the approved asset to the content repo standard path.
 
 ## Known hardening follow-ups
 
@@ -104,10 +107,9 @@ See Systems plan:
 /Users/joaco/openclaw/director-systems/plans/BLOG-FINAL-PACKAGE-HARDENING-PLAN-2026-04-28.md
 ```
 
-Open follow-ups include:
+GON-176 implements the gated `metadata.final_package` contract and validation. Remaining parent/runtime follow-ups include:
 
-- canonical `metadata.final_package`
-- validation gate before blog `final_check`
 - image generation logs/cost tracking
 - daily/per-blog image generation caps
 - cleanup of legacy thumbnail aliases after canonical contract is live
+- GON-154 canary/runtime activation and reconciliation

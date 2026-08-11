@@ -25,6 +25,7 @@ export interface BlogItem {
   current_url: string | null;
   content_path: string | null;
   content_format: string | null;
+  content_body: string | null;
   metadata: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
