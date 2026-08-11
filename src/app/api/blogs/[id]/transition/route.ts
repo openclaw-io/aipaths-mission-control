@@ -233,6 +233,7 @@ async function ensurePublishWorkItem(db: ReturnType<typeof createServiceClient>,
     relation_type: "publish",
     action: "publish_blog",
     schedule_kind: "publication",
+    dedupe_key: `${item.id}:publish_blog`,
   };
 
   if (existingPublish?.id) {
@@ -297,6 +298,7 @@ async function ensurePublishWorkItem(db: ReturnType<typeof createServiceClient>,
       pipeline_item_id: item.id,
       action: "publish_blog",
       scheduled_for: scheduledFor,
+      dedupe_key: `${item.id}:publish_blog`,
     },
   });
 

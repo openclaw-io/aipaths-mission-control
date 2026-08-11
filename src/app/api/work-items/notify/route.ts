@@ -21,6 +21,10 @@ import {
   buildScheduledLaunchGateBlockedTransition,
   nextScheduledLaunchRetryTransition,
 } from "@/lib/work-items/scheduled-launch-runtime";
+import {
+  PUBLISH_BLOG_DISPATCHER_CALLER,
+  isPublishBlogDispatchCandidate,
+} from "@/lib/work-items/publish-blog-dispatcher";
 
 export const dynamic = "force-dynamic";
 
@@ -93,6 +97,24 @@ const GENERIC_NOTIFY_IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
 const IMPLEMENTATION_UUID_SOURCE = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}";
 const IMPLEMENTATION_UUID_PATTERN = new RegExp(`^${IMPLEMENTATION_UUID_SOURCE}$`);
 const IMPLEMENTATION_SCHEDULER_SESSION_PATTERN = new RegExp(`^${IMPLEMENTATION_UUID_SOURCE}:attempt-([1-9][0-9]*):${IMPLEMENTATION_UUID_SOURCE}$`);
+
+function isExactPublishBlogDispatcherRequest(input: {
+  workItemId: unknown;
+  agent: unknown;
+  action: unknown;
+  idempotencyKey: unknown;
+}) {
+  if (typeof input.workItemId !== "string"
+      || input.agent !== "dev"
+      || input.action !== "created"
+      || typeof input.idempotencyKey !== "string") return false;
+  const prefix = `publish-blog:${input.workItemId}:attempt-`;
+  if (!input.idempotencyKey.startsWith(prefix)) return false;
+  const attemptText = input.idempotencyKey.slice(prefix.length);
+  if (!/^[1-9][0-9]*$/.test(attemptText)) return false;
+  const attempt = Number(attemptText);
+  return Number.isSafeInteger(attempt) && attempt > 0;
+}
 
 function isTrustedImplementationDispatchSessionId(value: unknown): value is string {
   if (typeof value !== "string" || value.length > 128) return false;
@@ -494,13 +516,23 @@ export async function POST(request: NextRequest) {
 
   const { workItemId, agent, action, caller, idempotencyKey, expectedClassificationIdentity } = await request.json();
   const isGenericSchedulerCall = caller === "generic_scheduler_v1";
-  const schedulerClassificationIdentity = isGenericSchedulerCall
+  const isPublishBlogDispatcherCall = caller === PUBLISH_BLOG_DISPATCHER_CALLER;
+  const isLeaseGuardedNotifyCall = isGenericSchedulerCall || isPublishBlogDispatcherCall;
+  if (isPublishBlogDispatcherCall && !isExactPublishBlogDispatcherRequest({
+    workItemId,
+    agent,
+    action,
+    idempotencyKey,
+  })) {
+    return NextResponse.json({ error: "publish_blog_dispatcher_request_invalid" }, { status: 400 });
+  }
+  const schedulerClassificationIdentity = isLeaseGuardedNotifyCall
     ? parseGenericNotifyClassificationIdentity(expectedClassificationIdentity)
     : null;
-  if (isGenericSchedulerCall && !schedulerClassificationIdentity) {
+  if (isLeaseGuardedNotifyCall && !schedulerClassificationIdentity) {
     return NextResponse.json({ error: "generic_notify_classification_identity_required" }, { status: 400 });
   }
-  if (isGenericSchedulerCall
+  if (isLeaseGuardedNotifyCall
       && (typeof idempotencyKey !== "string" || !GENERIC_NOTIFY_IDEMPOTENCY_KEY.test(idempotencyKey))) {
     return NextResponse.json({ error: "generic_notify_idempotency_key_required" }, { status: 400 });
   }
@@ -539,21 +571,21 @@ export async function POST(request: NextRequest) {
   if (!item) {
     return NextResponse.json({ error: "work_item not found" }, { status: 404 });
   }
-  if (!isGenericSchedulerCall && isVisualQaLikeWorkItem(item)) {
+  if (!isLeaseGuardedNotifyCall && isVisualQaLikeWorkItem(item)) {
     return NextResponse.json({ error: "visual_qa_v1 requires dedicated QA claim" }, { status: 409 });
   }
-  if (!isGenericSchedulerCall
+  if (!isLeaseGuardedNotifyCall
       && item.payload?.runtime_contract === "fresh_review_v1" && item.payload?.run_role === "review") {
     return NextResponse.json({ error: "fresh_review_v1 requires dedicated reviewer dispatch" }, { status: 409 });
   }
-  if (!isGenericSchedulerCall && agent !== item.owner_agent && agent !== item.target_agent_id) {
+  if (!isLeaseGuardedNotifyCall && agent !== item.owner_agent && agent !== item.target_agent_id) {
     return NextResponse.json({ error: "notify_agent_identity_mismatch" }, { status: 409 });
   }
 
   // fresh_review_v1 session identity is server-owned. The detached agent never
   // supplies or chooses it; retries of the same immutable work item retain it.
   let workPayload = { ...(item.payload || {}) } as Record<string, unknown>;
-  if (!isGenericSchedulerCall && useLocalMode && workPayload.runtime_contract === "fresh_review_v1"
+  if (!isLeaseGuardedNotifyCall && useLocalMode && workPayload.runtime_contract === "fresh_review_v1"
       && typeof workPayload.dispatch_session_id !== "string") {
     const dispatchSessionId = randomUUID();
     const assigned = await query<{ payload: Record<string, unknown> }>(
@@ -578,10 +610,10 @@ export async function POST(request: NextRequest) {
   }
 
   const preLockDeliveryKey = externalDeliveryKey(workPayload);
-  if (!useLocalMode && !isGenericSchedulerCall && needsScheduledLaunchReadiness(workPayload)) {
+  if (!useLocalMode && !isLeaseGuardedNotifyCall && needsScheduledLaunchReadiness(workPayload)) {
     return NextResponse.json({ error: "scheduled_launch_notify_requires_local_atomic_guard" }, { status: 503 });
   }
-  const launchReadiness = isGenericSchedulerCall || !useLocalMode
+  const launchReadiness = isLeaseGuardedNotifyCall || !useLocalMode
     ? await checkScheduledLaunchReadiness({ useLocalMode, db, item, payload: workPayload })
     : null;
   if (launchReadiness && !launchReadiness.ok) {
@@ -720,7 +752,7 @@ ${failCommand}
 
   let externalClaim: Awaited<ReturnType<typeof claimExternalDelivery>> | null = null;
   const deliveryKey = preLockDeliveryKey;
-  if (!isGenericSchedulerCall && useLocalMode) {
+  if (!isLeaseGuardedNotifyCall && useLocalMode) {
     const deliveryAcquisition = await withTransaction(async (client) => {
       const locked = await client.query<WorkItemRow>(
         "select * from public.work_items where id=$1 for update",
@@ -804,7 +836,7 @@ ${failCommand}
   }
 
   let wake: WakeAgentResult;
-  if (isGenericSchedulerCall) {
+  if (isLeaseGuardedNotifyCall) {
     if (!useLocalMode || !schedulerClassificationIdentity) {
       return NextResponse.json({ error: "generic_scheduler_notify_requires_local_atomic_guard" }, { status: 503 });
     }
@@ -832,12 +864,19 @@ ${failCommand}
       const existingLease = parseGenericNotifyLease(current.payload);
       if (existingLease === "invalid") return { error: "generic_notify_lease_invalid" as const };
       const nowMs = Date.now();
-      if (existingLease && existingLease.key === idempotencyKey
-          && existingLease.outcome !== "leased") {
+      // A committed same-key lease is authoritative even if the spawned agent
+      // already claimed the row. Revalidating status first would turn a safe
+      // HTTP retry into a false rejection after a successful wake.
+      if (existingLease && existingLease.key === idempotencyKey) {
         return { replay: existingLease, current };
       }
+      if (isPublishBlogDispatcherCall && existingLease?.outcome === "accepted") {
+        return { error: "publish_blog_dispatch_already_accepted" as const };
+      }
+      if (isPublishBlogDispatcherCall && !isPublishBlogDispatchCandidate(current, new Date(nowMs))) {
+        return { error: "publish_blog_dispatcher_candidate_rejected" as const };
+      }
       if (existingLease && Date.parse(existingLease.expires_at) > nowMs) {
-        if (existingLease.key === idempotencyKey) return { replay: existingLease, current };
         return { error: "generic_notify_lease_active" as const };
       }
 
@@ -1068,7 +1107,7 @@ ${failCommand}
     }
   }
 
-  if (!wake.ok && !isGenericSchedulerCall
+  if (!wake.ok && !isLeaseGuardedNotifyCall
       && (externalDeliveryKey(workPayload) || workPayload.runtime_retry_contract === "scheduled_launch_v2_retry_v1")) {
     if (!useLocalMode) {
       return NextResponse.json({ error: "scheduled_launch_retry_requires_local_atomic_guard" }, { status: 503 });
@@ -1127,7 +1166,7 @@ ${failCommand}
       wakeMode: wake.mode,
       dispatchSessionKey: wake.sessionKey || null,
       idempotent: false,
-      outcome: isGenericSchedulerCall ? "failed" : undefined,
+      outcome: isLeaseGuardedNotifyCall ? "failed" : undefined,
       error: wake.error || null,
     }, { status: 503 });
   }
@@ -1161,6 +1200,6 @@ ${failCommand}
     dispatchSessionId: typeof workPayload.dispatch_session_id === "string" ? workPayload.dispatch_session_id : null,
     dispatchSessionKey: wake.sessionKey || null,
     idempotent: false,
-    outcome: isGenericSchedulerCall ? "accepted" : undefined,
+    outcome: isLeaseGuardedNotifyCall ? "accepted" : undefined,
   });
 }

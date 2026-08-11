@@ -3,20 +3,19 @@ import { getLocalMissionControlUser, isLocalAuthDisabled } from "@/lib/auth/loca
 import { query } from "@/lib/db/postgres";
 import {
   buildSchedulerStatusResponse,
-  type SchedulerConfigRow,
   type WorkItemSchedulerHealth,
 } from "@/lib/scheduler/status";
 import { createServiceClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
+import { PUBLISH_BLOG_DISPATCHER_CRON_NAME } from "@/lib/work-items/publish-blog-dispatcher";
 
 export const dynamic = "force-dynamic";
 
 /**
  * GET /api/scheduler/status
  *
- * Canonical control comes from scheduler_config. cron_health contributes only
- * runtime observations, so observation failures return degraded/unknown with
- * HTTP 200 rather than making scheduler control unavailable.
+ * runtime-workers is the sole dispatcher and health writer. Mission Control
+ * only observes its cron_health row, including the effective enabled flag.
  */
 export async function GET() {
   const useLocalMode = isLocalAuthDisabled();
@@ -33,37 +32,31 @@ export async function GET() {
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   if (useLocalMode) {
-    const configResult = await query<SchedulerConfigRow>(`select key, value from scheduler_config`);
     let health: WorkItemSchedulerHealth | null = null;
     let healthError: unknown = null;
     try {
       const healthResult = await query<WorkItemSchedulerHealth>(
-        `select last_run_at, last_status, last_error, rows_affected
+        `select enabled, schedule, last_run_at, last_status, last_error, rows_affected
          from cron_health where cron_name = $1 limit 1`,
-        ["work-item-scheduler"],
+        [PUBLISH_BLOG_DISPATCHER_CRON_NAME],
       );
       health = healthResult.rows[0] || null;
     } catch (error) {
       healthError = error;
     }
 
-    const response = buildSchedulerStatusResponse(configResult.rows || [], health, healthError);
+    const response = buildSchedulerStatusResponse(health, healthError);
     return NextResponse.json(response.body, { status: response.status });
   }
 
   const supabase = createServiceClient();
-  const configResult = await supabase.from("scheduler_config").select("key, value");
-  if (configResult.error) {
-    return NextResponse.json({ error: configResult.error.message }, { status: 500 });
-  }
-
   let health: WorkItemSchedulerHealth | null = null;
   let healthError: unknown = null;
   try {
     const healthResult = await supabase
       .from("cron_health")
-      .select("last_run_at, last_status, last_error, rows_affected")
-      .eq("cron_name", "work-item-scheduler")
+      .select("enabled, schedule, last_run_at, last_status, last_error, rows_affected")
+      .eq("cron_name", PUBLISH_BLOG_DISPATCHER_CRON_NAME)
       .maybeSingle();
     if (healthResult.error) healthError = healthResult.error;
     else health = (healthResult.data as WorkItemSchedulerHealth | null) || null;
@@ -71,10 +64,6 @@ export async function GET() {
     healthError = error;
   }
 
-  const response = buildSchedulerStatusResponse(
-    (configResult.data || []) as SchedulerConfigRow[],
-    health,
-    healthError,
-  );
+  const response = buildSchedulerStatusResponse(health, healthError);
   return NextResponse.json(response.body, { status: response.status });
 }

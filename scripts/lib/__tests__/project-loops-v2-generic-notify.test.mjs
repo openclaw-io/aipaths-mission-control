@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import ts from "typescript";
+import {
+  PUBLISH_BLOG_DISPATCHER_CALLER,
+  isPublishBlogDispatchCandidate,
+} from "../../../src/lib/work-items/publish-blog-dispatcher.ts";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
@@ -14,6 +18,10 @@ const scheduledLaunchRuntime = transpile(resolve(repoRoot, "src/lib/work-items/s
 const externalDeliveryShouldNotRun = {
   claimExternalDelivery: async () => { throw new Error("external delivery should not be claimed in generic notify regression tests"); },
   markExternalDeliveryPreDeliveryFailure: async () => { throw new Error("external delivery failure should not run in generic notify regression tests"); },
+};
+const publishBlogDispatcherContract = {
+  PUBLISH_BLOG_DISPATCHER_CALLER,
+  isPublishBlogDispatchCandidate,
 };
 
 function transpile(sourcePath, requires = {}, globals = {}) {
@@ -81,6 +89,8 @@ test("generic scheduler notify revalidates the locked current row before wake", 
   assert.match(route, /withTransaction[\s\S]*wakeAgent\(/);
   assert.match(route, /idempotencyKey/);
   assert.match(route, /generic_notify_lease/);
+  assert.match(route, /caller === PUBLISH_BLOG_DISPATCHER_CALLER/);
+  assert.match(route, /isPublishBlogDispatchCandidate\(current/);
 });
 
 test("generic scheduler notify does not wake a live-gate blocked row", async () => {
@@ -126,6 +136,7 @@ test("generic scheduler notify does not wake a live-gate blocked row", async () 
     "@/lib/work-items/external-delivery": externalDeliveryShouldNotRun,
     "@/lib/work-items/scheduled-launch-runtime": scheduledLaunchRuntime,
     "@/lib/work-items/status-payload": statusPayload,
+    "@/lib/work-items/publish-blog-dispatcher": publishBlogDispatcherContract,
     "@/lib/youtube-launch-state": { evaluateYouTubeLaunchActionReadiness: () => ({ ok: true, failures: [], remediation: null }) },
   }, {
     process: { env: { AGENT_API_KEY: "test-key" }, cwd: () => repoRoot },
@@ -191,7 +202,7 @@ function createNotifyHarness({
     "node:crypto": { randomUUID: () => "30000000-0000-4000-8000-000000000030" },
     "next/server": { NextResponse: { json: (payload, init = {}) => ({ payload, status: init.status || 200 }) } },
     "@supabase/supabase-js": { createClient: () => ({}) },
-    "@/lib/agent-routing": { AGENT_ROUTING: { systems: { agentId: "systems" } }, isRoutedAgent: (agent) => agent === "systems" },
+    "@/lib/agent-routing": { AGENT_ROUTING: { systems: { agentId: "systems" }, dev: { agentId: "dev" } }, isRoutedAgent: (agent) => agent === "systems" || agent === "dev" },
     "@/lib/auth/local": { isLocalAuthDisabled: () => true },
     "@/lib/db/postgres": {
       query: async (sql) => {
@@ -238,6 +249,7 @@ function createNotifyHarness({
     "@/lib/work-items/external-delivery": externalDeliveryShouldNotRun,
     "@/lib/work-items/scheduled-launch-runtime": scheduledLaunchRuntime,
     "@/lib/work-items/status-payload": statusPayload,
+    "@/lib/work-items/publish-blog-dispatcher": publishBlogDispatcherContract,
     "@/lib/youtube-launch-state": { evaluateYouTubeLaunchActionReadiness: () => launchReadiness },
   }, {
     process: {
@@ -251,13 +263,13 @@ function createNotifyHarness({
     clearTimeout,
   });
 
-  const post = (idempotencyKey, identity = contract.buildGenericNotifyClassificationIdentity(row)) => route.POST({
+  const post = (idempotencyKey, identity = contract.buildGenericNotifyClassificationIdentity(row), options = {}) => route.POST({
     headers: { get: (key) => key.toLowerCase() === "authorization" ? "Bearer test-key" : null },
     json: async () => ({
       workItemId: row.id,
-      agent: "systems",
-      action: "created",
-      caller: "generic_scheduler_v1",
+      agent: options.agent || "systems",
+      action: options.action || "created",
+      caller: options.caller || "generic_scheduler_v1",
       idempotencyKey,
       expectedClassificationIdentity: identity,
     }),
@@ -301,6 +313,234 @@ const atomicReadyRow = {
   updated_at: "2026-08-04T13:29:00.000Z",
   payload: { pipeline_type: "generic", preserved: { nested: true } },
 };
+
+const atomicPublishBlogRow = {
+  ...structuredClone(atomicReadyRow),
+  id: "10000000-0000-4000-8000-000000000175",
+  title: "Publish approved blog",
+  owner_agent: "dev",
+  target_agent_id: "dev",
+  source_type: "service",
+  source_id: "20000000-0000-4000-8000-000000000175",
+  scheduled_for: "2026-08-04T13:29:00.000Z",
+  payload: {
+    pipeline_type: "blog",
+    pipeline_item_id: "20000000-0000-4000-8000-000000000175",
+    relation_type: "publish",
+    action: "publish_blog",
+    schedule_kind: "publication",
+    dedupe_key: "20000000-0000-4000-8000-000000000175:publish_blog",
+  },
+};
+
+test("dedicated publish_blog caller reuses atomic lease/CAS and same-key replay wakes once", async () => {
+  const harness = createNotifyHarness({ initialRow: atomicPublishBlogRow });
+  const identity = harness.contract.buildGenericNotifyClassificationIdentity(atomicPublishBlogRow);
+  const key = `publish-blog:${atomicPublishBlogRow.id}:attempt-1`;
+  const options = { caller: "publish_blog_dispatcher_v1", agent: "dev" };
+  const first = await harness.post(key, identity, options);
+  const replay = await harness.post(key, undefined, options);
+
+  assert.equal(first.status, 200);
+  assert.equal(replay.status, 200);
+  assert.equal(replay.payload.idempotent, true);
+  assert.equal(harness.getSpawnCount(), 1);
+});
+
+test("dedicated publish_blog caller requires its exact request contract", async () => {
+  const options = { caller: "publish_blog_dispatcher_v1", agent: "dev" };
+  const wrongActionHarness = createNotifyHarness({ initialRow: atomicPublishBlogRow });
+  const wrongAction = await wrongActionHarness.post(
+    `publish-blog:${atomicPublishBlogRow.id}:attempt-1`,
+    undefined,
+    { ...options, action: "unblocked" },
+  );
+  assert.equal(wrongAction.status, 400);
+  assert.equal(wrongAction.payload.error, "publish_blog_dispatcher_request_invalid");
+  assert.equal(wrongActionHarness.getSpawnCount(), 0);
+
+  const wrongKeyHarness = createNotifyHarness({ initialRow: atomicPublishBlogRow });
+  const wrongKey = await wrongKeyHarness.post("generic-notify-valid-but-wrong-0001", undefined, options);
+  assert.equal(wrongKey.status, 400);
+  assert.equal(wrongKey.payload.error, "publish_blog_dispatcher_request_invalid");
+  assert.equal(wrongKeyHarness.getSpawnCount(), 0);
+});
+
+test("dedicated publish_blog caller replays an accepted key after claim without waking again", async () => {
+  const claimedRow = structuredClone(atomicPublishBlogRow);
+  const key = `publish-blog:${claimedRow.id}:attempt-1`;
+  claimedRow.status = "in_progress";
+  claimedRow.payload.generic_notify_lease = {
+    version: "generic_notify_lease_v1",
+    key,
+    outcome: "accepted",
+    leased_at: "2026-08-04T13:28:00.000Z",
+    outcome_at: "2026-08-04T13:28:01.000Z",
+    expires_at: "2026-08-04T13:29:00.000Z",
+    mode: "hermes_cli_spawn",
+    session_key: "existing-session",
+    error: null,
+  };
+  const harness = createNotifyHarness({ initialRow: claimedRow });
+  const response = await harness.post(key, undefined, {
+    caller: "publish_blog_dispatcher_v1",
+    agent: "dev",
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.payload.idempotent, true);
+  assert.equal(response.payload.outcome, "accepted");
+  assert.equal(harness.getSpawnCount(), 0);
+});
+
+test("dedicated publish_blog caller replays its committed lease after claim", async () => {
+  const claimedRow = structuredClone(atomicPublishBlogRow);
+  const key = `publish-blog:${claimedRow.id}:attempt-1`;
+  claimedRow.status = "in_progress";
+  claimedRow.payload.generic_notify_lease = {
+    version: "generic_notify_lease_v1",
+    key,
+    outcome: "leased",
+    leased_at: "2026-08-04T13:29:59.000Z",
+    outcome_at: null,
+    expires_at: "2026-08-04T13:31:00.000Z",
+    mode: null,
+    session_key: null,
+    error: null,
+  };
+  const harness = createNotifyHarness({ initialRow: claimedRow });
+  const response = await harness.post(key, undefined, {
+    caller: "publish_blog_dispatcher_v1",
+    agent: "dev",
+  });
+
+  assert.equal(response.status, 202);
+  assert.equal(response.payload.idempotent, true);
+  assert.equal(response.payload.outcome, "leased");
+  assert.equal(response.payload.pending, true);
+  assert.equal(harness.getSpawnCount(), 0);
+});
+
+test("dedicated publish_blog caller never opens a new attempt after acceptance", async () => {
+  const acceptedRow = structuredClone(atomicPublishBlogRow);
+  acceptedRow.payload.generic_notify_lease = {
+    version: "generic_notify_lease_v1",
+    key: `publish-blog:${acceptedRow.id}:attempt-1`,
+    outcome: "accepted",
+    leased_at: "2026-08-04T13:28:00.000Z",
+    outcome_at: "2026-08-04T13:28:01.000Z",
+    expires_at: "2026-08-04T13:29:00.000Z",
+    mode: "hermes_cli_spawn",
+    session_key: "existing-session",
+    error: null,
+  };
+  const harness = createNotifyHarness({ initialRow: acceptedRow });
+  const response = await harness.post(
+    `publish-blog:${acceptedRow.id}:attempt-2`,
+    undefined,
+    { caller: "publish_blog_dispatcher_v1", agent: "dev" },
+  );
+
+  assert.equal(response.status, 409);
+  assert.equal(response.payload.error, "publish_blog_dispatch_already_accepted");
+  assert.equal(harness.getSpawnCount(), 0);
+});
+
+test("accepted publish_blog lease blocks a new key even after the agent claims the row", async () => {
+  const acceptedRow = structuredClone(atomicPublishBlogRow);
+  acceptedRow.status = "in_progress";
+  acceptedRow.payload.generic_notify_lease = {
+    version: "generic_notify_lease_v1",
+    key: `publish-blog:${acceptedRow.id}:attempt-1`,
+    outcome: "accepted",
+    leased_at: "2026-08-04T13:28:00.000Z",
+    outcome_at: "2026-08-04T13:28:01.000Z",
+    expires_at: "2026-08-04T13:29:00.000Z",
+    mode: "hermes_cli_spawn",
+    session_key: "existing-session",
+    error: null,
+  };
+  const harness = createNotifyHarness({ initialRow: acceptedRow });
+  const response = await harness.post(
+    `publish-blog:${acceptedRow.id}:attempt-2`,
+    undefined,
+    { caller: "publish_blog_dispatcher_v1", agent: "dev" },
+  );
+
+  assert.equal(response.status, 409);
+  assert.equal(response.payload.error, "publish_blog_dispatch_already_accepted");
+  assert.equal(harness.getSpawnCount(), 0);
+});
+
+test("dedicated publish_blog caller rejects stale CAS and non-publish contracts before wake", async () => {
+  const staleHarness = createNotifyHarness({ initialRow: atomicPublishBlogRow });
+  const staleIdentity = staleHarness.contract.buildGenericNotifyClassificationIdentity({
+    ...atomicPublishBlogRow,
+    updated_at: "2026-08-04T13:28:00.000Z",
+  });
+  const options = { caller: "publish_blog_dispatcher_v1", agent: "dev" };
+  const stale = await staleHarness.post(`publish-blog:${atomicPublishBlogRow.id}:attempt-1`, staleIdentity, options);
+  assert.equal(stale.status, 409);
+  assert.equal(staleHarness.getSpawnCount(), 0);
+
+  const invalidHarness = createNotifyHarness({ initialRow: {
+    ...atomicPublishBlogRow,
+    payload: { ...atomicPublishBlogRow.payload, action: "publish_guide" },
+  } });
+  const invalid = await invalidHarness.post(
+    `publish-blog:${atomicPublishBlogRow.id}:attempt-1`,
+    undefined,
+    options,
+  );
+  assert.equal(invalid.status, 409);
+  assert.equal(invalid.payload.error, "publish_blog_dispatcher_candidate_rejected");
+  assert.equal(invalidHarness.getSpawnCount(), 0);
+});
+
+test("publish_blog classifier requires exact relation and source identity", () => {
+  assert.equal(isPublishBlogDispatchCandidate(atomicPublishBlogRow, new Date("2026-08-04T13:30:00.000Z")), true);
+  assert.equal(isPublishBlogDispatchCandidate({
+    ...atomicPublishBlogRow,
+    source_type: "pipeline_item",
+  }, new Date("2026-08-04T13:30:00.000Z")), true);
+  assert.equal(isPublishBlogDispatchCandidate({
+    ...atomicPublishBlogRow,
+    source_id: "20000000-0000-4000-8000-000000000999",
+  }, new Date("2026-08-04T13:30:00.000Z")), false);
+  assert.equal(isPublishBlogDispatchCandidate({
+    ...atomicPublishBlogRow,
+    payload: { ...atomicPublishBlogRow.payload, relation_type: "review" },
+  }, new Date("2026-08-04T13:30:00.000Z")), false);
+  assert.equal(isPublishBlogDispatchCandidate({
+    ...atomicPublishBlogRow,
+    payload: { ...atomicPublishBlogRow.payload, dedupe_key: "wrong" },
+  }, new Date("2026-08-04T13:30:00.000Z")), false);
+  assert.equal(isPublishBlogDispatchCandidate({
+    ...atomicPublishBlogRow,
+    payload: { ...atomicPublishBlogRow.payload, requires_human_approval: true },
+  }, new Date("2026-08-04T13:30:00.000Z")), false);
+});
+
+test("Mission Control does not duplicate the runtime-workers dispatcher or health writer", () => {
+  assert.equal(
+    existsSync(resolve(repoRoot, "src/app/api/scheduler/publish-blog/route.ts")),
+    false,
+  );
+  const classifier = readFileSync(
+    resolve(repoRoot, "src/lib/work-items/publish-blog-dispatcher.ts"),
+    "utf8",
+  );
+  assert.doesNotMatch(classifier, /runPublishBlogDispatcher|planPublishBlogDispatch|reportHealth|loadCandidates/);
+});
+
+test("Supabase blog publication payload has the same dedupe key as local creation", () => {
+  const source = readFileSync(resolve(repoRoot, "src/app/api/blogs/[id]/transition/route.ts"), "utf8");
+  const cloudStart = source.indexOf("async function ensurePublishWorkItem(");
+  const localStart = source.indexOf("async function ensurePublishWorkItemLocal(");
+  const cloudImplementation = source.slice(cloudStart, localStart);
+
+  assert.match(cloudImplementation, /dedupe_key:\s*`\$\{item\.id\}:publish_blog`/);
+});
 
 test("generic scheduler notify does not wake scheduled launch public actions before launch gates pass", async () => {
   const launchRow = {
