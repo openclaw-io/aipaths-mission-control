@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
 import { realpath } from "node:fs/promises";
+import { homedir } from "node:os";
+import { isPathWithinAllowedRoots, resolveAllowedRepositoryRoots } from "./repository-roots.mjs";
 
-const ALLOWED_REPOSITORY_ROOT = "/Users/joaco/openclaw";
 const SHA_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const UNSAFE_PATH_PATTERN = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u;
 
@@ -16,7 +17,7 @@ export type RegisteredRepository = {
 function gitEnv(): NodeJS.ProcessEnv {
   return {
     PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-    HOME: "/Users/joaco",
+    HOME: homedir(),
     NODE_ENV: process.env.NODE_ENV || "production",
     GIT_NO_REPLACE_OBJECTS: "1",
     GIT_CONFIG_NOSYSTEM: "1",
@@ -39,10 +40,6 @@ export function execFileChecked(file: string, args: string[], options: { cwd?: s
   });
 }
 
-function isWithinRoot(candidate: string, root: string) {
-  return candidate === root || candidate.startsWith(`${root}/`);
-}
-
 function safePath(value: string) {
   return value.length > 0 && !UNSAFE_PATH_PATTERN.test(value);
 }
@@ -61,18 +58,18 @@ async function git(repositoryPath: string, args: string[], maxBuffer?: number) {
 /** Capture canonical, server-owned identity for an operator-registered repository. */
 export async function inspectRepositoryRegistration(repositoryPath: string) {
   if (!safePath(repositoryPath)) throw new Error("repository_path_controls_forbidden");
-  const [allowedRoot, requestedPath] = await Promise.all([
-    realpath(ALLOWED_REPOSITORY_ROOT),
-    realpath(repositoryPath),
-  ]).catch(() => { throw new Error("repository_path_invalid"); });
-  if (!isWithinRoot(requestedPath, allowedRoot)) throw new Error("repository_outside_allowed_root");
+  const allowedRoots = await resolveAllowedRepositoryRoots();
+  const requestedPath = await realpath(repositoryPath).catch(() => { throw new Error("repository_path_invalid"); });
+  if (!isPathWithinAllowedRoots(requestedPath, allowedRoots)) throw new Error("repository_outside_allowed_root");
   const rootRaw = (await git(requestedPath, ["rev-parse", "--show-toplevel"]).catch(() => {
     throw new Error("repository_git_required");
   })).stdout.trim();
   const commonRaw = (await git(requestedPath, ["rev-parse", "--path-format=absolute", "--git-common-dir"])).stdout.trim();
   const objectFormat = (await git(requestedPath, ["rev-parse", "--show-object-format"])).stdout.trim();
   const [canonicalRoot, gitCommonDir] = await Promise.all([realpath(rootRaw), realpath(commonRaw)]);
-  if (!isWithinRoot(canonicalRoot, allowedRoot) || !isWithinRoot(requestedPath, canonicalRoot)) {
+  if (!isPathWithinAllowedRoots(canonicalRoot, allowedRoots)
+      || !isPathWithinAllowedRoots(gitCommonDir, allowedRoots)
+      || !isPathWithinAllowedRoots(requestedPath, [canonicalRoot], { allowRoot: true })) {
     throw new Error("repository_git_root_invalid");
   }
   if (objectFormat !== "sha1" && objectFormat !== "sha256") throw new Error("repository_object_format_invalid");
@@ -115,14 +112,24 @@ export async function verifyRepositoryCommit(
   if (!SHA_PATTERN.test(registeredBaseSha) || registeredBaseSha.length !== expectedLength) {
     throw new Error("implementation_registered_base_sha_invalid");
   }
-  let allowedRoot: string;
+  let allowedRoots: string[];
   let requestedPath: string;
   try {
-    [allowedRoot, requestedPath] = await Promise.all([realpath(ALLOWED_REPOSITORY_ROOT), realpath(repositoryPath)]);
+    allowedRoots = await resolveAllowedRepositoryRoots();
+  } catch (error) {
+    if (error instanceof Error && error.message === "repository_allowed_roots_unavailable") {
+      throw new Error("implementation_repository_allowed_roots_unavailable");
+    }
+    throw error;
+  }
+  try {
+    requestedPath = await realpath(repositoryPath);
   } catch {
     throw new Error("implementation_repository_path_invalid");
   }
-  if (!isWithinRoot(requestedPath, allowedRoot)) throw new Error("implementation_repository_outside_allowed_root");
+  if (!isPathWithinAllowedRoots(requestedPath, allowedRoots)) {
+    throw new Error("implementation_repository_outside_allowed_root");
+  }
 
   let identity: Awaited<ReturnType<typeof inspectRepositoryRegistration>>;
   try {
