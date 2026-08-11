@@ -4,7 +4,6 @@ import test from "node:test";
 import pg from "pg";
 
 import {
-  LAUNCHER_SCHEDULE_MINUTES,
   buildSchedulerConfigResponse,
   parseSchedulerPatch,
 } from "../../../src/lib/scheduler/config.ts";
@@ -22,98 +21,120 @@ const validRows = [
   { key: "schedule_minutes", value: "5" },
 ];
 
-test("scheduler status uses explicit boolean parsing and fails closed on absent/invalid enabled", () => {
-  for (const value of [undefined, "TRUE", "yes", "1", "", " true "]) {
-    const rows = validRows.filter((row) => row.key !== "enabled");
-    if (value !== undefined) rows.push({ key: "enabled", value });
-    const status = buildWorkItemSchedulerStatus(rows, null);
-    assert.equal(status.enabled, false);
-    assert.equal(status.state, "degraded");
-    assert.match(status.last_error || "", /enabled/i);
-  }
-
-  const paused = buildWorkItemSchedulerStatus(
-    validRows.map((row) => row.key === "enabled" ? { ...row, value: "false" } : row),
-    null,
-  );
-  assert.equal(paused.enabled, false);
-  assert.equal(paused.state, "paused");
-});
-
-test("status never advertises a config cadence that disagrees with the launcher", () => {
-  const mismatch = buildWorkItemSchedulerStatus(
-    validRows.map((row) => row.key === "schedule_minutes" ? { ...row, value: "10" } : row),
-    null,
-  );
-
-  assert.equal(mismatch.state, "degraded");
-  assert.equal(mismatch.schedule_minutes, 5);
-  assert.equal(mismatch.schedule, "every 5 min");
-  assert.match(mismatch.last_error || "", /schedule_minutes/i);
-  assert.equal(Number.isInteger(mismatch.schedule_minutes), true);
-  assert.equal(LAUNCHER_SCHEDULE_MINUTES, 5);
-});
-
-test("status degrades for every missing, malformed, or out-of-range canonical control", () => {
-  const invalidCases = [
-    ["max_concurrent", undefined],
-    ["max_concurrent", "0"],
-    ["max_concurrent", "11"],
-    ["max_concurrent", "2.5"],
-    ["daily_budget_usd", undefined],
-    ["daily_budget_usd", "0"],
-    ["daily_budget_usd", "100001"],
-    ["daily_budget_usd", "1.5"],
-    ["schedule_minutes", undefined],
-  ];
-
-  for (const [key, value] of invalidCases) {
-    const rows = validRows.filter((row) => row.key !== key);
-    if (value !== undefined) rows.push({ key, value });
-    const status = buildWorkItemSchedulerStatus(rows, {
-      last_run_at: "2026-07-27T12:00:00.000Z",
-      last_status: "ok",
-      last_error: null,
-      rows_affected: 0,
-    });
-    assert.equal(status.state, "degraded", `${key}=${String(value)} must degrade`);
-    assert.match(status.last_error || "", new RegExp(key));
-  }
-});
-
-test("an idle interval job remains scheduled between successful runs", () => {
-  const status = buildWorkItemSchedulerStatus(validRows, {
-    last_run_at: "2026-07-27T12:00:00.000Z",
+function runtimeHealth(overrides = {}) {
+  return {
+    enabled: true,
+    schedule: "every 5 min",
+    last_run_at: "2026-08-11T13:58:00.000Z",
     last_status: "ok",
     last_error: null,
     rows_affected: 2,
-  });
+    ...overrides,
+  };
+}
+
+test("runtime cron_health is the only effective enabled authority", () => {
+  const paused = buildWorkItemSchedulerStatus(runtimeHealth({ enabled: false }));
+  assert.equal(paused.enabled, false);
+  assert.equal(paused.state, "paused");
+
+  const scheduled = buildWorkItemSchedulerStatus(
+    runtimeHealth({ enabled: true }),
+    null,
+    new Date("2026-08-11T14:00:00.000Z"),
+  );
+  assert.equal(scheduled.enabled, true);
+  assert.equal(scheduled.state, "scheduled");
+
+  const malformed = buildWorkItemSchedulerStatus(runtimeHealth({ enabled: "true" }));
+  assert.equal(malformed.enabled, false);
+  assert.equal(malformed.state, "degraded");
+  assert.match(malformed.last_error || "", /enabled/i);
+});
+
+test("an idle interval job remains scheduled between successful runs", () => {
+  const status = buildWorkItemSchedulerStatus(
+    runtimeHealth(),
+    null,
+    new Date("2026-08-11T14:00:00.000Z"),
+  );
 
   assert.equal(status.state, "scheduled");
   assert.equal(status.health, "healthy");
+  assert.equal(status.cron_name, "publish-blog-dispatcher");
   assert.equal(status.schedule, "every 5 min");
   assert.equal(status.schedule_minutes, 5);
   assert.equal(status.rows_affected, 2);
 });
 
+test("dispatcher health degrades when last_status is ok but observation is stale", () => {
+  const status = buildWorkItemSchedulerStatus(
+    runtimeHealth({ last_run_at: "2026-08-11T13:30:00.000Z", rows_affected: 0 }),
+    null,
+    new Date("2026-08-11T14:00:00.000Z"),
+  );
+
+  assert.equal(status.state, "degraded");
+  assert.equal(status.health, "degraded");
+  assert.equal(status.fresh, false);
+  assert.match(status.last_error, /stale/i);
+});
+
+test("dispatcher health is fresh inside the 660 second watchdog window", () => {
+  const status = buildWorkItemSchedulerStatus(
+    runtimeHealth({ last_run_at: "2026-08-11T13:50:00.000Z", rows_affected: 0 }),
+    null,
+    new Date("2026-08-11T14:00:00.000Z"),
+  );
+
+  assert.equal(status.state, "scheduled");
+  assert.equal(status.health, "healthy");
+  assert.equal(status.fresh, true);
+});
+
+test("enabled dispatcher degrades when no health observation exists", () => {
+  const status = buildWorkItemSchedulerStatus(
+    null,
+    null,
+    new Date("2026-08-11T14:00:00.000Z"),
+  );
+
+  assert.equal(status.state, "degraded");
+  assert.equal(status.health, "unknown");
+  assert.equal(status.fresh, false);
+  assert.match(status.last_error || "", /health.*missing|missing.*health/i);
+});
+
 test("cron_health read failures are observability degradation with HTTP 200 control", () => {
-  const response = buildSchedulerStatusResponse(validRows, null, new Error("cron_health timeout"));
+  const response = buildSchedulerStatusResponse(null, new Error("cron_health timeout"));
 
   assert.equal(response.status, 200);
-  assert.equal(response.body.enabled, true);
+  assert.equal(response.body.enabled, false);
   assert.equal(response.body.state, "degraded");
   assert.equal(response.body.health, "unknown");
   assert.equal(response.body.last_status, "unknown");
   assert.match(response.body.last_error || "", /cron_health timeout/);
 });
 
+test("status route observes only the dedicated publish_blog dispatcher health", () => {
+  const source = readFileSync(
+    new URL("../../../src/app/api/scheduler/status/route.ts", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(source, /PUBLISH_BLOG_DISPATCHER_CRON_NAME/);
+  assert.doesNotMatch(source, /["']work-item-scheduler["']/);
+  assert.doesNotMatch(source, /scheduler_config/);
+  assert.match(source, /select enabled, schedule, last_run_at, last_status, last_error, rows_affected/);
+});
+
 test("failed health reports remain degraded without claiming the launcher was unloaded", () => {
-  const status = buildWorkItemSchedulerStatus(validRows, {
-    last_run_at: "2026-07-27T12:00:00.000Z",
+  const status = buildWorkItemSchedulerStatus(runtimeHealth({
+    last_run_at: "2026-08-11T13:59:00.000Z",
     last_status: "error",
     last_error: "worker timeout",
     rows_affected: 0,
-  });
+  }), null, new Date("2026-08-11T14:00:00.000Z"));
 
   assert.equal(status.state, "degraded");
   assert.equal(status.health, "degraded");
