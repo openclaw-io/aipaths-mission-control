@@ -6,7 +6,6 @@ export const AGENT_ROUTING = {
   dev: { agentId: "dev", channelId: "1473373777755639982" },
   community: { agentId: "community", channelId: "1473373793375490058" },
   editor: { agentId: "editor", channelId: "1473373703197691934" },
-  legal: { agentId: "legal", channelId: "1473373703197691934" },
   systems: { agentId: "systems", channelId: "1493166685543206924" },
 } as const;
 

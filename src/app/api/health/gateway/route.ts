@@ -16,7 +16,6 @@ const DEFAULT_HERMES_GATEWAY_LABELS = [
   "ai.hermes.gateway-dev",
   "ai.hermes.gateway-community",
   "ai.hermes.gateway-editor",
-  "ai.hermes.gateway-legal",
 ];
 
 function configuredLabels() {
