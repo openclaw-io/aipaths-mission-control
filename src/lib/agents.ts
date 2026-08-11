@@ -1,6 +1,6 @@
 export const AGENT_IDS = [
   "strategist", "youtube", "content", "marketing",
-  "dev", "community", "editor", "legal", "gonza",
+  "dev", "community", "editor", "gonza",
 ] as const;
 
 export type AgentId = (typeof AGENT_IDS)[number];
@@ -21,7 +21,6 @@ export const AGENTS: AgentMeta[] = [
   { id: "dev", name: "Dev Director", emoji: "💻", role: "Website, deployments, infrastructure", badgeClass: "bg-blue-500/20 text-blue-400" },
   { id: "community", name: "Community Director", emoji: "🏘️", role: "Discord community management", badgeClass: "bg-teal-500/20 text-teal-400" },
   { id: "editor", name: "Editor", emoji: "🎨", role: "Content editing, quality", badgeClass: "bg-pink-500/20 text-pink-400" },
-  { id: "legal", name: "Legal", emoji: "⚖️", role: "Legal compliance, terms", badgeClass: "bg-gray-500/20 text-gray-400" },
   { id: "gonza", name: "Gonza", emoji: "👤", role: "Owner, oversight, approvals", badgeClass: "bg-indigo-500/20 text-indigo-400" },
 ];
 
