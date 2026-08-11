@@ -1,20 +1,20 @@
 import { execFile } from "node:child_process";
 import { realpath } from "node:fs/promises";
+import { homedir } from "node:os";
+import {
+  isPathWithinAllowedRoots,
+  resolveAllowedRepositoryRoots,
+} from "../../src/lib/work-items/repository-roots.mjs";
 
-export const ALLOWED_REPOSITORY_ROOT = "/Users/joaco/openclaw";
 export const REPOSITORY_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 const UNSAFE_PATH_PATTERN = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u;
-
-function isStrictlyWithin(candidate, root) {
-  return candidate.startsWith(`${root}/`);
-}
 
 function execFileChecked(file, args) {
   return new Promise((resolve, reject) => {
     execFile(file, args, {
       env: {
         PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-        HOME: "/Users/joaco",
+        HOME: homedir(),
         GIT_NO_REPLACE_OBJECTS: "1",
         GIT_CONFIG_NOSYSTEM: "1",
         GIT_CONFIG_GLOBAL: "/dev/null",
@@ -45,17 +45,22 @@ export async function inspectRepositoryForRegistration(repositoryPath) {
   if (typeof repositoryPath !== "string" || !repositoryPath || UNSAFE_PATH_PATTERN.test(repositoryPath)) {
     throw new Error("repository_path_invalid");
   }
-  let allowedRoot;
+  let allowedRoots;
   let requestedPath;
   try {
-    [allowedRoot, requestedPath] = await Promise.all([
-      realpath(ALLOWED_REPOSITORY_ROOT),
-      realpath(repositoryPath),
-    ]);
+    allowedRoots = await resolveAllowedRepositoryRoots();
+  } catch (error) {
+    if (error instanceof Error && error.message === "repository_allowed_roots_unavailable") throw error;
+    throw new Error("repository_path_invalid");
+  }
+  try {
+    requestedPath = await realpath(repositoryPath);
   } catch {
     throw new Error("repository_path_invalid");
   }
-  if (!isStrictlyWithin(requestedPath, allowedRoot)) throw new Error("repository_outside_allowed_root");
+  if (!isPathWithinAllowedRoots(requestedPath, allowedRoots, { allowRoot: false })) {
+    throw new Error("repository_outside_allowed_root");
+  }
 
   let rootRaw;
   let commonRaw;
@@ -80,7 +85,9 @@ export async function inspectRepositoryForRegistration(repositoryPath) {
   } catch {
     throw new Error("repository_git_identity_unavailable");
   }
-  if (!isStrictlyWithin(canonicalRoot, allowedRoot) || (requestedPath !== canonicalRoot && !requestedPath.startsWith(`${canonicalRoot}/`))) {
+  if (!isPathWithinAllowedRoots(canonicalRoot, allowedRoots, { allowRoot: false })
+      || !isPathWithinAllowedRoots(gitCommonDir, allowedRoots, { allowRoot: false })
+      || !isPathWithinAllowedRoots(requestedPath, [canonicalRoot], { allowRoot: true })) {
     throw new Error("repository_git_root_invalid");
   }
   const format = objectFormat.stdout.trim();

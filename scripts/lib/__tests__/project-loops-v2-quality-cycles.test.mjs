@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { realpath } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -17,12 +18,15 @@ import {
   requireMissionControlTestDatabaseUrl,
 } from "../test-postgres-guard.mjs";
 import { REVIEW_CAPABILITY_TTL_MS } from "../reviewer-contract.mjs";
+import { isPathWithinAllowedRoots } from "../../../src/lib/work-items/repository-roots.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const pool = new pg.Pool({ connectionString: requireMissionControlTestDatabaseUrl(), max: 8 });
 const REPOSITORY_PATH = repoRoot;
 const REPOSITORY_KEY = "phase4-test-worktree";
-const TEST_WORKTREE_PREFIX = `/Users/joaco/openclaw/worktrees/.mc-phase4-${process.pid}`;
+const TEST_WORKTREE_ROOT = await mkdtemp(resolve(tmpdir(), "mc-phase4-worktrees-"));
+const TEST_WORKTREE_CANONICAL_ROOT = await realpath(TEST_WORKTREE_ROOT);
+const TEST_WORKTREE_PREFIX = resolve(TEST_WORKTREE_ROOT, `.mc-phase4-${process.pid}`);
 const BUILDER_WORKTREE = `${TEST_WORKTREE_PREFIX}-builder`;
 const cycleWorktrees = new Map();
 let SHA1;
@@ -70,7 +74,11 @@ const qaResult = transpileModule(resolve(repoRoot, "src/lib/qa/result.ts"), {
 });
 const executionInstruction = transpileModule(resolve(repoRoot, "src/lib/loops/execution-instruction.ts"));
 const gitArtifact = transpileModule(resolve(repoRoot, "src/lib/work-items/git-artifact.ts"), {
-  "node:child_process": { execFile }, "node:fs/promises": { realpath },
+  "node:child_process": { execFile }, "node:fs/promises": { realpath }, "node:os": { homedir },
+  "./repository-roots.mjs": {
+    isPathWithinAllowedRoots,
+    resolveAllowedRepositoryRoots: async () => [dirname(repoRoot), TEST_WORKTREE_CANONICAL_ROOT],
+  },
 });
 const createRoute = transpileModule(resolve(repoRoot, "src/app/api/loops/project/create/route.ts"), {
   "node:crypto": { createHash, randomUUID }, "next/server": nextServer,
@@ -188,6 +196,7 @@ after(async () => {
     try { execFileSync("git", ["-C", REPOSITORY_PATH, "worktree", "remove", "--force", path]); } catch {}
   }
   try { execFileSync("git", ["-C", REPOSITORY_PATH, "worktree", "prune"]); } catch {}
+  await rm(TEST_WORKTREE_ROOT, { recursive: true, force: true });
 });
 
 function payload() {
@@ -347,6 +356,13 @@ async function withPhase3MigrationDatabase(run) {
   }
 }
 
+function repositoryRootAcceptedByHistoricalMigration(artifact, suffix) {
+  const forwardSql = readFileSync(resolve(artifact, "forward.sql"), "utf8");
+  const match = forwardSql.match(/canonical_root[^\n]+LIKE\s+'([^']*)%'/i);
+  assert.ok(match?.[1], "historical migration must declare its canonical repository prefix");
+  return `${match[1]}${suffix}`;
+}
+
 async function createCompatibilityTask(client, label) {
   const loopId = (await client.query("insert into loops(name,status) values ($1,'completed') returning id", [label])).rows[0].id;
   const revisionId = (await client.query("insert into loop_plan_revisions(loop_id,revision_number,status) values ($1,1,'draft') returning id", [loopId])).rows[0].id;
@@ -387,9 +403,10 @@ test("phase 4 verify accepts legitimate rejected decisions for failed and cancel
   await withPhase3MigrationDatabase(async (client, artifact) => {
     await client.query(readFileSync(resolve(artifact, "preflight.sql"), "utf8"));
     await client.query(readFileSync(resolve(artifact, "forward.sql"), "utf8"));
+    const historicalRoot = repositoryRootAcceptedByHistoricalMigration(artifact, "verify-terminal-review");
     const repositoryId = (await client.query(`insert into review_repositories
       (key,canonical_root,git_common_dir,object_format,enabled)
-      values ('verify-terminal-review',$1,$2,'sha1',true) returning id`, [repoRoot, resolve(repoRoot, ".git")])).rows[0].id;
+      values ('verify-terminal-review',$1,$2,'sha1',true) returning id`, [historicalRoot, `${historicalRoot}/.git`])).rows[0].id;
 
     for (const runStatus of ["failed", "cancelled"]) {
       const taskId = await createCompatibilityTask(client, `Legitimate ${runStatus} review`);
@@ -498,9 +515,10 @@ test("phase 4 forward/verify/guarded rollback rehearse in disposable Postgres", 
       await client.query(readFileSync(resolve(artifact, "preflight.sql"), "utf8"));
       await client.query(readFileSync(resolve(artifact, "forward.sql"), "utf8"));
       const rehearsalIdentity = await gitArtifact.inspectRepositoryRegistration(REPOSITORY_PATH);
+      const historicalRoot = repositoryRootAcceptedByHistoricalMigration(artifact, "phase4-rehearsal");
       await client.query(`insert into review_repositories(key,canonical_root,git_common_dir,object_format,enabled)
         values ('phase4-rehearsal',$1,$2,$3,true)`,
-      [rehearsalIdentity.canonicalRoot, rehearsalIdentity.gitCommonDir, rehearsalIdentity.objectFormat]);
+      [historicalRoot, `${historicalRoot}/.git`, rehearsalIdentity.objectFormat]);
       await client.query(readFileSync(resolve(artifact, "verify.sql"), "utf8"));
       const columns = await client.query("select count(*)::int n from information_schema.columns where table_name='loop_task_runs' and column_name=any($1)", [["server_session_id", "artifact_sha", "target_run_id", "target_sha"]]);
       assert.equal(columns.rows[0].n, 4);

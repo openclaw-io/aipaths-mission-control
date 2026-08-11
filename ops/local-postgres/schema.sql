@@ -888,7 +888,9 @@ CREATE INDEX IF NOT EXISTS idx_loop_task_reviews_run ON public.loop_task_reviews
 CREATE TABLE IF NOT EXISTS public.review_repositories (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   key text NOT NULL UNIQUE CHECK (key ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$'),
-  canonical_root text NOT NULL UNIQUE CHECK (canonical_root LIKE '/Users/joaco/openclaw/%'),
+  canonical_root text NOT NULL UNIQUE CHECK (
+    canonical_root LIKE '/%' AND canonical_root <> '/' AND canonical_root !~ '[[:cntrl:]]'
+  ),
   git_common_dir text NOT NULL UNIQUE,
   object_format text NOT NULL CHECK (object_format IN ('sha1','sha256')),
   enabled boolean NOT NULL DEFAULT true,
