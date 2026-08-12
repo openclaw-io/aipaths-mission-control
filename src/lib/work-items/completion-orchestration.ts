@@ -21,6 +21,12 @@ import {
   markExternalDeliveryPreDeliveryFailure,
 } from "@/lib/work-items/external-delivery";
 import {
+  SPANISH_BLOG_FINAL_PACKAGE_ACTION,
+  SPANISH_BLOG_FINAL_PACKAGE_CONTRACT,
+  assertSpanishBlogHeroResolvable,
+  parseSpanishBlogFinalPackageOutput,
+} from "@/lib/blogs/final-package";
+import {
   buildScheduledLaunchGateBlockedTransition,
   nextScheduledLaunchRetryTransition,
 } from "@/lib/work-items/scheduled-launch-runtime";
@@ -1068,6 +1074,7 @@ async function updatePipelineItem(client: CompletionQueryClient, id: string, sta
   scheduledFor?: string | null;
   publishedAt?: string | null;
   currentUrl?: string | null;
+  contentBody?: string | null;
 } = {}) {
   await client.query(
     `UPDATE public.pipeline_items
@@ -1076,6 +1083,7 @@ async function updatePipelineItem(client: CompletionQueryClient, id: string, sta
             scheduled_for = CASE WHEN $4::boolean THEN $5::timestamptz ELSE scheduled_for END,
             published_at = CASE WHEN $6::boolean THEN $7::timestamptz ELSE published_at END,
             current_url = CASE WHEN $8::boolean THEN $9::text ELSE current_url END,
+            content_body = CASE WHEN $10::boolean THEN $11::text ELSE content_body END,
             updated_at = now()
       WHERE id = $1`,
     [
@@ -1088,6 +1096,8 @@ async function updatePipelineItem(client: CompletionQueryClient, id: string, sta
       extra.publishedAt ?? null,
       extra.currentUrl !== undefined,
       extra.currentUrl ?? null,
+      extra.contentBody !== undefined,
+      extra.contentBody ?? null,
     ],
   );
 }
@@ -1604,6 +1614,33 @@ export async function orchestrateWorkItemCompletion(
 
   const isBlog = pipelineType === "blog";
   const isGuide = pipelineType === "guide";
+  if (isBlog && action === SPANISH_BLOG_FINAL_PACKAGE_ACTION) {
+    const finalPackage = parseSpanishBlogFinalPackageOutput(body);
+    await assertSpanishBlogHeroResolvable(finalPackage.heroPath);
+    await updatePipelineItem(client, pipelineItemId, "final_check", {
+      ...metadata,
+      hero_image: {
+        ...finalPackage.heroImage,
+        status: "ready",
+        verified_at: now,
+      },
+      final_package: {
+        ...asRecord(metadata.final_package),
+        contract: SPANISH_BLOG_FINAL_PACKAGE_CONTRACT,
+        metadata_es: finalPackage.metadataEs,
+        hero_verified: true,
+        prepared_at: now,
+        source_work_item_id: updated.id,
+      },
+      final_check: {
+        ...asRecord(metadata.final_check),
+        status: "ready",
+        ready_at: now,
+        source_work_item_id: updated.id,
+      },
+    }, { contentBody: finalPackage.spanishMarkdown });
+    return { applied: true, effect: "spanish_blog_final_package_prepared" };
+  }
   const localizeAction = action === "localize_blog_to_en" || action === "localize_guide_to_en";
   if ((isBlog || isGuide) && localizeAction) {
     const localization = { ...asRecord(metadata.localization), en_ready: true, translated_at: now };

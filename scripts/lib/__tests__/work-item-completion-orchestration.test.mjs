@@ -17,6 +17,7 @@ const youtubeLaunchSource = resolve(repoRoot, "src/lib/youtube-launch-package.ts
 const youtubeLaunchStateSource = resolve(repoRoot, "src/lib/youtube-launch-state.ts");
 const externalDeliverySource = resolve(repoRoot, "src/lib/work-items/external-delivery.ts");
 const scheduledLaunchRuntimeSource = resolve(repoRoot, "src/lib/work-items/scheduled-launch-runtime.ts");
+const spanishFinalPackageSource = resolve(repoRoot, "src/lib/blogs/final-package.ts");
 
 function transpileModule(sourcePath, requires = {}) {
   const source = readFileSync(sourcePath, "utf8");
@@ -60,12 +61,19 @@ const youtubeLaunchPackage = transpileModule(youtubeLaunchSource, {
 const youtubeLaunchState = transpileModule(youtubeLaunchStateSource);
 const externalDelivery = transpileModule(externalDeliverySource);
 const scheduledLaunchRuntime = transpileModule(scheduledLaunchRuntimeSource);
+const spanishFinalPackage = transpileModule(spanishFinalPackageSource, {
+  "@/app/api/blogs/[id]/hero-image/local-image": {
+    resolveLocalImageFile: async (candidate) => ({ path: candidate, size: 100, contentType: "image/png" }),
+  },
+  "@/lib/blogs/hero-image-roots": { allowedBlogHeroImageRoots: () => ["/approved"] },
+});
 const { orchestrateWorkItemCompletion, buildPublicationVerificationRequest } = transpileModule(completionSource, {
   "@/lib/youtube-pipeline": youtubePipeline,
   "@/lib/youtube-launch-package": youtubeLaunchPackage,
   "@/lib/youtube-launch-state": youtubeLaunchState,
   "@/lib/work-items/external-delivery": externalDelivery,
   "@/lib/work-items/scheduled-launch-runtime": scheduledLaunchRuntime,
+  "@/lib/blogs/final-package": spanishFinalPackage,
   "@/lib/work-items/git-artifact": {
     verifyRepositoryCommit: async (repositoryPath, sha) => ({ repositoryPath, repositoryRoot: repositoryPath, sha }),
   },
@@ -132,8 +140,8 @@ async function insertPipelineItem(client, overrides = {}) {
   const result = await client.query(
     `insert into public.pipeline_items
        (id, pipeline_type, title, slug, status, priority, owner_agent, requested_by,
-        source_type, source_id, scheduled_for, published_at, current_url, metadata)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb)
+        source_type, source_id, scheduled_for, published_at, current_url, content_body, metadata)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb)
      returning *`,
     [
       id,
@@ -149,6 +157,7 @@ async function insertPipelineItem(client, overrides = {}) {
       values.scheduled_for || null,
       values.published_at || null,
       values.current_url || null,
+      values.content_body || null,
       JSON.stringify(values.metadata),
     ],
   );
@@ -238,6 +247,151 @@ const verifyPublishedContent = async ({ url }) => ({
   status: 200,
   errors: [],
   checks: { reachable: true },
+});
+
+test("Spanish final-package completion persists ES and verified hero without mutating legacy localization", async () => {
+  await inRollbackTransaction(async (client) => {
+    const localization = { en_ready: false, en: { slug: "legacy-en", title: "Legacy" } };
+    const pipelineItem = await insertPipelineItem(client, {
+      pipeline_type: "blog",
+      status: "localizing",
+      content_body: "Borrador anterior",
+      metadata: { localization, final_check: { status: "changes_requested" } },
+    });
+    const workItem = await insertWorkItem(client, pipelineItem, {
+      relation_type: "blog_final_package",
+      action: "prepare_blog_final_package",
+      contract: "spanish_final_package_v1",
+    });
+
+    const result = await orchestrateWorkItemCompletion(client, {
+      existing: workItem,
+      updated: completed(workItem),
+      body: { status: "done", output: { final_package: {
+        spanish_markdown: "# Paquete final ES\n\nContenido aprobado.",
+        metadata_es: { locale: "es", title: "Título final", slug: "titulo-final" },
+        hero_image: { media_path: "/approved/hero.png", width: 1200, height: 630 },
+      } } },
+      verifyPublishedContent,
+    });
+
+    assert.equal(result.effect, "spanish_blog_final_package_prepared");
+    const row = (await client.query("select status,content_body,metadata from pipeline_items where id=$1", [pipelineItem.id])).rows[0];
+    assert.equal(row.status, "final_check");
+    assert.equal(row.content_body, "# Paquete final ES\n\nContenido aprobado.");
+    assert.deepEqual(row.metadata.localization, localization);
+    assert.equal(row.metadata.final_package.contract, "spanish_final_package_v1");
+    assert.equal(row.metadata.final_package.metadata_es.locale, "es");
+    assert.equal(row.metadata.final_package.hero_verified, true);
+    assert.equal(row.metadata.hero_image.media_path, "/approved/hero.png");
+    assert.equal(row.metadata.final_check.status, "ready");
+  });
+});
+
+test("Spanish final-package completion fails closed on missing ES or hero and leaves the pipeline unchanged", async () => {
+  await inRollbackTransaction(async (client) => {
+    const metadata = { localization: { en_ready: false }, marker: "preserve" };
+    const pipelineItem = await insertPipelineItem(client, { pipeline_type: "blog", status: "localizing", content_body: "Original", metadata });
+    const workItem = await insertWorkItem(client, pipelineItem, {
+      relation_type: "blog_final_package",
+      action: "prepare_blog_final_package",
+    });
+
+    await assert.rejects(
+      () => orchestrateWorkItemCompletion(client, {
+        existing: workItem,
+        updated: completed(workItem),
+        body: { status: "done", output: { final_package: {
+          spanish_markdown: "# ES",
+          metadata_es: { locale: "es", title: "Título" },
+          hero_image: {},
+        } } },
+        verifyPublishedContent,
+      }),
+      /spanish_final_package_local_hero_required/,
+    );
+
+    const row = (await client.query("select status,content_body,metadata from pipeline_items where id=$1", [pipelineItem.id])).rows[0];
+    assert.equal(row.status, "localizing");
+    assert.equal(row.content_body, "Original");
+    assert.deepEqual(row.metadata, metadata);
+  });
+});
+
+test("legacy blog localization completion remains replay-compatible", async () => {
+  await inRollbackTransaction(async (client) => {
+    const pipelineItem = await insertPipelineItem(client, {
+      pipeline_type: "blog",
+      status: "localizing",
+      content_body: "ES intacto",
+      metadata: { localization: { en: { slug: "legacy" } }, marker: "preserve" },
+    });
+    const workItem = await insertWorkItem(client, pipelineItem, {
+      relation_type: "followup",
+      action: "localize_blog_to_en",
+    });
+
+    await orchestrateWorkItemCompletion(client, {
+      existing: workItem,
+      updated: completed(workItem),
+      body: { status: "done", output: { localization: { en: { slug: "legacy" } } } },
+      verifyPublishedContent,
+    });
+
+    const row = (await client.query("select status,content_body,metadata from pipeline_items where id=$1", [pipelineItem.id])).rows[0];
+    assert.equal(row.status, "final_check");
+    assert.equal(row.content_body, "ES intacto");
+    assert.equal(row.metadata.localization.en_ready, true);
+    assert.equal(row.metadata.localization.en.slug, "legacy");
+    assert.equal(row.metadata.marker, "preserve");
+    assert.equal(row.metadata.final_package, undefined);
+  });
+});
+
+test("agent completion rolls work-item done and package writes back together when final-package validation fails", async () => {
+  const pipelineId = randomUUID();
+  const workItemId = randomUUID();
+  await pool.query(
+    "insert into pipeline_items (id,pipeline_type,title,status,content_body,metadata) values ($1,'blog','Atomic ES package','localizing','Original ES',$2::jsonb)",
+    [pipelineId, JSON.stringify({ localization: { en_ready: false }, marker: "preserve" })],
+  );
+  await pool.query(
+    `insert into work_items
+       (id,kind,source_type,source_id,title,instruction,status,owner_agent,target_agent_id,payload)
+     values ($1,'task','pipeline_item',$2,'Prepare ES package','test','in_progress','content','content',$3::jsonb)`,
+    [workItemId, pipelineId, JSON.stringify({
+      pipeline_type: "blog",
+      pipeline_item_id: pipelineId,
+      relation_type: "blog_final_package",
+      action: "prepare_blog_final_package",
+    })],
+  );
+  try {
+    await assert.rejects(
+      () => agentCompletion.patchAgentWorkItemWithCompletion(workItemId, {
+        status: "done",
+        output: { final_package: {
+          spanish_markdown: "# Final ES",
+          metadata_es: { locale: "es", title: "Final" },
+          hero_image: {},
+        } },
+      }),
+      /spanish_final_package_local_hero_required/,
+    );
+    const work = (await pool.query("select status,completed_at,payload from work_items where id=$1", [workItemId])).rows[0];
+    const pipeline = (await pool.query("select status,content_body,metadata from pipeline_items where id=$1", [pipelineId])).rows[0];
+    const events = await pool.query("select id from event_log where entity_id=$1", [workItemId]);
+    assert.equal(work.status, "in_progress");
+    assert.equal(work.completed_at, null);
+    assert.equal(work.payload.output, undefined);
+    assert.equal(pipeline.status, "localizing");
+    assert.equal(pipeline.content_body, "Original ES");
+    assert.equal(pipeline.metadata.marker, "preserve");
+    assert.equal(events.rowCount, 0);
+  } finally {
+    await pool.query("delete from work_items where id=$1", [workItemId]);
+    await pool.query("delete from pipeline_items where id=$1", [pipelineId]);
+  }
 });
 
 test("community completion persists output copy and moves the pipeline card to ready_for_review", async () => {

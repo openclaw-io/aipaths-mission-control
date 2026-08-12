@@ -61,6 +61,12 @@ const completion = transpileModule(resolve(repoRoot, "src/lib/work-items/complet
   },
   "@/lib/work-items/external-delivery": {},
   "@/lib/work-items/scheduled-launch-runtime": {},
+  "@/lib/blogs/final-package": {
+    SPANISH_BLOG_FINAL_PACKAGE_ACTION: "prepare_blog_final_package",
+    SPANISH_BLOG_FINAL_PACKAGE_CONTRACT: "spanish_final_package_v1",
+    assertSpanishBlogHeroResolvable: async () => {},
+    parseSpanishBlogFinalPackageOutput: () => { throw new Error("unexpected Spanish final package"); },
+  },
   "@/lib/work-items/git-artifact": {
     verifyRepositoryCommit: async (repositoryPath, sha) => ({ repositoryPath, repositoryRoot: repositoryPath, sha }),
   },

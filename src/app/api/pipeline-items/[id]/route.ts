@@ -28,7 +28,7 @@ export async function GET(_: Request, { params }: { params: Promise<{ id: string
   const supabase = createServiceClient();
   const { data, error } = await supabase
     .from("pipeline_items")
-    .select("id,pipeline_type,title,slug,status,priority,owner_agent,requested_by,source_type,source_id,scheduled_for,published_at,current_url,content_path,content_format,metadata,created_at,updated_at")
+    .select("id,pipeline_type,title,slug,status,priority,owner_agent,requested_by,source_type,source_id,scheduled_for,published_at,current_url,content_path,content_format,content_body,metadata,created_at,updated_at")
     .eq("id", id)
     .maybeSingle();
 

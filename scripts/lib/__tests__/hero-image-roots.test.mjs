@@ -71,6 +71,13 @@ function loadRoute() {
       if (specifier === "node:os") return { homedir: () => "/Users/test" };
       if (specifier === "node:path") return path;
       if (specifier === "next/server") return { NextResponse: FakeNextResponse };
+      if (specifier === "@/lib/blogs/hero-image-roots") return {
+        allowedBlogHeroImageRoots: () => [
+          "/Users/test/.openclaw/media",
+          "/workspace/agents/director-content/work/localizations",
+          "/workspace-legacy/director-content/work/localizations",
+        ],
+      };
       if (specifier === "@/lib/agents-paths") return {
         directorRoot: () => "/workspace/agents/director-content",
         legacyDirectorRoot: () => "/workspace-legacy/director-content",

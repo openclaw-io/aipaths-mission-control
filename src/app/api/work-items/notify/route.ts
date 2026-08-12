@@ -336,8 +336,13 @@ function buildWorkItemStatusCommand(
   const envLocal = `${process.cwd()}/.env.local`;
   const envFile = `${process.cwd()}/.env`;
   const url = `http://localhost:3001/api/agent/work-items/${workItemId}`;
-  const payload = serializeWorkItemStatusPayload(status, workPayload);
   const authEnvironmentReference = String.fromCharCode(36) + "{AGENT_" + "API_KEY}";
+  if (status === "done" && workPayload?.action === "prepare_blog_final_package") {
+    const completionFileReference = String.fromCharCode(36) + "{SPANISH_FINAL_PACKAGE_COMPLETION_JSON:?Set SPANISH_FINAL_PACKAGE_COMPLETION_JSON}";
+    const script = `set -a; [ -f "${envLocal}" ] && . "${envLocal}"; [ -f "${envFile}" ] && . "${envFile}"; set +a; curl -s -X PATCH -H "Authorization: Bearer ${authEnvironmentReference}" -H "Content-Type: application/json" "${url}" --data-binary @"${completionFileReference}"`;
+    return `SPANISH_FINAL_PACKAGE_COMPLETION_JSON=/private/tmp/spanish-final-package-${workItemId}.json bash -lc ${shellSingleQuote(script)}`;
+  }
+  const payload = serializeWorkItemStatusPayload(status, workPayload);
   const script = `set -a; [ -f "${envLocal}" ] && . "${envLocal}"; [ -f "${envFile}" ] && . "${envFile}"; set +a; curl -s -X PATCH -H "Authorization: Bearer ${authEnvironmentReference}" -H "Content-Type: application/json" "${url}" -d '${payload}'`;
   return `bash -lc ${shellSingleQuote(script)}`;
 }
@@ -731,6 +736,24 @@ export async function POST(request: NextRequest) {
   const claimCommand = buildWorkItemStatusCommand(item.id, "in_progress", workPayload);
   const completeCommand = buildWorkItemStatusCommand(item.id, "done", workPayload);
   const failCommand = buildWorkItemStatusCommand(item.id, "failed", workPayload);
+
+  if (workPayload.action === "prepare_blog_final_package") {
+    message += `\n## REQUIRED: Spanish final-package completion contract
+Before running the completion command, write the referenced JSON file with this exact structure:
+\`\`\`json
+{
+  "status": "done",
+  "output": {
+    "final_package": {
+      "spanish_markdown": "# Final Spanish Markdown...",
+      "metadata_es": { "locale": "es", "title": "Spanish title" },
+      "hero_image": { "media_path": "/absolute/approved/local/path/hero.png" }
+    }
+  }
+}
+\`\`\`
+Mission Control rejects missing/non-Spanish metadata, remote-only hero URLs, files outside the approved roots, missing files, and unsupported image types. Do not include or alter English localization fields.`;
+  }
 
   message += `\n## REQUIRED: Update work item status via Mission Control API
 These commands load the Mission Control repo env before calling the API.

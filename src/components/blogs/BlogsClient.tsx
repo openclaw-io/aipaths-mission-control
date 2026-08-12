@@ -21,6 +21,7 @@ type BlogMetadata = {
   };
   hero_image?: { url?: string; media_path?: string; local_path?: string; path?: string; prompt?: string; status?: string; updated_at?: string; width?: number; height?: number; aspect_ratio?: string };
   cover_image?: { url?: string; media_path?: string; local_path?: string; path?: string; prompt?: string; status?: string; updated_at?: string; width?: number; height?: number; aspect_ratio?: string };
+  final_package?: { contract?: string; metadata_es?: { locale?: string; title?: string; slug?: string; description?: string }; hero_verified?: boolean; prepared_at?: string };
   final_check?: { status?: string; notes?: string; ready_at?: string; approved_at?: string };
 };
 
@@ -59,6 +60,7 @@ function getPrimaryWorkItem(itemId: string, workItems: LinkedWorkItem[]) {
   const relevant = workItems.filter((item) => item.source_id === itemId || item.payload?.pipeline_item_id === itemId);
   const score = (item: LinkedWorkItem) => {
     if (item.payload?.action === "publish_blog") return 4;
+    if (item.payload?.action === "prepare_blog_final_package") return 3;
     if (item.payload?.action === "localize_blog_to_en") return 3;
     if (item.payload?.action === "revise_blog_draft") return 2;
     if (item.payload?.action === "develop_blog_draft") return 1;
@@ -328,7 +330,7 @@ function FinalCheckList({ items, workItems, onOpen }: { items: BlogItem[]; workI
       <div className="mb-4 flex items-center justify-between">
         <div>
           <h2 className="text-lg font-semibold text-white">Final Check</h2>
-          <p className="text-xs text-gray-500">Approved blogs with EN localization and hero image ready for final publication approval.</p>
+          <p className="text-xs text-gray-500">Approved Spanish packages with verified hero image, ready for final publication approval.</p>
         </div>
         <span className="text-xs text-gray-500">{items.length}</span>
       </div>
@@ -361,7 +363,8 @@ function FinalCheckList({ items, workItems, onOpen }: { items: BlogItem[]; workI
                     <h3 className="font-medium text-white">{item.title}</h3>
                     <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-gray-500">
                       <span className={`rounded-full px-2 py-0.5 ${STATUS_STYLES[item.status] || "bg-gray-500/20 text-gray-300"}`}>{prettyStatus(item.status)}</span>
-                      <span>EN: {metadata.localization?.en_ready || metadata.localization?.en ? "ready" : "missing"}</span>
+                      <span>ES package: {metadata.final_package?.contract === "spanish_final_package_v1" ? "ready" : "legacy"}</span>
+                      {(metadata.localization?.en_ready || metadata.localization?.en) && <span>EN: legacy available</span>}
                       <span>Thumbnail: {hero ? "ready" : "missing"}</span>
                       {metadata.hero_image?.width && metadata.hero_image?.height && <span>{metadata.hero_image.width}×{metadata.hero_image.height}</span>}
                       {primaryWorkItem && <span>task: {primaryWorkItem.owner_agent || "unknown"} · {primaryWorkItem.status}</span>}
@@ -399,7 +402,7 @@ function FinalCheckDrawer({
   onReject: () => void;
 }) {
   const metadata = getMetadata(item);
-  const esMarkdown = metadata.draft_markdown || metadata.draft_summary || "No Spanish draft content found.";
+  const esMarkdown = item.content_body || metadata.draft_markdown || metadata.draft_summary || "No Spanish draft content found.";
   const enMarkdown = getEnglishMarkdown(metadata);
   const hasEnglishContent = Boolean(
     metadata.localization?.en?.draft_markdown ||
@@ -409,7 +412,7 @@ function FinalCheckDrawer({
   );
   const hero = getHeroImage(metadata);
   const heroSrc = getHeroImageSrc(item, metadata);
-  const [contentTab, setContentTab] = useState<"es" | "en">("en");
+  const [contentTab, setContentTab] = useState<"es" | "en">("es");
   const currentMarkdown = loading && (contentTab === "es" ? !metadata.draft_markdown : !hasEnglishContent) ? "Loading full blog content..." : contentTab === "es" ? esMarkdown : enMarkdown;
 
   return (
@@ -464,7 +467,7 @@ function FinalCheckDrawer({
                 <h3 className="text-sm font-semibold uppercase tracking-wide text-gray-400">Content preview</h3>
                 <div className="rounded-lg border border-gray-800 bg-[#111118] p-1">
                   <button type="button" onClick={() => setContentTab("es")} className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${contentTab === "es" ? "bg-white/10 text-white" : "text-gray-500 hover:text-white"}`}>ES</button>
-                  <button type="button" onClick={() => setContentTab("en")} className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${contentTab === "en" ? "bg-white/10 text-white" : "text-gray-500 hover:text-white"}`}>EN</button>
+                  {hasEnglishContent && <button type="button" onClick={() => setContentTab("en")} className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${contentTab === "en" ? "bg-white/10 text-white" : "text-gray-500 hover:text-white"}`}>EN legacy</button>}
                 </div>
               </div>
               <MarkdownPreview markdown={currentMarkdown} />
@@ -476,8 +479,8 @@ function FinalCheckDrawer({
           <div className="grid gap-4 lg:grid-cols-[1fr_auto] lg:items-end">
             <div>
               <label className="text-sm font-medium text-white" htmlFor="final-check-notes">Final-check notes</label>
-              <p className="mt-1 text-xs text-gray-500">Required only when sending the translation/thumbnail back for changes.</p>
-              <textarea id="final-check-notes" value={notes} onChange={(event) => onNotesChange(event.target.value)} placeholder="Example: regenerate thumbnail simpler, tighten EN title..." className="mt-2 h-24 w-full rounded-xl border border-gray-800 bg-[#0a0a0f] p-3 text-sm text-white outline-none transition placeholder:text-gray-600 focus:border-blue-500" />
+              <p className="mt-1 text-xs text-gray-500">Required only when sending the Spanish package or thumbnail back for changes.</p>
+              <textarea id="final-check-notes" value={notes} onChange={(event) => onNotesChange(event.target.value)} placeholder="Example: simplify the thumbnail and tighten the Spanish title..." className="mt-2 h-24 w-full rounded-xl border border-gray-800 bg-[#0a0a0f] p-3 text-sm text-white outline-none transition placeholder:text-gray-600 focus:border-blue-500" />
             </div>
             <div className="flex flex-wrap justify-end gap-2">
               <ActionButton label="Approve final" busy={busyAction === `${item.id}:approve_final`} onClick={onApprove} />
