@@ -2469,3 +2469,20 @@ GRANT EXECUTE ON FUNCTION public.qa_jsonb_canonical(jsonb),public.qa_jsonb_sha25
   public.qa_text_is_valid(text,integer),public.qa_target_url_is_valid(text),public.qa_policy_is_valid(jsonb),
   public.qa_result_is_valid(jsonb,text,jsonb) TO aipaths_mc_app;
 COMMIT;
+
+-- GON-226: scoped write path for pipeline_items so content-pipeline tools (e.g.
+-- video-validation-save.mjs and successors) don't need aipaths_mc_app's blanket
+-- CRUD-on-everything grant or raw superuser SQL. LOGIN password is set out of
+-- band (matches aipaths_mc_readonly convention) and is not committed here.
+BEGIN;
+DO $pipeline_writer_role$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='aipaths_mc_pipeline_writer') THEN
+    CREATE ROLE aipaths_mc_pipeline_writer LOGIN NOSUPERUSER NOINHERIT NOCREATEDB NOCREATEROLE NOREPLICATION;
+  END IF;
+END $pipeline_writer_role$;
+ALTER ROLE aipaths_mc_pipeline_writer LOGIN NOSUPERUSER NOINHERIT NOCREATEDB NOCREATEROLE NOREPLICATION;
+GRANT USAGE ON SCHEMA public TO aipaths_mc_pipeline_writer;
+REVOKE ALL ON ALL TABLES IN SCHEMA public FROM aipaths_mc_pipeline_writer;
+GRANT SELECT, INSERT, UPDATE ON public.pipeline_items TO aipaths_mc_pipeline_writer;
+COMMIT;
