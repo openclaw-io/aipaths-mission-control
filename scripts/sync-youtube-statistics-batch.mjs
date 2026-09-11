@@ -14,7 +14,7 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..');
-const DEFAULT_MCP_DIR = '/Users/joaco/openclaw/mcps/youtube_mcp';
+const DEFAULT_MCP_DIR = '/Users/joaco/Repos/mcps/youtube_mcp';
 const MCP_DIR = process.env.YOUTUBE_MCP_DIR || DEFAULT_MCP_DIR;
 const requireFromMcp = createRequire(path.join(MCP_DIR, 'package.json'));
 const { google } = requireFromMcp('googleapis');

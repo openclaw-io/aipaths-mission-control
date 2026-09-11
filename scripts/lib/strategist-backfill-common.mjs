@@ -19,7 +19,7 @@ const scriptsDir = path.resolve(__dirname, '..');
 const repoRoot = path.resolve(scriptsDir, '..');
 
 export const MISSION_CONTROL_ENV_PATH = path.join(repoRoot, '.env.local');
-export const ACADEMY_REPO_ROOT = '/Users/joaco/openclaw/repos/aipaths-academy';
+export const ACADEMY_REPO_ROOT = '/Users/joaco/Repos/repos/aipaths-academy';
 export const ACADEMY_ENV_PATH = path.join(ACADEMY_REPO_ROOT, '.env.local');
 
 export function loadEnvFile(envPath) {

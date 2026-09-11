@@ -17,8 +17,8 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..');
 const ENV_PATH = path.join(REPO_ROOT, '.env.local');
-const YOUTUBE_MCP_SCRIPT = '/Users/joaco/openclaw/mcps/youtube_mcp/dist/src/index.js';
-const YOUTUBE_MCP_ENV = '/Users/joaco/openclaw/mcps/youtube_mcp/.env';
+const YOUTUBE_MCP_SCRIPT = '/Users/joaco/Repos/mcps/youtube_mcp/dist/src/index.js';
+const YOUTUBE_MCP_ENV = '/Users/joaco/Repos/mcps/youtube_mcp/.env';
 
 function printUsage() {
   console.log('Usage:');

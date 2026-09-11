@@ -9,7 +9,7 @@ import { classifyOwnedYoutubeVideo, parseIsoDurationSeconds } from './lib/youtub
 
 const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const MISSION_ENV_PATH = path.join(REPO_ROOT, '.env.local');
-const YOUTUBE_MCP_ROOT = process.env.YOUTUBE_MCP_ROOT || '/Users/joaco/openclaw/mcps/youtube_mcp';
+const YOUTUBE_MCP_ROOT = process.env.YOUTUBE_MCP_ROOT || '/Users/joaco/Repos/mcps/youtube_mcp';
 const YOUTUBE_MCP_ENV_PATH = path.join(YOUTUBE_MCP_ROOT, '.env');
 const YOUTUBE_MCP_DB_PATH = path.join(YOUTUBE_MCP_ROOT, 'data', 'cache.db');
 

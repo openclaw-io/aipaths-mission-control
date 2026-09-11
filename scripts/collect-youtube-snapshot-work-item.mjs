@@ -10,7 +10,7 @@ const { Pool } = pg;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..');
-const DEFAULT_MCP_DIR = '/Users/joaco/openclaw/mcps/youtube_mcp';
+const DEFAULT_MCP_DIR = '/Users/joaco/Repos/mcps/youtube_mcp';
 const MCP_DIR = process.env.YOUTUBE_MCP_DIR || DEFAULT_MCP_DIR;
 const VIDEO_ID = 'YzZtrk_fkPA';
 const WORK_ITEM_ID = 'f39dd504-2812-4091-a301-447db16f95a8';
